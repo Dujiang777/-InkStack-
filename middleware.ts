@@ -40,6 +40,19 @@ function securityHeaders(): Record<string, string> {
 
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+// —— 渐进双轨切流：命中前缀的 /api/* 由 Java 后端应答，其余仍走 Node ——
+// 放在限流与 CSRF 之后：安全闸口始终在边缘生效，与"谁来处理这条请求"解耦。
+// JAVA_ROUTES 用逗号分隔路径前缀（按段匹配，/api/articles 不会顺带命中 /api/articlesXYZ），
+// 置 * 表示全量切流；清空即整体回滚到 Node，不需要改任何代码。
+const javaBase = (process.env.JAVA_BASE ?? "").replace(/\/+$/, "");
+const javaRoutes = (process.env.JAVA_ROUTES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+
+function routedToJava(pathname: string): boolean {
+  if (!javaBase || !pathname.startsWith("/api/")) return false;
+  if (javaRoutes.includes("*")) return true;
+  return javaRoutes.some((r) => pathname === r || pathname.startsWith(`${r}/`));
+}
+
 // —— 全站 API 滑窗限流（middleware edge 内存桶；多实例部署换 Redis） ——
 const g = globalThis as typeof globalThis & { __inkApiBuckets?: Map<string, number[]> };
 const apiBuckets = (g.__inkApiBuckets ??= new Map<string, number[]>());
@@ -106,6 +119,11 @@ export function middleware(req: NextRequest) {
   }
 
   const res = NextResponse.next();
+  if (routedToJava(pathname)) {
+    const proxied = NextResponse.rewrite(new URL(pathname + req.nextUrl.search, javaBase));
+    for (const [k, v] of Object.entries(securityHeaders())) proxied.headers.set(k, v);
+    return proxied;
+  }
   for (const [k, v] of Object.entries(securityHeaders())) {
     res.headers.set(k, v);
   }
