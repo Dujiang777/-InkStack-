@@ -1,0 +1,12 @@
+# AgentScope 智能体服务
+# 锁定 1.x：与 docs/AgentScope集成方案.md 中的 API（OpenAIChatFormatter 等）一致；2.x 升级列入 P1
+agentscope>=1.0.18,<2
+# 两个依赖坑（agentscope 未声明全，已实测踩坑）：
+#   1) mcp 必须 1.x：mcp 2.x 移除了 streamablehttp_client，会导致 import agentscope 失败
+mcp>=1.8,<2
+#   2) tqdm 缺失会让 import agentscope 报 ModuleNotFoundError
+tqdm>=4.66
+fastapi>=0.115
+uvicorn>=0.30
+pymysql>=1.1
+python-dotenv>=1.0

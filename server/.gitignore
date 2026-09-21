@@ -1,0 +1,3 @@
+target/
+config/application-local.properties
+*.local.properties

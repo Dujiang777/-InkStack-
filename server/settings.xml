@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  工程内 Maven 配置：全局 conf/settings.xml 的 imoveMirror（mirrorOf=external:*）指向
+  内网私服 nexus.svr:9090，本机不可达，会盖掉 pom 里声明的一切仓库。
+  本文件只替换本项目的解析路径，不改全局配置。
+  生效方式见同目录 .mvn/maven.config；IDE 构建需在设置里把 User settings file 指到这里。
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <mirrors>
+    <mirror>
+      <id>aliyun-public</id>
+      <mirrorOf>external:*</mirrorOf>
+      <url>https://maven.aliyun.com/repository/public</url>
+    </mirror>
+  </mirrors>
+</settings>
