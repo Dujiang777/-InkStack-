@@ -22,7 +22,7 @@
 | P0 | `server/` 工程立骨：Boot 3.5.16 + MyBatis-Plus + MySQL 连通 | ✅ | `mvn compile` 通过，`/actuator/health` UP |
 | P1 | 会话互通：HMAC Cookie + scrypt + sessions 表 + 登录/登出/me | ✅ | **双向 Cookie 互通 8/8** |
 | P2 | 双轨对拍闸门 + middleware 按模块切流 | ✅ | 切流/回滚实测通过 |
-| P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | 🔄 进行中 | 列表 + 详情已过闸；页面数据源垫片待做 |
+| P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | 🔄 进行中 | `listArticles`+`getArticle` 已切页面级验证（8 页逐字一致）；搜索/评论/作者页取数待迁 |
 | P1b | 认证剩余端点（注册 / 邮箱验证码 / 重置 / OAuth / 新设备邮件） | ⏳ | **完成前不切 `/api/auth/*`** |
 | P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ⏳ | 需并发对拍 |
 | P5 | 社区与运营台（评论 / 举报 / 审核 / 角色） | ⏳ | — |
@@ -33,6 +33,10 @@
 
 - `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/me`
 - `GET /api/articles` · `GET /api/articles/{slug}`
+
+页面侧（Server Component 进程内取数，不经 HTTP）：`listArticles` 与 `getArticle` 已可经
+`DATA_VIA_JAVA` 分流到 Java，默认关闭；首页、热榜、归档、周报、专栏架、作者页、文章页
+（含付费墙试读）均已在此模式下与 Node 逐字一致。
 
 ## 🏗 架构
 
@@ -90,6 +94,14 @@ node scripts/interop-check.mjs
 node scripts/paywall-probe.mjs bo-20260911-1
 #   按 匿名 / 运营 / 已购读者 / 登录但未购非作者 四种身份取样，
 #   覆盖 viewerUnlocked 的全部三个 SQL 分支，断言未解锁者正文行数 ≤ 6
+
+# 4) 页面级双轨：接口对拍管不到 Server Component 的进程内取数，
+#    所以再起一个 dev 实例（须独立 distDir，否则两者互冲 manifest），
+#    比较两种取数下读者真正看到的可见文本 / 链接序列 / 结构计数。
+#    注意：两侧都 500 会被显式判负——共同失败不是"一致"。
+NEXT_DIST_DIR=.next-java DATA_VIA_JAVA=listArticles,getArticle \
+  node node_modules/next/dist/bin/next dev -p 3300 &
+node scripts/page-parity.mjs / /article/pgvector-gou-yong /hot /archive /weekly /series /author/5
 ```
 
 切流与回滚：
@@ -114,7 +126,11 @@ JAVA_ROUTES=/api/articles            # 逗号分隔前缀；* 为全切；留空
 
 ## 🚀 快速开始
 
-环境要求：Node.js ≥ 20、**JDK 17+**、MySQL ≥ 8。（未配数据库时前端仍能以演示模式启动。）
+环境要求：Node.js **≥ 22**（20.x 必须 ≥ 20.19）、**JDK 17+**、MySQL ≥ 8。（未配数据库时前端仍能以演示模式启动。）
+
+> Node 版本是硬要求，不是建议：渲染层经 `isomorphic-dompurify` → `html-encoding-sniffer` 以
+> `require()` 加载 ESM-only 的 `@exodus/bytes`，Node 20.16 不支持 `require(esm)`，
+> 文章页会直接 500（与数据源无关，两种取数下同样炸）。
 
 ```bash
 # 1) 前端（与原项目完全相同）
