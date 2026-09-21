@@ -51,6 +51,11 @@
       <artifactId>bcprov-jdk18on</artifactId>
       <version>1.86</version>
     </dependency>
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <scope>provided</scope>
+    </dependency>
 
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -64,6 +69,10 @@
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <!-- Windows 控制台默认 GBK，日志里的中文栈会糊成乱码 -->
+          <jvmArguments>-Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8</jvmArguments>
+        </configuration>
       </plugin>
     </plugins>
   </build>
