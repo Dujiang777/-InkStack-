@@ -1,11 +1,30 @@
 ﻿// PUT    /api/articles/[slug] — 作者编辑文章（普通用户编辑后重新进入待审核；admin 编辑直接通过）
 // DELETE /api/articles/[slug] — 作者撤回自己的文章（status → removed，保留数据与积分流水）
+// GET    /api/articles/[slug] — 详情读取（新增：前端数据源垫片与双轨对拍的落点）
 import { NextResponse } from "next/server";
 import { getCurrentUser, isStaff } from "@/lib/auth";
 import { getPool, dbEnabled } from "@/lib/db";
 import { notify } from "@/lib/notify";
 import { grantCappedReward } from "@/lib/points";
-import { ensurePaidColumns, parseDiscount } from "@/lib/data";
+import { ensurePaidColumns, getArticle, parseDiscount } from "@/lib/data";
+
+/**
+ * 付费墙判定必须在服务端做完：先按 includeMd:false 取（SQL 层 SUBSTRING_INDEX 只回前 6 行），
+ * 仅作者/运营/已购读者才二次取全文。顺序不可颠倒——先取回全文再判权限，等于把
+ * 防泄漏的那道闸拆掉（dev 模式 RSC 会把结果序列化进 HTML）。
+ */
+export async function GET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const viewer = await getCurrentUser();
+  const privileged = isStaff(viewer?.role);
+  const seen = { id: viewer?.id ?? null, privileged };
+  const row = await getArticle(slug, seen, { includeMd: false });
+  if (!row) return NextResponse.json({ error: "文章不存在" }, { status: 404 });
+  const locked = (row.unlockPrice ?? 0) > 0 && !row.viewerUnlocked;
+  if (locked) return NextResponse.json({ article: row });
+  const full = await getArticle(slug, seen);
+  return NextResponse.json({ article: full ? { ...row, md: full.md } : row });
+}
 
 export async function PUT(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const user = await getCurrentUser();

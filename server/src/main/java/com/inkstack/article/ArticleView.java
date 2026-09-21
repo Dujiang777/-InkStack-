@@ -1,11 +1,7 @@
 package com.inkstack.article;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.inkstack.common.NodeShapes;
 import com.inkstack.entity.FeedArticle;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
@@ -33,49 +29,16 @@ public record ArticleView(
     long discountPrice,
     String discountUntil) {
 
-  private static final ObjectMapper MAPPER = new ObjectMapper();
-  private static final DateTimeFormatter NODE_ISO =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
-
+  /** 列表接口固定不携正文（md 恒为空串），全文只在详情接口按付费墙判定后给出。 */
   public static ArticleView from(FeedArticle row) {
     return new ArticleView(
-        row.getSlug(), row.getTitle(), row.getAuthor(), nullToEmpty(row.getAuthorAvatar()),
-        row.getAuthorId(), nullToEmpty(row.getSummary()), nullToEmpty(row.getCoverLabel()),
-        parseTags(row.getTags()), num(row.getReadCount()), num(row.getCommentCount()),
-        num(row.getAgentQaCount()), nullToEmpty(row.getPublishedAt()), "", num(row.getLikeCount()),
-        iso(row.getBoostUntil()), num(row.getTipTotal()), num(row.getUnlockPrice()),
-        num(row.getDiscountPrice()), iso(row.getDiscountUntil()));
-  }
-
-  /** 与 Node 同兜底：非数组或解析失败一律空数组，不让脏数据把整个信息流打挂。 */
-  private static List<String> parseTags(String json) {
-    if (json == null || json.isBlank()) {
-      return List.of();
-    }
-    try {
-      Object parsed = MAPPER.readValue(json, Object.class);
-      if (parsed instanceof List<?> list) {
-        return list.stream().map(String::valueOf).toList();
-      }
-      return List.of();
-    } catch (Exception malformed) {
-      return List.of();
-    }
-  }
-
-  /** DATETIME → 与 JS Date#toISOString 同格式的 UTC 串（毫秒恒显三位）。 */
-  private static String iso(LocalDateTime value) {
-    if (value == null) {
-      return null;
-    }
-    return NODE_ISO.format(value.atZone(ZoneId.systemDefault()).toInstant().atZone(ZoneOffset.UTC));
-  }
-
-  private static String nullToEmpty(String value) {
-    return value == null ? "" : value;
-  }
-
-  private static long num(Long value) {
-    return value == null ? 0L : value;
+        row.getSlug(), row.getTitle(), row.getAuthor(), NodeShapes.text(row.getAuthorAvatar()),
+        row.getAuthorId(), NodeShapes.text(row.getSummary()), NodeShapes.text(row.getCoverLabel()),
+        NodeShapes.tags(row.getTags()), NodeShapes.num(row.getReadCount()),
+        NodeShapes.num(row.getCommentCount()), NodeShapes.num(row.getAgentQaCount()),
+        NodeShapes.text(row.getPublishedAt()), "", NodeShapes.num(row.getLikeCount()),
+        NodeShapes.iso(row.getBoostUntil()), NodeShapes.num(row.getTipTotal()),
+        NodeShapes.num(row.getUnlockPrice()), NodeShapes.num(row.getDiscountPrice()),
+        NodeShapes.iso(row.getDiscountUntil()));
   }
 }

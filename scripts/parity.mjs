@@ -62,12 +62,18 @@ function parseTarget(spec) {
 async function call(base, spec, cookie) {
   const { method, path: p, body } = parseTarget(spec);
   const started = Date.now();
-  const res = await fetch(base + p, {
-    method,
-    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}) },
-    body: method === 'GET' ? undefined : body,
-    redirect: 'manual',
-  });
+  let res;
+  try {
+    res = await fetch(base + p, {
+      method,
+      headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}) },
+      body: method === 'GET' ? undefined : body,
+      redirect: 'manual',
+    });
+  } catch (down) {
+    // 一侧没起来时给出干净结论，而不是一串 undici 堆栈
+    return { status: 0, json: undefined, text: `${base} 请求失败：${down.cause?.code ?? down.message}`, ms: Date.now() - started };
+  }
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch { json = undefined; }
