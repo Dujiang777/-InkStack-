@@ -22,7 +22,7 @@
 | P0 | `server/` 工程立骨：Boot 3.5.16 + MyBatis-Plus + MySQL 连通 | ✅ | `mvn compile` 通过，`/actuator/health` UP |
 | P1 | 会话互通：HMAC Cookie + scrypt + sessions 表 + 登录/登出/me | ✅ | **双向 Cookie 互通 8/8** |
 | P2 | 双轨对拍闸门 + middleware 按模块切流 | ✅ | 切流/回滚实测通过 |
-| P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | 🔄 进行中 | `listArticles`+`getArticle` 已切页面级验证（8 页逐字一致）；搜索/评论/作者页取数待迁 |
+| P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | 🔄 进行中 | 文章页读侧（详情+评论+打赏+收藏+专栏导航+关注关系+我的专栏）已切，**6 页 × 4 身份 24/24 逐字一致**；搜索/热榜/归档/周报业待迁 |
 | P1b | 认证剩余端点（注册 / 邮箱验证码 / 重置 / OAuth / 新设备邮件） | ⏳ | **完成前不切 `/api/auth/*`** |
 | P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ⏳ | 需并发对拍 |
 | P5 | 社区与运营台（评论 / 举报 / 审核 / 角色） | ⏳ | — |
@@ -76,10 +76,13 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过三道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过四道机器闸门：
 
 ```bash
-# 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序
+# 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
+#    只打两栈都存在的 HTTP 路由；为 Java 新增的聚合端点（/api/users/{id}/relation、
+#    /api/articles/{slug}/tips|saved|series-nav、/api/series/mine）Node 侧没有对位路由，
+#    它们的形状契约由闸门 4 在渲染层验，用 1 打会得到 node=404 的假失败。
 node scripts/parity.mjs /api/articles /api/articles/pgvector-gou-yong
 node scripts/parity.mjs --login /api/auth/me          # 带登录态
 node scripts/parity.mjs "/api/search?q=then" "/api/hot"
@@ -98,10 +101,17 @@ node scripts/paywall-probe.mjs bo-20260911-1
 # 4) 页面级双轨：接口对拍管不到 Server Component 的进程内取数，
 #    所以再起一个 dev 实例（须独立 distDir，否则两者互冲 manifest），
 #    比较两种取数下读者真正看到的可见文本 / 链接序列 / 结构计数。
-#    注意：两侧都 500 会被显式判负——共同失败不是"一致"。
-NEXT_DIST_DIR=.next-java DATA_VIA_JAVA=listArticles,getArticle \
+#    两条铁律：
+#    · 两侧都 500 会被显式判负——共同失败不是"一致"。
+#    · **必须带 --login 逐个身份跑**。游客态下"Cookie 转发出错"和"Java 正常应答"
+#      渲染结果完全相同，闸门会替 bug 背书：本项目真实踩过一次把
+#      cookies().get().value（只有值）当 Cookie 头发给 Java，Java 认不出会话就把
+#      作者本人和已购买者一律降级成游客付费墙，24 个页面里只有带身份的 18 个能看出来。
+NEXT_DIST_DIR=.next-java DATA_VIA_JAVA='*' \
   node node_modules/next/dist/bin/next dev -p 3300 &
-node scripts/page-parity.mjs / /article/pgvector-gou-yong /hot /archive /weekly /series /author/5
+PAGES="/ /article/bo-20260911-1 /article/nei-rong-chuang-zuo-ai-shi-yong-shou-ce /author/9 /me /study"
+node scripts/page-parity.mjs $PAGES                    # 游客
+for ID in test writer probe; do node scripts/page-parity.mjs --login=$ID $PAGES; done
 ```
 
 切流与回滚：

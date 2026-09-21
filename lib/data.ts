@@ -2,7 +2,11 @@
 // 这样个人开发者可以先把界面跑起来，再接数据库
 import { getPool } from "./db";
 import { demoArticles, demoComments, type DemoArticle, type DemoComment } from "./demo-data";
-import { remoteGetArticle, remoteListArticles, viaJava } from "./java-source";
+import {
+  remoteGetArticle, remoteIsBookmarked, remoteFollowStats, remoteIsFollowing,
+  remoteListArticleTips, remoteListArticles, remoteListComments, remoteMySeries,
+  remoteSeriesNav, viaJava,
+} from "./java-source";
 
 /* ---------- 数据库可重试错误（v18.0） ----------
  * InnoDB 的死锁与锁等待超时属于**可重试**错误：官方建议由应用侧重放整个语句/事务。
@@ -358,6 +362,7 @@ export type ArticleTipRow = {
 };
 
 export async function listArticleTips(slug: string, limit = 6): Promise<ArticleTipRow[]> {
+  if (viaJava("listArticleTips")) return remoteListArticleTips(slug, limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -533,6 +538,8 @@ export async function toggleCommentLike(userId: number, commentId: number): Prom
 }
 
 export async function listComments(slug: string, viewerId?: number | null): Promise<CommentRow[]> {
+  // Java 从转发的 Cookie 里取浏览者身份，与这里显式传的 viewerId 同源（页面用的就是 getCurrentUser()）
+  if (viaJava("listComments")) return remoteListComments(slug);
   const pool = await getPool();
   if (pool) {
     try {
@@ -1399,6 +1406,7 @@ export type FollowStats = { followers: number; following: number };
 
 /** 某作者的粉丝/关注计数 */
 export async function followStats(userId: number): Promise<FollowStats> {
+  if (viaJava("followStats")) return remoteFollowStats(userId);
   const pool = await getPool();
   if (!pool) return { followers: 0, following: 0 };
   try {
@@ -1418,6 +1426,7 @@ export async function followStats(userId: number): Promise<FollowStats> {
 /** viewer 是否已关注 target */
 export async function isFollowing(followerId: number | null, followeeId: number): Promise<boolean> {
   if (!followerId) return false;
+  if (viaJava("isFollowing")) return remoteIsFollowing(followerId, followeeId);
   const pool = await getPool();
   if (!pool) return false;
   try {
@@ -1658,6 +1667,7 @@ export async function toggleBookmark(userId: number, slug: string): Promise<{ bo
 /** viewer 是否收藏了某篇 */
 export async function isBookmarked(userId: number | null, slug: string): Promise<boolean> {
   if (!userId) return false;
+  if (viaJava("isBookmarked")) return remoteIsBookmarked(userId, slug);
   const pool = await getPool();
   if (!pool) return false;
   try {
@@ -2505,6 +2515,7 @@ export type MySeries = {
 
 /** 书房管理器：我的专栏 + 各自篇目（含未发布，便于编辑） */
 export async function listMySeries(authorId: number): Promise<MySeries[]> {
+  if (viaJava("listMySeries")) return remoteMySeries();
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -2687,6 +2698,7 @@ export type ArticleSeriesNav = {
 
 /** 文章页专栏导航：文章所属专栏 + 上/下篇（取 position 最小的所属专栏） */
 export async function getArticleSeriesNav(slug: string): Promise<ArticleSeriesNav | null> {
+  if (viaJava("getArticleSeriesNav")) return remoteSeriesNav(slug);
   const pool = await getPool();
   if (!pool) return null;
   try {

@@ -8,8 +8,17 @@
 //   node scripts/page-parity.mjs --base-node=http://localhost:3200 --base-java=http://localhost:3300 / /article/xxx
 import { inspect } from "node:util";
 
+import fs from "node:fs";
+import path from "node:path";
+
+const root = path.resolve(import.meta.dirname, "..");
+const env = Object.fromEntries(
+  fs.readFileSync(path.join(root, ".env"), "utf8").split(/\r?\n/)
+    .map((l) => l.match(/^([A-Z0-9_]+)=(.*)$/)).filter(Boolean).map((m) => [m[1], m[2]])
+);
+
 const argv = process.argv.slice(2);
-const opts = { node: "http://localhost:3200", java: "http://localhost:3300", paths: [] };
+const opts = { node: "http://localhost:3200", java: "http://localhost:3300", paths: [], login: null };
 
 /** Git Bash(MSYS) 会把 POSIX 根映射成 Git 安装目录："/hot" → "D:/Git/hot"、"/" → "D:/Git/"。 */
 function pagePath(arg) {
@@ -22,7 +31,12 @@ function pagePath(arg) {
 for (const a of argv) {
   if (a.startsWith("--base-node=")) opts.node = a.slice(12);
   else if (a.startsWith("--base-java=")) opts.java = a.slice(12);
+  else if (a.startsWith("--login=")) opts.login = a.slice(8);
   else opts.paths.push(pagePath(a));
+}
+if (opts.login && !["test", "writer", "probe"].includes(opts.login)) {
+  console.error("--login 只接受 test / writer / probe（凭据取自本地 .env）");
+  process.exit(2);
 }
 if (!opts.paths.length) {
   console.error("至少给一个页面路径");
@@ -54,14 +68,45 @@ function shape(html) {
   };
 }
 
-async function get(base, p) {
-  const res = await fetch(base + p, { headers: { "user-agent": "inkstack-parity" }, cache: "no-store" });
+async function get(base, p, cookie) {
+  const res = await fetch(base + p, {
+    headers: { "user-agent": "inkstack-parity", ...(cookie ? { cookie } : {}) },
+    cache: "no-store",
+  });
   return { status: res.status, html: await res.text() };
 }
 
+/**
+ * 只在 node 侧登录一次，把同一枚 ink_session 同时发给两个实例。
+ * 这样既比了"同一身份看到的内容"，也顺带证明 Java 数据源实例认这枚 Cookie。
+ */
+async function loginCookie() {
+  const creds = {
+    test: [env.INK_TEST_EMAIL, env.INK_TEST_PASSWORD],
+    writer: [env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD],
+    probe: [env.INK_PROBE_EMAIL, env.INK_PROBE_PASSWORD],
+  }[opts.login];
+  if (!creds || !creds[0] || !creds[1]) throw new Error(`.env 缺少 ${opts.login} 的测试凭据`);
+  const res = await fetch(opts.node + "/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: creds[0], password: creds[1] }),
+  });
+  const body = await res.json();
+  if (!body.ok) throw new Error(`登录失败：${JSON.stringify(body)}`);
+  const cookie = (res.headers.getSetCookie() ?? [])
+    .map((c) => c.split(";")[0]).find((c) => c.startsWith("ink_session="));
+  if (!cookie) throw new Error("登录成功但没有 ink_session");
+  console.log(`已登录 ${creds[0]}（两实例共用同一枚 Cookie）\n`);
+  return cookie;
+}
+
+let cookie;
+if (opts.login) cookie = await loginCookie();
+
 let bad = 0;
 for (const p of opts.paths) {
-  const [n, j] = [await get(opts.node, p), await get(opts.java, p)];
+  const [n, j] = [await get(opts.node, p, cookie), await get(opts.java, p, cookie)];
   const a = shape(n.html), b = shape(j.html);
   const problems = [];
   // 两侧都 500 也"一致"，但那不是通过——共同失败必须显式判负，否则闸门会替 bug 背书。

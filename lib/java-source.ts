@@ -13,7 +13,9 @@
 //    伪装成"站点正常"，而 listArticles 原有的 catch-降级-to-demo 正是这个坑。
 import { cache } from "react";
 import { cookies } from "next/headers";
-import type { ArticleRow } from "./data";
+import type {
+  ArticleRow, ArticleSeriesNav, ArticleTipRow, CommentRow, FollowStats, MySeries,
+} from "./data";
 import type { SessionUser } from "./auth";
 
 const TIMEOUT_MS = 8_000;
@@ -32,10 +34,17 @@ export function viaJava(fn: string): boolean {
   return raw.split(",").map((s) => s.trim()).filter(Boolean).includes(fn);
 }
 
+/**
+ * 返回可直接用作 Cookie 请求头的字符串（`ink_session=<value>`），游客为空串。
+ *
+ * 注意 cookies().get() 给的是**去掉名字后的值**，直接当请求头发出去是一条畸形 Cookie，
+ * Java 侧解不出会话就把已登录读者当游客——付费墙会对作者本人和已购买者都判"未解锁"，
+ * 而页面仍然 200，只在正文处悄悄截断，极难从渲染结果反推。
+ */
 async function forwardCookie(): Promise<string> {
   try {
-    const jar = await cookies();
-    return jar.get("ink_session")?.value ?? "";
+    const value = (await cookies()).get("ink_session")?.value ?? "";
+    return value ? `ink_session=${value}` : "";
   } catch {
     // 非请求上下文（静态生成、脚本、sitemap）拿不到 Cookie：按游客身份取公开数据。
     return "";
@@ -88,4 +97,52 @@ export const remoteGetArticle = cache(async (slug: string): Promise<ArticleRow |
 
 export async function remoteMe(): Promise<{ user: SessionUser | null }> {
   return ask<{ user: SessionUser | null }>("/api/auth/me");
+}
+
+/* ---------- 文章页读侧 ----------
+ * Java 端一律从转发的 Cookie 里取当前身份，而 Node 侧这些函数的签名是显式传 viewerId/authorId。
+ * 两条路同源（页面用的就是 getCurrentUser() 的结果），所以不需要额外校验。
+ */
+
+/** 关注关系一次取全（粉丝数/关注数/我是否已关注）；同一渲染内合流，避免三次往返。 */
+export const remoteRelation = cache(async (userId: number): Promise<FollowStats & { viewerFollows: boolean }> =>
+  ask<FollowStats & { viewerFollows: boolean }>(`/api/users/${userId}/relation`));
+
+export async function remoteFollowStats(userId: number): Promise<FollowStats> {
+  const r = await remoteRelation(userId);
+  return { followers: r.followers, following: r.following };
+}
+
+export async function remoteIsFollowing(followerId: number | null, followeeId: number): Promise<boolean> {
+  if (!followerId) return false;
+  const r = await remoteRelation(followeeId);
+  return r.viewerFollows;
+}
+
+export async function remoteListComments(slug: string): Promise<CommentRow[]> {
+  const body = await ask<{ comments: CommentRow[] }>(`/api/articles/${encodeURIComponent(slug)}/comments`);
+  return body.comments;
+}
+
+export async function remoteListArticleTips(slug: string, limit: number): Promise<ArticleTipRow[]> {
+  const body = await ask<{ tips: ArticleTipRow[] }>(
+    `/api/articles/${encodeURIComponent(slug)}/tips?limit=${limit}`);
+  return body.tips;
+}
+
+export async function remoteIsBookmarked(userId: number | null, slug: string): Promise<boolean> {
+  if (!userId) return false;
+  const body = await ask<{ saved: boolean }>(`/api/articles/${encodeURIComponent(slug)}/saved`);
+  return Boolean(body.saved);
+}
+
+export const remoteSeriesNav = cache(async (slug: string): Promise<ArticleSeriesNav | null> => {
+  const body = await ask<{ nav: ArticleSeriesNav | null }>(
+    `/api/articles/${encodeURIComponent(slug)}/series-nav`);
+  return body.nav ?? null;
+});
+
+export async function remoteMySeries(): Promise<MySeries[]> {
+  const body = await ask<{ series: MySeries[] }>("/api/series/mine");
+  return body.series;
 }
