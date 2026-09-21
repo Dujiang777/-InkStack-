@@ -8,8 +8,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Component;
 
 /**
- * 登录爆破滑窗限流，语义对齐 lib/rate-limit.ts：窗口 15 分钟、5 次失败即锁，
- * hit 先记再判（所以第 5 次失败当场就锁），verdict 只查不记。
+ * 滑窗限流，语义对齐 lib/rate-limit.ts：hit 先记再判（所以第 max 次当场就锁），
+ * verdict 只查不记，clear 成功后清零。
+ *
+ * <p>默认窗口 15 分钟 / 5 次（登录爆破）；send-code 用 10 次，所以 max 走参数而不是再写一个类。
  *
  * <p>双轨期注意：这是<b>进程内</b>计数，Node 与 Java 各算各的，同一 IP 的实际容忍度
  * 会接近两栈之和。收口时机是全量切 Java 或换 Redis。
@@ -23,18 +25,26 @@ public class LoginGuard {
   private final Map<String, List<Long>> buckets = new ConcurrentHashMap<>();
 
   public Verdict verdict(String key) {
-    return evaluate(key, false);
+    return evaluate(key, MAX_FAILS, false);
+  }
+
+  public Verdict verdict(String key, int max) {
+    return evaluate(key, max, false);
   }
 
   public Verdict hit(String key) {
-    return evaluate(key, true);
+    return evaluate(key, MAX_FAILS, true);
+  }
+
+  public Verdict hit(String key, int max) {
+    return evaluate(key, max, true);
   }
 
   public void clear(String key) {
     buckets.remove(key);
   }
 
-  private Verdict evaluate(String key, boolean record) {
+  private Verdict evaluate(String key, int max, boolean record) {
     long now = System.currentTimeMillis();
     List<Long> hits = new ArrayList<>();
     List<Long> existing = buckets.get(key);
@@ -56,9 +66,9 @@ public class LoginGuard {
     if (buckets.size() > 5000) {
       sweepStale(now);
     }
-    boolean locked = hits.size() >= MAX_FAILS;
+    boolean locked = hits.size() >= max;
     long retryAfterSec = locked ? (long) Math.ceil((WINDOW_MS - (now - hits.get(0))) / 1000.0) : 0;
-    return new Verdict(locked, retryAfterSec, hits.size());
+    return new Verdict(locked, retryAfterSec, hits.size(), max);
   }
 
   private void sweepStale(long now) {
@@ -72,10 +82,10 @@ public class LoginGuard {
     }
   }
 
-  public record Verdict(boolean locked, long retryAfterSec, int fails) {
+  public record Verdict(boolean locked, long retryAfterSec, int fails, int max) {
 
     public int remaining() {
-      return MAX_FAILS - fails;
+      return max - fails;
     }
   }
 }

@@ -17,8 +17,9 @@ const env = Object.fromEntries(
   fs.readFileSync(path.join(root, ".env"), "utf8").split(/\r?\n/)
     .map((l) => l.match(/^([A-Z0-9_]+)=(.*)$/)).filter(Boolean).map((m) => [m[1], m[2]])
 );
-const NODE = env.PARITY_NODE || "http://localhost:3200";
-const JAVA = env.PARITY_JAVA || "http://localhost:3101";
+// 地址优先级：shell 环境变量 > .env > 默认（与 paywall-probe 同一条规则）。
+const NODE = process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200";
+const JAVA = process.env.PARITY_JAVA || env.PARITY_JAVA || "http://localhost:3101";
 
 const slug = (process.argv[2] ?? "").replace(/^\/+/, "");
 if (!slug) {

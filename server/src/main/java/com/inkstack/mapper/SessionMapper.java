@@ -39,4 +39,25 @@ public interface SessionMapper extends BaseMapper<Session> {
 
   @Select("SELECT COUNT(*) FROM sessions WHERE user_id = #{userId} AND ua = #{ua} AND revoked = 0")
   int countActiveByUa(@Param("userId") long userId, @Param("ua") String ua);
+
+  /** 重置密码后的全端下线（不分当前会话，与 Node 的 reset 分支一致）。 */
+  @Update("UPDATE sessions SET revoked = 1 WHERE user_id = #{userId} AND revoked = 0")
+  int revokeAllForUser(@Param("userId") long userId);
+
+  /** 设备管理：只取仍在有效期内的会话，按最后活跃时间倒序，最多 30 条。 */
+  @Select("SELECT id, token_hash AS tokenHash, ua, ip,"
+      + " DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s') AS createdAt,"
+      + " DATE_FORMAT(last_seen_at,'%Y-%m-%dT%H:%i:%s') AS lastSeenAt"
+      + " FROM sessions WHERE user_id = #{userId} AND revoked = 0 AND expires_at > NOW()"
+      + " ORDER BY last_seen_at DESC LIMIT 30")
+  java.util.List<com.inkstack.entity.SessionRow> listActive(@Param("userId") long userId);
+
+  /** 下线除当前会话外的全部（keepCurrent=false 时全下线）。 */
+  @Update("UPDATE sessions SET revoked = 1 WHERE user_id = #{userId} AND revoked = 0"
+      + " AND token_hash <> #{currentHash}")
+  int revokeOthers(
+      @Param("userId") long userId, @Param("currentHash") String currentHash);
+
+  @Update("UPDATE sessions SET revoked = 1 WHERE id = #{id} AND user_id = #{userId}")
+  int revokeOneOf(@Param("id") long id, @Param("userId") long userId);
 }

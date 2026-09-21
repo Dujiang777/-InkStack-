@@ -17,6 +17,8 @@ public class User {
   private String nickname;
   private String email;
   private String passwordHash;
+  /** 印章头像的字面（昵称首字），注册时写入 */
+  private String avatarText;
   private String role;
   private Long pointsBalance;
   private Integer banned;

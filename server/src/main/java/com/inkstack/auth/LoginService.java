@@ -4,13 +4,19 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.inkstack.common.Hex;
 import com.inkstack.entity.User;
+import com.inkstack.mail.Mailer;
 import com.inkstack.mapper.AuditMapper;
 import com.inkstack.mapper.SessionMapper;
 import com.inkstack.mapper.UserMapper;
 import com.inkstack.session.SessionService;
 import com.inkstack.web.ClientMeta;
 import jakarta.servlet.http.HttpServletResponse;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.CompletableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -29,6 +35,7 @@ public class LoginService {
   private final AuditMapper audit;
   private final SessionService sessionService;
   private final LoginGuard guard;
+  private final Mailer mailer;
   private final ObjectMapper mapper = new ObjectMapper();
 
   public LoginService(
@@ -36,12 +43,14 @@ public class LoginService {
       SessionMapper sessions,
       AuditMapper audit,
       SessionService sessionService,
-      LoginGuard guard) {
+      LoginGuard guard,
+      Mailer mailer) {
     this.users = users;
     this.sessions = sessions;
     this.audit = audit;
     this.sessionService = sessionService;
     this.guard = guard;
+    this.mailer = mailer;
   }
 
   public LoginResult login(String rawEmail, String password, String rawTotp, ClientMeta meta,
@@ -82,7 +91,12 @@ public class LoginService {
     sessionService.issue(user.getId(), meta, response);
     audit("login_ok", user.getId(), meta, null);
     if (newDevice) {
-      // 新设备邮件提醒尚未移植到 Java 侧：切流前 /api/auth/login 仍留在 Node。
+      // 新设备提醒：异步发、失败静默——一封提醒邮件绝不能把登录本身拖失败。
+      String time = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"))
+          .format(DateTimeFormatter.ofPattern("yyyy/M/d HH:mm:ss", Locale.CHINA));
+      String mailTo = user.getEmail();
+      Mailer sender = this.mailer;
+      CompletableFuture.runAsync(() -> sender.sendLoginAlert(mailTo, meta.ip(), meta.userAgent(), time));
       log.info("新设备登录 uid={} ip={} ua={}", user.getId(), meta.ip(), meta.userAgent());
     }
     return new LoginResult.Success(user.getId(), user.getNickname());

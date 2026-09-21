@@ -29,6 +29,14 @@ const out = [
   `SESSION_SECRET=${env.SESSION_SECRET ?? ''}`,
   `NEXT_PUBLIC_SITE_URL=${env.NEXT_PUBLIC_SITE_URL ?? ''}`,
   `TRUST_PROXY=${env.TRUST_PROXY ?? '0'}`,
+  // 邮件与运行环境：Java 进程不继承 .env，这些必须显式派生，
+  // 否则同一份配置会出现"Node 真发、Java 走 dev 降级"或"一侧回显 devCode 一侧不回显"的假差异。
+  `NODE_ENV=${env.NODE_ENV ?? 'development'}`,
+  `SMTP_HOST=${env.SMTP_HOST ?? ''}`,
+  `SMTP_PORT=${env.SMTP_PORT || '465'}`,
+  `SMTP_USER=${env.SMTP_USER ?? ''}`,
+  `SMTP_PASS=${env.SMTP_PASS ?? ''}`,
+  `SMTP_FROM=${env.SMTP_FROM ?? ''}`,
   '',
 ].join('\n');
 
