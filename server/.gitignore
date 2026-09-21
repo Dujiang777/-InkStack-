@@ -1,3 +1,5 @@
 target/
 config/application-local.properties
 *.local.properties
+logs/
+work/

@@ -2,6 +2,7 @@
 // 这样个人开发者可以先把界面跑起来，再接数据库
 import { getPool } from "./db";
 import { demoArticles, demoComments, type DemoArticle, type DemoComment } from "./demo-data";
+import { remoteGetArticle, remoteListArticles, viaJava } from "./java-source";
 
 /* ---------- 数据库可重试错误（v18.0） ----------
  * InnoDB 的死锁与锁等待超时属于**可重试**错误：官方建议由应用侧重放整个语句/事务。
@@ -128,6 +129,9 @@ function demoToRow(a: DemoArticle): ArticleRow {
 }
 
 export async function listArticles(): Promise<ArticleRow[]> {
+  // 分流走 Java 时异常必须抛出去：下方 SQL 路径的 catch 会降级成 demo 数据，
+  // 若把远程失败也吞进那个 catch，"Java 挂了"就会被伪装成"站点正常"。
+  if (viaJava("listArticles")) return remoteListArticles();
   const pool = await getPool();
   if (pool) {
     try {
@@ -248,6 +252,9 @@ export async function getArticle(
   viewer?: { id?: number | null; privileged?: boolean },
   opts?: { includeMd?: boolean }
 ): Promise<ArticleRow | null> {
+  // 分流到 Java 时 viewer / opts 不再参与：Java 按转发过去的 ink_session 自行判定身份，
+  // 付费墙与审核可见性都在服务端一次判清（详见 lib/java-source.ts 的合并说明）。
+  if (viaJava("getArticle")) return remoteGetArticle(slug);
   const pool = await getPool();
   const viewerId = viewer?.id ?? null;
   const privileged = Boolean(viewer?.privileged);

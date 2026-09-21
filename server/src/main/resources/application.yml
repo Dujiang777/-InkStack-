@@ -1,5 +1,16 @@
 server:
   port: ${SERVER_PORT:3101}
+  tomcat:
+    # 双轨取证用：访问日志是"这条请求真的落在 Java 上"的唯一硬证据（页面级切流的验证依赖它）。
+    # 注意 accesslog.directory 的相对路径是相对 Tomcat 的 base 目录解析的，
+    # 不设 basedir 时 base 目录是系统临时目录，日志会莫名找不到——这里显式钉在项目内。
+    basedir: .
+    accesslog:
+      enabled: true
+      directory: logs
+      prefix: access_log
+      suffix: .log
+      pattern: '%t "%m %U%q" %s %b %Dms %a'
 
 spring:
   application:
