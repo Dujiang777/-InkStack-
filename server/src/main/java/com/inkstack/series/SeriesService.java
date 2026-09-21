@@ -1,8 +1,11 @@
 package com.inkstack.series;
 
+import com.inkstack.common.NodeShapes;
 import com.inkstack.entity.SeriesHead;
 import com.inkstack.entity.SeriesItem;
+import com.inkstack.entity.SeriesRows;
 import com.inkstack.mapper.SeriesMapper;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -79,5 +82,57 @@ public class SeriesService {
     }
     SeriesItem item = items.get(i);
     return new SeriesNavView.Ref(item.getSlug(), item.getTitle());
+  }
+
+  /** 合集架：全站或某作者的专栏卡。authorId 为 null 时不加 WHERE（与 Node 同一分支）。 */
+  public List<SeriesViews.Card> cards(Long authorId, int limit) {
+    return series.cards(authorId, limit).stream().map(SeriesViews.Card::from).toList();
+  }
+
+  /**
+   * 专栏落地页。打包价、待解锁合计、付费篇数都在这一次算清，Node 侧不再二次计算。
+   *
+   * <p>{@code paidCount} 数的是<b>折后</b>价 &gt; 0 的篇目，{@code fullPrice} 只累加
+   * "当前这个人还没解锁"的篇目——两个口径都跟 viewer 有关，不是专栏的固有属性。
+   */
+  public SeriesViews.Detail detail(long id, Long viewerId) {
+    SeriesRows.Head head = series.detailHead(id);
+    if (head == null) {
+      return null;
+    }
+    List<SeriesViews.Item> items = series.detailItems(id, viewerId).stream()
+        .map(row -> itemOf(row, viewerId)).toList();
+    long fullPrice = items.stream().filter(SeriesViews.Item::lockedForViewer)
+        .mapToLong(SeriesViews.Item::unlockPrice).sum();
+    long bundle = NodeShapes.num(head.getBundlePrice());
+    boolean purchased = viewerId != null
+        && series.bundlePurchasedBy(id, viewerId) != null;
+    SeriesRows.Sold sold = series.soldStats(id);
+    return new SeriesViews.Detail(
+        head.getId(), head.getTitle(), NodeShapes.text(head.getDescription()), head.getAuthor(),
+        head.getAuthorAvatar() == null ? "墨" : head.getAuthorAvatar(), head.getAuthorId(), items,
+        bundle > 0 ? bundle : null, purchased, fullPrice,
+        items.stream().filter(x -> x.unlockPrice() > 0).count(),
+        sold == null ? 0L : NodeShapes.num(sold.getUnlocked()));
+  }
+
+  private static SeriesViews.Item itemOf(SeriesRows.Item row, Long viewerId) {
+    long price = effectivePrice(NodeShapes.num(row.getUnlockPrice()),
+        NodeShapes.num(row.getDiscountPrice()), row.getDiscountUntil());
+    boolean own = viewerId != null && viewerId.equals(row.getAuthorId());
+    boolean locked = price > 0 && !own && !NodeShapes.flag(row.getViewerUnlocked());
+    return new SeriesViews.Item(row.getSlug(), row.getTitle(), NodeShapes.num(row.getReadCount()),
+        NodeShapes.day(row.getPublishedAt()), price, locked);
+  }
+
+  /** 早鸟价：0 &lt; 折扣 &lt; 原价 且未到期才生效，否则原价（与 lib/data.ts effectiveUnlockPrice 同式）。 */
+  private static long effectivePrice(long original, long discount, LocalDateTime discountUntil) {
+    if (original <= 0 || discount <= 0 || discount >= original) {
+      return original;
+    }
+    if (discountUntil != null && !discountUntil.isAfter(LocalDateTime.now())) {
+      return original;
+    }
+    return discount;
   }
 }

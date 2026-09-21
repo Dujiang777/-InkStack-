@@ -1,7 +1,10 @@
 package com.inkstack.mapper;
 
 import com.inkstack.entity.ArticleDetail;
+import com.inkstack.entity.AuthorArticle;
 import com.inkstack.entity.FeedArticle;
+import com.inkstack.entity.MeRows;
+import com.inkstack.entity.StatRows;
 import java.util.List;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
@@ -106,4 +109,121 @@ public interface ArticleMapper {
       @Param("viewerId") Long viewerId,
       @Param("privileged") boolean privileged,
       @Param("full") boolean full);
+
+  /**
+   * 标签聚合页。{@code jsonTag} 由调用方拼成合法的 JSON 标量字面量（含引号、已转义），
+   * 因为 JSON_CONTAINS 的第二参要的是 JSON 文档而不是字符串——Node 版就是在传参前做的同样加工，
+   * 走占位符绑定，不参与 SQL 文本拼接。
+   */
+  @Select("""
+      SELECT a.slug, a.title, u.nickname AS author, u.avatar_text AS authorAvatar,
+             a.author_id AS authorId,
+             a.summary, IFNULL(a.cover_label,'') AS coverLabel, a.tags,
+             a.read_count AS readCount, a.comment_count AS commentCount,
+             a.agent_qa_count AS agentQaCount, a.like_count AS likeCount,
+             DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
+             (SELECT IFNULL(SUM(t.amount),0) FROM article_tips t
+               WHERE t.article_id = a.id) AS tipTotal
+        FROM articles a JOIN users u ON u.id = a.author_id
+       WHERE a.status = 'published' AND a.review_status = 'approved'
+         AND JSON_CONTAINS(a.tags, #{jsonTag})
+       ORDER BY a.published_at DESC LIMIT #{limit}
+      """)
+  List<AuthorArticle> listByTag(@Param("jsonTag") String jsonTag, @Param("limit") int limit);
+
+  /** 作者主页的公开文章列表：比标签页多三列定价、少一列 authorId（作者已由 WHERE 钉死）。 */
+  @Select("""
+      SELECT a.slug, a.title, u.nickname AS author, u.avatar_text AS authorAvatar,
+              a.summary, IFNULL(a.cover_label,'') AS coverLabel, a.tags,
+              a.read_count AS readCount, a.comment_count AS commentCount,
+              a.agent_qa_count AS agentQaCount, a.like_count AS likeCount,
+              DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
+              (SELECT IFNULL(SUM(t.amount),0) FROM article_tips t WHERE t.article_id = a.id) AS tipTotal,
+              IFNULL(a.unlock_price,0) AS unlockPrice,
+              IFNULL(a.discount_price,0) AS discountPrice,
+              a.discount_until AS discountUntil
+        FROM articles a JOIN users u ON u.id = a.author_id
+       WHERE a.author_id = #{authorId} AND a.status = 'published' AND a.review_status = 'approved'
+       ORDER BY a.published_at DESC LIMIT #{limit}
+      """)
+  List<AuthorArticle> listByAuthor(@Param("authorId") long authorId, @Param("limit") int limit);
+
+  /**
+   * 漫游记：随机取一篇公开且过审的文章。ORDER BY RAND() 在全表上是 O(n log n)，
+   * 但本站文章量级下 Node 也是同一条语句——换栈期不改语义，性能留给 P7。
+   */
+  @Select("""
+      SELECT slug FROM articles
+       WHERE status = 'published' AND review_status = 'approved' AND slug <> #{exclude}
+       ORDER BY RAND() LIMIT 1
+      """)
+  String randomSlug(@Param("exclude") String exclude);
+
+  /* ---------- 创作台 /study 的作者自查读接口（全部按 author_id 圈定，无跨作者泄露） ---------- */
+
+  /** 书房：本人全部文章，含待审/驳回/下架，所以 status 与 reviewStatus 都要带出去。 */
+  @Select("""
+      SELECT slug, title, status,
+             review_status AS reviewStatus, review_note AS reviewNote,
+             read_count AS readCount, like_count AS likeCount, comment_count AS commentCount,
+             agent_qa_count AS agentQaCount,
+             (SELECT IFNULL(SUM(t.amount),0) FROM article_tips t WHERE t.article_id = a.id) AS tipTotal,
+             (SELECT MAX(b.boost_until) FROM article_boosts b
+               WHERE b.article_id = a.id AND b.boost_until > NOW()) AS boostUntil,
+             DATE_FORMAT(updated_at,'%m-%d %H:%i') AS updatedAt
+        FROM articles a WHERE author_id = #{userId}
+        ORDER BY updated_at DESC LIMIT 100
+      """)
+  List<MeRows.Article> myArticles(@Param("userId") long userId);
+
+  /** 书房看板汇总。published/totalReads 等口径都限定"已发布且过审"，drafts 与 tipIncome 是独立子查询。 */
+  @Select("""
+      SELECT
+        COUNT(*) AS published,
+        IFNULL(SUM(read_count),0) AS totalReads,
+        IFNULL(SUM(like_count),0) AS totalLikes,
+        IFNULL(SUM(agent_qa_count),0) AS totalQa,
+        (SELECT COUNT(*) FROM articles WHERE author_id = #{userId} AND status = 'draft') AS drafts,
+        (SELECT IFNULL(SUM(amount),0) FROM article_tips WHERE to_user = #{userId}) AS tipIncome
+      FROM articles WHERE author_id = #{userId} AND status = 'published' AND review_status = 'approved'
+      """)
+  MeRows.ArticleStats myArticleStats(@Param("userId") long userId);
+
+  /** 作品数据看板：含未发布以外的一切（只排 deleted），按阅读降序、同阅读按 id 降序保证稳定。 */
+  @Select("""
+      SELECT a.slug, a.title, a.status, DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
+             a.read_count AS readCount, a.like_count AS likeCount, a.comment_count AS commentCount,
+             IFNULL((SELECT SUM(t.amount) FROM article_tips t WHERE t.article_id = a.id), 0) AS tipTotal,
+             (SELECT MAX(b.boost_until) FROM article_boosts b
+               WHERE b.article_id = a.id AND b.boost_until > NOW()) AS boostUntil
+        FROM articles a
+       WHERE a.author_id = #{authorId} AND a.status <> 'deleted'
+       ORDER BY GREATEST(a.read_count, 1) DESC, a.id DESC LIMIT #{limit}
+      """)
+  List<StatRows.AuthorStat> authorArticleStats(
+      @Param("authorId") long authorId, @Param("limit") int limit);
+
+  /** 付费转化漏斗：只看定价文章，按解锁数降序。 */
+  @Select("""
+      SELECT a.slug, a.title, a.read_count AS views, IFNULL(a.paywall_views,0) AS paywallViews,
+             (SELECT COUNT(*) FROM article_purchases ap WHERE ap.article_id = a.id) AS unlocks,
+             (SELECT IFNULL(SUM(ap.author_gain),0) FROM article_purchases ap WHERE ap.article_id = a.id) AS revenue
+        FROM articles a
+       WHERE a.author_id = #{authorId} AND a.status <> 'deleted' AND IFNULL(a.unlock_price,0) > 0
+       ORDER BY unlocks DESC, a.read_count DESC LIMIT 30
+      """)
+  List<StatRows.Funnel> myFunnel(@Param("authorId") long authorId);
+
+  /** 解锁收入明细：按成交价算，含"价格已改"的历史成交。总额与总单数在 Java 侧由明细汇总（与 Node 同法）。 */
+  @Select("""
+      SELECT a.slug, a.title, IFNULL(a.unlock_price,0) AS price,
+             COUNT(p.id) AS sales, IFNULL(SUM(p.author_gain),0) AS earned
+        FROM article_purchases p
+        JOIN articles a ON a.id = p.article_id
+       WHERE a.author_id = #{authorId}
+       GROUP BY a.id, a.slug, a.title
+       ORDER BY earned DESC, sales DESC
+       LIMIT 20
+      """)
+  List<StatRows.UnlockIncome> myUnlockIncome(@Param("authorId") long authorId);
 }

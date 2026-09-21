@@ -22,7 +22,7 @@
 | P0 | `server/` 工程立骨：Boot 3.5.16 + MyBatis-Plus + MySQL 连通 | ✅ | `mvn compile` 通过，`/actuator/health` UP |
 | P1 | 会话互通：HMAC Cookie + scrypt + sessions 表 + 登录/登出/me | ✅ | **双向 Cookie 互通 8/8** |
 | P2 | 双轨对拍闸门 + middleware 按模块切流 | ✅ | 切流/回滚实测通过 |
-| P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | 🔄 进行中 | 文章页读侧（详情+评论+打赏+收藏+专栏导航+关注关系+我的专栏）已切，**6 页 × 4 身份 24/24 逐字一致**；搜索/热榜/归档/周报业待迁 |
+| P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | ✅ | 读侧 27 个函数全切；**11 页 × 4 身份 44/44 逐字一致**，检索防泄漏探针 4/4 |
 | P1b | 认证剩余端点（注册 / 邮箱验证码 / 重置 / OAuth / 新设备邮件） | ⏳ | **完成前不切 `/api/auth/*`** |
 | P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ⏳ | 需并发对拍 |
 | P5 | 社区与运营台（评论 / 举报 / 审核 / 角色） | ⏳ | — |
@@ -34,9 +34,12 @@
 - `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/me`
 - `GET /api/articles` · `GET /api/articles/{slug}`
 
-页面侧（Server Component 进程内取数，不经 HTTP）：`listArticles` 与 `getArticle` 已可经
-`DATA_VIA_JAVA` 分流到 Java，默认关闭；首页、热榜、归档、周报、专栏架、作者页、文章页
-（含付费墙试读）均已在此模式下与 Node 逐字一致。
+页面侧（Server Component 进程内取数，不经 HTTP）：`lib/data.ts` 的**只读内容面已全部可分流**
+——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
+作者主页 / 专栏架 / 专栏落地页 / 周报计数 / 漫游记 / 个人中心六类足迹 / 创作台四组看板，
+由 `DATA_VIA_JAVA` 逐函数控制，默认关闭。
+`listHot` / `listRelated` / RSS / sitemap 不单独分流：它们是 `listArticles` 下游的纯 JS 组装，
+上游一切就跟着切，在 Java 里重算只会多出两套排序口径。
 
 ## 🏗 架构
 
@@ -97,6 +100,10 @@ node scripts/interop-check.mjs
 node scripts/paywall-probe.mjs bo-20260911-1
 #   按 匿名 / 运营 / 已购读者 / 登录但未购非作者 四种身份取样，
 #   覆盖 viewerUnlocked 的全部三个 SQL 分支，断言未解锁者正文行数 ≤ 6
+node scripts/search-leak-probe.mjs bo-20260911-1
+#   检索侧的纵深：拿**只出现在第 7 行之后**的词去搜，未解锁身份必须 0 命中
+#   （否则隐藏正文就是一个可无限探测的 oracle），有权身份必须命中且摘录 ≤120 字。
+#   若所有身份都不命中，探针自己判负——四条"不命中"可能只是空话。
 
 # 4) 页面级双轨：接口对拍管不到 Server Component 的进程内取数，
 #    所以再起一个 dev 实例（须独立 distDir，否则两者互冲 manifest），

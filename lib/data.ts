@@ -3,9 +3,12 @@
 import { getPool } from "./db";
 import { demoArticles, demoComments, type DemoArticle, type DemoComment } from "./demo-data";
 import {
-  remoteGetArticle, remoteIsBookmarked, remoteFollowStats, remoteIsFollowing,
-  remoteListArticleTips, remoteListArticles, remoteListComments, remoteMySeries,
-  remoteSeriesNav, viaJava,
+  remoteAuthorArticleStats, remoteFollowStats, remoteGetArticle, remoteGetAuthor, remoteIsBookmarked,
+  remoteIsFollowing, remoteListArticleTips, remoteListArticles, remoteListAuthorArticles, remoteListByTag,
+  remoteListComments, remoteListSeries, remoteMyArticles, remoteMyBookmarks, remoteMyComments,
+  remoteMyFollowers, remoteMyFollowing, remoteMyFunnel, remoteMyHistory, remoteMyLikes, remoteMySeries,
+  remoteMyUnlockIncome, remoteRandomSlug, remoteSearchArticles, remoteSeriesDetail, remoteSeriesNav,
+  remoteWeeklyStats, viaJava,
 } from "./java-source";
 
 /* ---------- 数据库可重试错误（v18.0） ----------
@@ -199,6 +202,7 @@ export async function listArticles(): Promise<ArticleRow[]> {
 /* ---------- 标签聚合页：/tag/[tag] ---------- */
 
 export async function listByTag(tag: string, limit = 50): Promise<ArticleRow[]> {
+  if (viaJava("listByTag")) return remoteListByTag(tag, limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -236,6 +240,25 @@ export async function listByTag(tag: string, limit = 50): Promise<ArticleRow[]> 
     }));
   } catch {
     return [];
+  }
+}
+
+/** 漫游记：随机取一篇公开且过审文章的 slug；无候选或库不可用时返回 null，页面据此回首页。
+ *  原先这条 SQL 直接写在 app/random/page.tsx 里，P3 收进数据层才能整体分流。 */
+export async function randomArticleSlug(exclude = ""): Promise<string | null> {
+  if (viaJava("randomArticleSlug")) return remoteRandomSlug(exclude);
+  const pool = await getPool();
+  if (!pool) return null;
+  try {
+    const [rows] = await pool.query(
+      `SELECT slug FROM articles
+       WHERE status = 'published' AND review_status = 'approved' AND slug != ?
+       ORDER BY RAND() LIMIT 1`,
+      [exclude.trim()]
+    );
+    return (rows as { slug?: string }[])[0]?.slug ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -416,6 +439,7 @@ export type MyStats = {
 
 /** 书房：我的全部文章（含待审/驳回/下架）+ 汇总数据 */
 export async function listMyArticles(userId: number): Promise<{ rows: MyArticleRow[]; stats: MyStats }> {
+  if (viaJava("listMyArticles")) return remoteMyArticles();
   const pool = await getPool();
   if (!pool)
     return { rows: [], stats: { published: 0, totalReads: 0, totalLikes: 0, tipIncome: 0, totalQa: 0, drafts: 0 } };
@@ -1342,6 +1366,7 @@ export async function searchArticles(
   limit = 20,
   viewerId?: number | null
 ): Promise<SearchResultRow[]> {
+  if (viaJava("searchArticles")) return remoteSearchArticles(q, limit, viewerId);
   const kw = q.trim().slice(0, 60);
   if (kw.length < 2) return [];
   const pool = await getPool();
@@ -1403,6 +1428,39 @@ export async function searchArticles(
 /* ---------- 关注系统：作者与读者建立长期连接（留存核心） ---------- */
 
 export type FollowStats = { followers: number; following: number };
+
+/** 关注列表里的一个人（粉丝/关注两个方向共用同一形状）。 */
+export type FollowPeer = {
+  id: number;
+  nickname: string;
+  avatarText: string;
+  avatarTone: string;
+  avatarShape: string;
+  bio: string;
+  articles: number;
+};
+
+/** 足迹里的一篇（点赞/收藏/阅读历史共用，各自再补自己的时间字段）。 */
+export type FootprintArticle = { slug: string; title: string; author: string; readCount: number };
+export type BookmarkRow = FootprintArticle & { savedAt: string };
+export type HistoryRow = FootprintArticle & { readAt: string; times: number };
+export type MyCommentRow = {
+  id: number;
+  content: string;
+  createdAt: string;
+  articleSlug: string;
+  articleTitle: string;
+};
+
+/** 每周墨报的本期计数。周报的其余字段是对已分流列表的 JS 组装，不在这份契约里。 */
+export type WeeklyStats = {
+  newArticles: number;
+  newUsers: number;
+  newComments: number;
+  newSeries: number;
+  tipCount: number;
+  tipInk: number;
+};
 
 /** 某作者的粉丝/关注计数 */
 export async function followStats(userId: number): Promise<FollowStats> {
@@ -1468,9 +1526,8 @@ export async function toggleFollow(
 }
 
 /** 关注我的人（个人中心·粉丝列表） */
-export async function listMyFollowers(userId: number, limit = 50): Promise<
-  { id: number; nickname: string; avatarText: string; avatarTone: string; avatarShape: string; bio: string; articles: number }[]
-> {
+export async function listMyFollowers(userId: number, limit = 50): Promise<FollowPeer[]> {
+  if (viaJava("listMyFollowers")) return remoteMyFollowers(limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -1502,9 +1559,8 @@ export async function listMyFollowers(userId: number, limit = 50): Promise<
 }
 
 /** 我关注的人（个人中心足迹） */
-export async function listMyFollowing(userId: number, limit = 50): Promise<
-  { id: number; nickname: string; avatarText: string; avatarTone: string; avatarShape: string; bio: string; articles: number }[]
-> {
+export async function listMyFollowing(userId: number, limit = 50): Promise<FollowPeer[]> {
+  if (viaJava("listMyFollowing")) return remoteMyFollowing(limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -1536,9 +1592,8 @@ export async function listMyFollowing(userId: number, limit = 50): Promise<
 }
 
 /** 我点赞过的文章（个人中心足迹） */
-export async function listMyLikes(userId: number, limit = 30): Promise<
-  { slug: string; title: string; author: string; readCount: number }[]
-> {
+export async function listMyLikes(userId: number, limit = 30): Promise<FootprintArticle[]> {
+  if (viaJava("listMyLikes")) return remoteMyLikes(limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -1564,9 +1619,8 @@ export async function listMyLikes(userId: number, limit = 30): Promise<
 }
 
 /** 我发表过的评论（个人中心足迹，带文章上下文） */
-export async function listMyComments(userId: number, limit = 30): Promise<
-  { id: number; content: string; createdAt: string; articleSlug: string; articleTitle: string }[]
-> {
+export async function listMyComments(userId: number, limit = 30): Promise<MyCommentRow[]> {
+  if (viaJava("listMyComments")) return remoteMyComments(limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -1684,9 +1738,8 @@ export async function isBookmarked(userId: number | null, slug: string): Promise
 }
 
 /** 我的收藏列表（个人中心足迹） */
-export async function listMyBookmarks(userId: number, limit = 50): Promise<
-  { slug: string; title: string; author: string; readCount: number; savedAt: string }[]
-> {
+export async function listMyBookmarks(userId: number, limit = 50): Promise<BookmarkRow[]> {
+  if (viaJava("listMyBookmarks")) return remoteMyBookmarks(limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -1752,9 +1805,8 @@ export async function recordRead(userId: number, slug: string): Promise<void> {
 }
 
 /** 我的阅读足迹（个人中心「最近读过」） */
-export async function listMyHistory(userId: number, limit = 30): Promise<
-  { slug: string; title: string; author: string; readCount: number; readAt: string; times: number }[]
-> {
+export async function listMyHistory(userId: number, limit = 30): Promise<HistoryRow[]> {
+  if (viaJava("listMyHistory")) return remoteMyHistory(limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -1798,6 +1850,7 @@ export type AuthorArticleStat = {
 };
 
 export async function authorArticleStats(authorId: number, limit = 50): Promise<AuthorArticleStat[]> {
+  if (viaJava("authorArticleStats")) return remoteAuthorArticleStats(authorId, limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -1865,6 +1918,7 @@ export type AuthorProfile = {
 };
 
 export async function getAuthor(id: number): Promise<AuthorProfile | null> {
+  if (viaJava("getAuthor")) return remoteGetAuthor(id);
   if (!Number.isInteger(id) || id <= 0) return null;
   const pool = await getPool();
   if (!pool) return null;
@@ -1905,6 +1959,7 @@ export async function getAuthor(id: number): Promise<AuthorProfile | null> {
 
 /** 某作者的公开文章（仅 approved），按发布时间倒序 */
 export async function listAuthorArticles(authorId: number, limit = 30): Promise<ArticleRow[]> {
+  if (viaJava("listAuthorArticles")) return remoteListAuthorArticles(authorId, limit);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -2373,6 +2428,7 @@ export type SeriesCard = {
 
 /** 合集架：全站专栏（只统计已发布且过审的篇目），按更新时间排；传 authorId 时只取该作者的 */
 export async function listSeries(limit = 60, authorId?: number): Promise<SeriesCard[]> {
+  if (viaJava("listSeries")) return remoteListSeries(limit, authorId);
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -2435,6 +2491,7 @@ export type SeriesDetail = {
 
 /** 专栏落地页：有序篇目（仅已发布且过审）+ 打包解锁视角 */
 export async function getSeriesDetail(id: number, viewer?: { id?: number | null }): Promise<SeriesDetail | null> {
+  if (viaJava("getSeriesDetail")) return remoteSeriesDetail(id);
   const pool = await getPool();
   if (!pool) return null;
   try {
@@ -2807,6 +2864,11 @@ export async function listWeekly(): Promise<WeeklyReport> {
     top, latest, series, weeks,
   };
   const pool = await getPool();
+  if (viaJava("listWeekly")) {
+    // 只把"本期计数"交给 Java：期号、近 6 周分桶、热榜与最新刊都是对已分流列表的 JS 组装，
+    // 周界算法留在唯一一侧，两栈才不会因为"本周从哪天开始"差出一天。
+    return { ...base, ...(await remoteWeeklyStats(fromStr)) };
+  }
   if (!pool) return base;
   try {
     const cnt = async (sql: string, args: unknown[] = []): Promise<number> => {
@@ -3277,6 +3339,7 @@ export async function recordPaywallView(slug: string): Promise<void> {
 
 /** 作者付费转化漏斗：阅读 → 付费墙 → 解锁（含收入），按解锁数降序 */
 export async function listMyFunnel(authorId: number): Promise<FunnelRow[]> {
+  if (viaJava("listMyFunnel")) return remoteMyFunnel();
   const pool = await getPool();
   if (!pool) return [];
   try {
@@ -3316,6 +3379,7 @@ export type UnlockIncome = {
 
 /** 我的名下文章被解锁的收入汇总（含价格已改的历史成交，按成交价算） */
 export async function listMyUnlockIncome(authorId: number): Promise<UnlockIncome> {
+  if (viaJava("listMyUnlockIncome")) return remoteMyUnlockIncome();
   const empty: UnlockIncome = { total: 0, sales: 0, byArticle: [] };
   const pool = await getPool();
   if (!pool || !authorId) return empty;

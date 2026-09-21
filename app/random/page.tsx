@@ -4,7 +4,7 @@
 // redirect() 由客户端按当前 origin 解析，预取/直跳都安全，且 RSC 预取可用。
 // 支持 ?exclude=slug 避免连续抽到同一篇
 import { redirect } from "next/navigation";
-import { getPool } from "@/lib/db";
+import { randomArticleSlug } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
 
@@ -14,21 +14,6 @@ export default async function RandomPage({
   searchParams: Promise<{ exclude?: string }>;
 }) {
   const { exclude = "" } = await searchParams;
-  const pool = await getPool();
-  let target = "/";
-  if (pool) {
-    try {
-      const [rows] = await pool.query(
-        `SELECT slug FROM articles
-         WHERE status = 'published' AND review_status = 'approved' AND slug != ?
-         ORDER BY RAND() LIMIT 1`,
-        [exclude.trim()]
-      );
-      const slug = (rows as { slug?: string }[])[0]?.slug;
-      if (slug) target = `/article/${slug}`;
-    } catch {
-      /* 落到兜底 */
-    }
-  }
-  redirect(target);
+  const slug = await randomArticleSlug(exclude);
+  redirect(slug ? `/article/${slug}` : "/");
 }

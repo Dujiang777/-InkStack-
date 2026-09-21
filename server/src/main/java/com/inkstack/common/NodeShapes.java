@@ -50,6 +50,15 @@ public final class NodeShapes {
     return value == null ? "" : value;
   }
 
+  /**
+   * DATETIME → 'YYYY-MM-DD'（UTC 日历日）。对齐 Node 的
+   * {@code v instanceof Date ? v.toISOString().slice(0,10) : String(v ?? "")}：
+   * NULL 落空串而不是 "null"，这一点曾让 /sitemap.xml 整站 500。
+   */
+  public static String day(LocalDateTime value) {
+    return value == null ? "" : iso(value).substring(0, 10);
+  }
+
   public static long num(Long value) {
     return value == null ? 0L : value;
   }
