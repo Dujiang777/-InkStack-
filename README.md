@@ -24,7 +24,7 @@
 | P2 | 双轨对拍闸门 + middleware 按模块切流 | ✅ | 切流/回滚实测通过 |
 | P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | ✅ | 读侧 27 个函数全切；**11 页 × 4 身份 44/44 逐字一致**，检索防泄漏探针 4/4 |
 | P1b | 认证剩余端点（注册 / 邮箱验证码 / 重置 / 2FA / 改密 / 设备管理 / OAuth） | ✅ | 跨栈认证流程 **25/25**（一侧签发、另一侧消费），切流代理 10/10 |
-| P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ⏳ | 需并发对拍 |
+| P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ✅ | 资金闸门 **100/100**：六路跨栈并发双击零 500、`Δ余额 = ΔΣ流水` 精确成立、幂等分支跨栈一致；切流代理含资金路径 **16/16** |
 | P5 | 社区与运营台（评论 / 举报 / 审核 / 角色） | ⏳ | — |
 | P6 | AI 分身：Spring AI Alibaba 替换 Python AgentScope 服务 | ⏳ | 需保持 NDJSON 契约 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
@@ -36,9 +36,23 @@
 - 安全中心：`POST /api/security/password` · `GET|DELETE /api/security/sessions`
   · `POST|PUT|DELETE /api/security/2fa`
 - 内容：`GET /api/articles` · `GET /api/articles/{slug}` · `GET /api/search`
+- 墨水经济：`POST /api/articles/{slug}/unlock|tip|boost` · `POST /api/series/{id}/bundle`
+  · `GET|POST /api/checkin` · `POST /api/me/badge-claim` · `GET|POST /api/topup/orders`
+  · `POST /api/topup/pay`（这一组只能按段通配逐条切，见"切流与回滚"）
 - 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
   `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
+
+移植资金链路时顺手修掉的两个 Node 侧既有 bug（都在 `lib/data.ts` / `app/api/checkin`，
+与换栈无关，但对拍要求两侧同口径，所以两边一起改）：
+
+- `listAchievements` 把 mysql2 返回的 `Date` 直接 `String(date).slice(0, 10)` 当日期键，得到的是
+  `"Mon Sep "` 而不是 `"2026-09-14"`，与查询键永不相等 → 连签徽章恒为 0、集齐奖励领不到。
+  改成本地日历日键 `localDayKey()`（DATE 列回来是"本地零点的 Date"，不能用 `toISOString()`，那会早一天）。
+- 同函数里 `num(results[4])` 按默认列名 `"n"` 取值，而 `results[4]` 的列是 `points_balance`，
+  恒得 `undefined → 0`，"墨水富翁"徽章因此永远算不出来。
+- 同键并发插入 InnoDB 未必回 dup key，也可能回死锁 / 锁等待超时，两侧原先都把它当"签到失败"返回。
+  现按 `isRetryableLockError` 重试三次（30ms×attempt），Node 与 Java 用同一套口径。
 
 页面侧（Server Component 进程内取数，不经 HTTP）：`lib/data.ts` 的**只读内容面已全部可分流**
 ——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
@@ -85,7 +99,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过六道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过八道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -94,7 +108,9 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 #    它们的形状契约由闸门 4 在渲染层验，用 1 打会得到 node=404 的假失败。
 node scripts/parity.mjs /api/articles /api/articles/pgvector-gou-yong
 node scripts/parity.mjs --login /api/auth/me          # 带登录态
-node scripts/parity.mjs "/api/search?q=then" "/api/hot"
+node scripts/parity.mjs "/api/search?q=then" /api/checkin /api/topup/orders
+#   目标必须挑"两栈都挂了同方法"的 URL：打一个 Node 没有 GET 的路径（如 /api/series/{id}）
+#   会得到 node=405 java=200 的假失败——那是切流缺口，该由闸门 8 报，不该由对拍报。
 
 # 2) 会话互通：两侧各自登录，要求对方后端用自己的完整校验链认下这枚 Cookie
 node scripts/interop-check.mjs
@@ -150,6 +166,26 @@ node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
 #   X-Backend: inkstack-java 由 Java 过滤器打上，是"这条请求确实落在 Java"的唯一硬证据；
 #   同时反向断言 /api/articles 与 /api/articlesXYZ 仍由 Node 应答（切流不能过宽），
 #   并断言跨站 Origin 的写请求在边缘就 403（安全闸口不随切流下沉）。
+
+# 7) 资金闸门：对拍只能比"读到的东西"，钱要的三件它表达不了——
+#    ① 同一笔写一侧执行、另一侧看得懂（已购/已打包/已签/已付 的幂等分支跨栈一致）；
+#    ② 六路并发双击两栈不打折：账务只动一次，败者拿到"已成交/余额不足"，绝不是一路 500；
+#    ③ 增量精确：Δ余额 = ΔΣ流水 + 脚本手工注入的量，且 reason / 金额 / 明细行等于分账公式的结果。
+node scripts/money-check.mjs
+#   解锁 70·30、打赏 90·10、打包按 floor(price/n) 比例分账且余数归首条、加热 80/24h、
+#   签到 7 天周期 10/10/20/10/20/10/40、集章 100、充值四档——七个环节 + 账实核对共 100 项。
+#   ⚠ 会真扣真加真删：必须确认 DATABASE_URL 指向克隆库，跑完 finally 自动清场（并自检没留东西）。
+#   --keep 保留现场排查。
+#   这一道闸门抓到的真 bug：六路并发签到 Java 返回 500——同主键并发插入 InnoDB 未必给
+#   DuplicateKey，也可能给死锁回滚，Spring 翻译出的就不是 DataIntegrityViolationException。
+#   Node 侧同样有这个洞（dev 模式编译串行化掩盖了它），两侧一并补了"锁冲突重试三次"。
+
+# 8) 路由清单：切流是**前缀级**的，而两栈在同一 URL 上的方法集合并不天然相同——
+#    Node 的 GET /api/series 是"我的专栏"（要登录），Java 的是公开合集架。
+#    切了就把书房管理器打成 200 空列表，且不会有任何报错，对拍也测不出（只比两边都有的路由）。
+node scripts/route-inventory.mjs          # 列缺口 + 算出当前可整体切流的最长前缀
+node scripts/route-inventory.mjs --json   # 机器可读
+#   退出码恒 0：这是进度条不是判分。改完任一侧路由都要重跑一次再决定切流范围。
 ```
 
 切流与回滚：
@@ -159,6 +195,24 @@ node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
 JAVA_BASE=http://localhost:3101
 JAVA_ROUTES=/api/articles            # 逗号分隔前缀；* 为全切；留空即整套回滚
 ```
+
+前缀太粗时可用**段通配**逐条切：条目里的 `*` 只匹配一个路径段，其余字符按字面转义，
+命中判断仍是 `^前缀(?:/|$)`。所以 `/api/articles/*/unlock` 只把解锁这一个动作交给 Java，
+同前缀下的 `PUT /api/articles/{slug}`（Java 还没有）继续留在 Node——
+P4 的资金端点就是这样切走的，`/api/articles` 整前缀要等 P5/P6 补齐 POST/PUT/DELETE/like/bookmark 之后。
+
+闸门 6/7 用的那个"已切流"实例就是这么起的（第二个 dev 实例必须给独立 distDir）：
+
+```bash
+NEXT_DIST_DIR=.next-cutover \
+JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,\
+/api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/series/*/bundle \
+  node node_modules/next/dist/bin/next dev -p 3400
+node scripts/proxy-cutover-check.mjs --money --base=http://localhost:3400
+```
+
+临时实例会把 `next-env.d.ts` / `tsconfig.json` 里的构建目录指针改写成 `.next-cutover`，**提交前 revert 这两个文件**；
+跑完顺手把 `.next-cutover` 和这个进程一起清掉。
 
 ## 🔒 会话互通是字节级的
 
@@ -219,12 +273,14 @@ mvn spring-boot:run                  # http://localhost:3101
 │   ├── settings.xml        #    工程内 Maven 镜像（不改全局）
 │   └── src/main/java/com/inkstack/
 │       ├── article/ auth/ points/ session/   # 按领域分包
+│       ├── money/                            # 资金原子链路：解锁/打赏/加热/打包/签到/徽章/充值
 │       ├── entity/ mapper/                   # MyBatis-Plus：实体与手写 SQL 映射
-│       ├── common/                           # NodeShapes：JDBC 结果 → Node 取值语义
+│       ├── common/                           # NodeShapes / Pricing：Node 取值语义与分账口径
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── agent-service/          # Python AgentScope 分身服务（P6 替换）
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # parity / interop-check / paywall-probe / 种子与运维脚本
+├── scripts/                # 八道闸门（parity / interop / paywall / page-parity / auth-flow /
+│                           #   proxy-cutover / money-check / route-inventory）+ 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
 

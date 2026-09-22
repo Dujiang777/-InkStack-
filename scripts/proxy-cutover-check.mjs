@@ -8,6 +8,12 @@
 // 的唯一硬证据。
 //
 //   node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
+//                                      [--keep=/api/articles] [--money]
+//
+// --keep  声明"这一次必须仍由 Node 应答"的前缀：切流范围变了，这个负断言也要跟着换，
+//         否则"未切流"的断言会在切到 /api/articles 那一档时自己打自己。
+// --money 追加资金写链路经代理的证据（P4）。只挑不改账的用例：
+//         已签到用户的 POST /api/checkin → already；非法档位的 POST tip → 400。
 import fs from "node:fs";
 import path from "node:path";
 
@@ -16,8 +22,13 @@ const env = Object.fromEntries(
   fs.readFileSync(path.join(root, ".env"), "utf8").split(/\r?\n/)
     .map((l) => l.match(/^([A-Z0-9_]+)=(.*)$/)).filter(Boolean).map((m) => [m[1], m[2]])
 );
-const base = (process.argv.find((a) => a.startsWith("--base=")) ?? "").slice(7)
-  || process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200";
+const arg = (name, dflt) => {
+  const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
+  return hit ? hit.slice(name.length + 3) : dflt;
+};
+const base = arg("base", process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200");
+const KEEP_PREFIX = arg("keep", "/api/articles");
+const MONEY = process.argv.includes("--money");
 
 let pass = 0;
 let fail = 0;
@@ -53,12 +64,12 @@ if (routed.status === 200 && routed.backend === "inkstack-java") ok("/api/auth/p
 else bad("/api/auth/providers 经 Next 转给 Java", `${routed.status} backend=${routed.backend || "无"}`);
 
 // 2) 没在 JAVA_ROUTES 里的前缀不得被带走（段匹配，且不能误伤）
-const kept = await call("GET", "/api/articles");
-if (kept.status === 200 && kept.backend === "") ok("/api/articles 仍在 Node 应答");
-else bad("/api/articles 仍在 Node 应答", `backend=${kept.backend || "无"}`);
-const sneaky = await call("GET", "/api/articlesXYZ");
-if (sneaky.backend === "") ok("前缀相似路径未被错切（/api/articlesXYZ）");
-else bad("前缀相似路径未被错切", `backend=${sneaky.backend}`);
+const kept = await call("GET", KEEP_PREFIX);
+if (kept.backend === "") ok(`${KEEP_PREFIX} 仍在 Node 应答`);
+else bad(`${KEEP_PREFIX} 仍在 Node 应答`, `backend=${kept.backend}`);
+const sneaky = await call("GET", `${KEEP_PREFIX}XYZ`);
+if (sneaky.backend === "") ok(`前缀相似路径未被错开（${KEEP_PREFIX}XYZ）`);
+else bad("前缀相似路径未被错开", `backend=${sneaky.backend}`);
 
 // 3) POST 体要穿过 rewrite，Set-Cookie 要能被浏览器收下
 const creds = [env.INK_TEST_EMAIL, env.INK_TEST_PASSWORD];
@@ -76,10 +87,10 @@ if (!cookie) {
   if (me.json?.user?.email === creds[0]) ok("/api/auth/me 认得这枚 Cookie", `uid=${me.json.user.id}`);
   else bad("/api/auth/me 认得这枚 Cookie", `${me.status} ${me.text.slice(0, 90)}`);
 
-  // 4) PUT/DELETE 带体也要过 rewrite：这里只验证不 500 + 归属正确，业务语义由跨栈闸门覆盖
-  const put = await call("PUT", "/api/security/2fa", { body: { code: "000000" }, cookie });
-  if (put.backend === "") ok("未切流前缀仍由 Node 应答（/api/security 不在 JAVA_ROUTES）");
-  else bad("未切流前缀归属", `backend=${put.backend}`);
+  // 4) 未切流前缀上的写不得被段通配顺走：/api/articles/*/unlock 只该带走 unlock 那一支
+  const keepWrite = await call("PUT", `${KEEP_PREFIX}/__cutover_probe__`, { body: {}, cookie });
+  if (keepWrite.backend === "") ok(`未切流前缀的写仍由 Node 应答（${KEEP_PREFIX}/*）`, `status=${keepWrite.status}`);
+  else bad("未切流前缀的写归属", `backend=${keepWrite.backend}`);
 
   const out = await call("POST", "/api/auth/logout", { body: {}, cookie });
   const cleared = setCookie(out.res);
@@ -95,6 +106,33 @@ const csrf = await call("POST", "/api/auth/login",
   { body: { email: creds[0], password: creds[1] }, headers: { origin: "https://evil.example" } });
 if (csrf.status === 403 && csrf.backend === "") ok("CSRF 仍在边缘生效（未随切流下沉）");
 else bad("CSRF 仍在边缘生效", `${csrf.status} backend=${csrf.backend || "无"}`);
+
+// 6) P4 资金写链路经代理：只挑"不改账"的入口——未登录、已领过、档位非法
+if (MONEY) {
+  const login2 = await call("POST", "/api/auth/login", { body: { email: creds[0], password: creds[1] } });
+  const c2 = setCookie(login2.res);
+  const probes = [
+    ["未登录解锁 → 401", "POST", "/api/articles/qian-duan-xing-neng-you-hua-qing-dan/unlock", {}, undefined, 401],
+    ["签到状态查询 → 200", "GET", "/api/checkin", undefined, c2, 200],
+    ["徽章领取（未集齐）→ 400", "POST", "/api/me/badge-claim", {}, c2, 400],
+    ["非法打赏档位 → 400", "POST", "/api/articles/bo-20260911-1/tip", { amount: 7 }, c2, 400],
+    ["收银台套餐 → 200", "GET", "/api/topup/orders", undefined, undefined, 200],
+  ];
+  for (const [label, method, p, body, cookie, want] of probes) {
+    const r = await call(method, p, { body, cookie });
+    const shape = p === "/api/checkin" ? typeof r.json?.checkedInToday === "boolean"
+      : p === "/api/topup/orders" ? Array.isArray(r.json?.packs)
+      : p.endsWith("/tip") ? r.json?.error === "打赏档位须为 10 或 50 点墨"
+      : r.json?.error !== undefined;
+    if (r.status === want && r.backend === "inkstack-java" && shape) ok(`经代理的${label}`, `backend=${r.backend}`);
+    else bad(`经代理的${label}`, `${r.status}/${want} backend=${r.backend || "无"} body=${r.text.slice(0, 70)}`);
+  }
+  // 资金写同样必须吃边缘 CSRF：这条若被放过，等于给"跨站刷墨"开门
+  const moneyCsrf = await call("POST", "/api/articles/bo-20260911-1/tip",
+    { body: { amount: 10 }, cookie: c2, headers: { origin: "https://evil.example" } });
+  if (moneyCsrf.status === 403 && moneyCsrf.backend === "") ok("资金写请求的 CSRF 也在边缘拦住");
+  else bad("资金写请求的 CSRF 也在边缘拦住", `${moneyCsrf.status} backend=${moneyCsrf.backend || "无"}`);
+}
 
 console.log(`\nbase=${base}  合计 ${pass + fail} 项，失败 ${fail} 项`);
 process.exit(fail ? 1 : 0);

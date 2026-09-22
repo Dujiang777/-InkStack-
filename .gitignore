@@ -1,9 +1,8 @@
 # 依赖与构建产物
 node_modules/
+# 双轨验证的第二个 dev 实例各自要独立构建目录（NEXT_DIST_DIR），名字随场景变，一律不入库
 .next/
-.next-stale*/
-.next-java/
-.next-node/
+.next-*/
 .next.bak.*/
 out/
 tsconfig.tsbuildinfo

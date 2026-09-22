@@ -18,13 +18,13 @@ import {
  */
 const RETRYABLE_LOCK_ERRORS = new Set(["ER_LOCK_DEADLOCK", "ER_LOCK_WAIT_TIMEOUT"]);
 
-function isRetryableLockError(e: unknown): boolean {
+export function isRetryableLockError(e: unknown): boolean {
   const code = (e as { code?: unknown } | null | undefined)?.code;
   return typeof code === "string" && RETRYABLE_LOCK_ERRORS.has(code);
 }
 
 /** 退避等待（带抖动由调用方给值，避免并发重试同步对撞） */
-function sleepMs(ms: number): Promise<void> {
+export function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -76,6 +76,21 @@ function dateOnly(v: unknown): string {
   if (v == null) return "";
   const s = v instanceof Date ? v.toISOString() : String(v);
   return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : "";
+}
+
+/** 服务器本地日历日键（'YYYY-MM-DD'）。
+ *  与 dateOnly() 的区别是**必须**的：DATE 列经 mysql2 回来是「本地零点的 Date」，
+ *  走 toISOString() 会整体早一天；而签到/徽章判的是"同一个自然日"，与 /api/checkin
+ *  的 dayKey 同源。v18.1 修 listAchievements：原写法 String(date).slice(0,10) 得到
+ *  "Mon Sep 14"，与 "2026-09-14" 形的查询键永不相等 → 连签徽章恒为 0、集齐奖励领不到。 */
+function localDayKey(v: unknown): string {
+  if (v instanceof Date) {
+    const y = v.getFullYear();
+    const m = String(v.getMonth() + 1).padStart(2, "0");
+    const d = String(v.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  return String(v ?? "").slice(0, 10);
 }
 
 /** 早鸟价统一计价：折扣有效（0 < 折扣 < 原价 且未到期）取折扣，否则原价 */
@@ -2100,14 +2115,16 @@ export async function listAchievements(userId: number): Promise<Achievement[]> {
     const reads = num(results[0], "rd");
     const likes = num(results[1]);
     const cmts = num(results[2]);
-    const balance = num(results[4]);
+    // 第二处 num() 误用：results[4] 的列名是 points_balance，按默认键 "n" 取会恒得 undefined→0，
+    // "墨水富翁"徽章因此永远算不出来。v18.1 修，与 Java 侧 BadgeService 同口径。
+    const balance = num(results[4], "points_balance");
     const followingN = num(results[5]);
     const fansN = num(results[6]);
     const qaN = num(results[7]);
 
     // 连续签到：从今天（或昨天）往回数连续签到日
     const rows = (results[3] as unknown as [Record<string, unknown>[]])[0] ?? [];
-    const dset = new Set(rows.map((r) => String(r.checkin_date).slice(0, 10)));
+    const dset = new Set(rows.map((r) => localDayKey(r.checkin_date)));
     const iso = (offset: number) => {
       const d = new Date();
       d.setDate(d.getDate() - offset);

@@ -1,8 +1,10 @@
 package com.inkstack.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.inkstack.entity.MoneyRows;
 import com.inkstack.entity.User;
 import java.time.LocalDate;
+import java.util.List;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Options;
@@ -93,4 +95,30 @@ public interface UserMapper extends BaseMapper<User> {
 
   @Select("SELECT id FROM users WHERE email = #{email} LIMIT 1")
   Long idByEmail(@Param("email") String email);
+
+  /* ===== 余额改写入口：全工程只有这四条语句允许动 points_balance（充值/退款/签到/分账都走它们） ===== */
+
+  /** 锁自己账户行后读余额。资金链路的扣款前置——不锁就有并发双花。 */
+  @Select("SELECT points_balance FROM users WHERE id = #{uid} FOR UPDATE")
+  Long lockBalance(@Param("uid") long uid);
+
+  /**
+   * 一条语句锁双方，<b>按 id 升序</b>。
+   *
+   * <p>顺序是重点：A 打赏 B、B 同时打赏 A 时，若各自按"先付款方后收款方"加锁就会交叉等待死锁；
+   * 统一按主键升序则两笔请求以同一顺序取锁。Node 的 tipArticle 同式。
+   */
+  @Select("""
+      SELECT id, points_balance AS pointsBalance FROM users
+       WHERE id IN (#{a}, #{b}) ORDER BY id FOR UPDATE
+      """)
+  List<MoneyRows.Balance> lockPair(@Param("a") long a, @Param("b") long b);
+
+  /** 扣款。与 {@link PointLedgerMapper#insert} 成对出现，缺一不可。 */
+  @Update("UPDATE users SET points_balance = points_balance - #{amount} WHERE id = #{uid}")
+  int spend(@Param("uid") long uid, @Param("amount") long amount);
+
+  /** 入账。同上，必须与流水同事务。 */
+  @Update("UPDATE users SET points_balance = points_balance + #{amount} WHERE id = #{uid}")
+  int credit(@Param("uid") long uid, @Param("amount") long amount);
 }

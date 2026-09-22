@@ -16,6 +16,16 @@ import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { getPool, dbEnabled } from "@/lib/db";
 import { creditPointsOn } from "@/lib/points";
+import { isRetryableLockError, sleepMs } from "@/lib/data";
+
+/** 锁冲突重放次数（含首次）。同键并发插入的败者未必拿到 ER_DUP_ENTRY，见 tryCheckin 的注释。 */
+const LOCK_ATTEMPTS = 3;
+
+type Attempt =
+  | { kind: "granted"; balance: number }
+  | { kind: "already" }
+  | { kind: "retry" }
+  | { kind: "failed"; message: string };
 
 const CYCLE_DAYS = 7;
 
@@ -110,52 +120,84 @@ export async function POST() {
   const cycleDay = cycleDayOf(streakAfter);
   const reward = rewardForCycleDay(cycleDay);
 
-  const conn = await pool.getConnection();
-  let balance = user.points;
-  try {
-    await conn.beginTransaction();
-    try {
-      await conn.query("INSERT INTO checkins (user_id, checkin_date) VALUES (?, ?)", [
-        user.id,
-        todayKey(),
-      ]);
-    } catch (e) {
-      await conn.rollback();
-      if ((e as { code?: string }).code === "ER_DUP_ENTRY") {
-        // 今天已签（含并发双击的败者）：唯一键拦下，不产生任何变更
-        const s = await statusPayload(user.id);
-        return NextResponse.json({ ok: false, already: true, balance: user.points, ...s });
-      }
-      return NextResponse.json({ error: "签到失败，请稍后再试" }, { status: 500 });
-    }
-    // 发墨与签到行同事务：发不出去就整体回滚，用户可重试
-    const okCredit = await creditPointsOn(
-      conn,
-      user.id,
-      reward,
-      `每日签到·周期第${cycleDay}天`
+  let attempt: Attempt = { kind: "failed", message: "签到失败，请稍后再试" };
+  for (let times = 1; times <= LOCK_ATTEMPTS; times++) {
+    attempt = await tryCheckin(pool, user.id, reward, cycleDay);
+    if (attempt.kind !== "retry") break;
+    // 退避后重放：等赢家把事务走完，第二次必然落到 ER_DUP_ENTRY → 「今天已签」
+    await sleepMs(30 * times);
+  }
+  if (attempt.kind === "retry" || attempt.kind === "failed") {
+    // retry = 重放用尽仍在抢锁：此时墨一定没发出去（事务全程回滚），如实报错让用户再点一次
+    return NextResponse.json(
+      { error: attempt.kind === "retry" ? "签到失败，请稍后再试" : attempt.message },
+      { status: 500 }
     );
-    if (!okCredit) {
-      await conn.rollback();
-      return NextResponse.json({ error: "墨水发放失败，请重试" }, { status: 500 });
-    }
-    const [after] = await conn.query("SELECT points_balance FROM users WHERE id = ?", [user.id]);
-    balance = Number((after as Record<string, unknown>[])[0]?.points_balance ?? 0);
-    await conn.commit();
-  } catch {
-    await conn.rollback().catch(() => {});
-    return NextResponse.json({ error: "签到失败，请稍后再试" }, { status: 500 });
-  } finally {
-    conn.release();
+  }
+  if (attempt.kind === "already") {
+    const s = await statusPayload(user.id);
+    return NextResponse.json({ ok: false, already: true, balance: user.points, ...s });
   }
 
   return NextResponse.json({
     ok: true,
     reward,
-    balance,
+    balance: attempt.balance,
     streak: streakAfter,
     cycleDay,
     checkedInToday: true,
     next: nextTier(streakAfter),
   });
+}
+
+/**
+ * 一次签到事务：占主键 + 发墨 + 落流水，同生共死，任一步失败整体回滚。
+ *
+ * 「同一自然日的并发双击」在 InnoDB 里未必以 ER_DUP_ENTRY 收场——后到的那一路
+ * 常在等锁后被判定为死锁牺牲品（六路并发实测稳定复现）。就此回 500 的话，
+ * 用户看到「签到失败」而墨其实已由另一路发出，属误报；故锁冲突单独返回 retry，
+ * 由 POST 重放。判据复用 lib/data.ts 的 isRetryableLockError（只看错误码，不做字符串匹配），
+ * 与 Java 侧 CheckinService 的重放策略逐字对齐。
+ */
+async function tryCheckin(
+  pool: Pool,
+  uid: number,
+  reward: number,
+  cycleDay: number
+): Promise<Attempt> {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    try {
+      await conn.query("INSERT INTO checkins (user_id, checkin_date) VALUES (?, ?)", [
+        uid,
+        todayKey(),
+      ]);
+    } catch (e) {
+      await conn.rollback();
+      if (isRetryableLockError(e)) return { kind: "retry" };
+      if ((e as { code?: string }).code === "ER_DUP_ENTRY") {
+        // 今天已签（含并发双击的败者）：唯一键拦下，不产生任何变更
+        return { kind: "already" };
+      }
+      return { kind: "failed", message: "签到失败，请稍后再试" };
+    }
+    // 发墨与签到行同事务：发不出去就整体回滚，用户可重试
+    const okCredit = await creditPointsOn(conn, uid, reward, `每日签到·周期第${cycleDay}天`);
+    if (!okCredit) {
+      await conn.rollback();
+      return { kind: "failed", message: "墨水发放失败，请重试" };
+    }
+    const [after] = await conn.query("SELECT points_balance FROM users WHERE id = ?", [uid]);
+    const balance = Number((after as Record<string, unknown>[])[0]?.points_balance ?? 0);
+    await conn.commit();
+    return { kind: "granted", balance };
+  } catch (e) {
+    await conn.rollback().catch(() => {});
+    return isRetryableLockError(e)
+      ? { kind: "retry" }
+      : { kind: "failed", message: "签到失败，请稍后再试" };
+  } finally {
+    conn.release();
+  }
 }

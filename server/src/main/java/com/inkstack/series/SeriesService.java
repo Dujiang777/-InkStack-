@@ -1,11 +1,11 @@
 package com.inkstack.series;
 
 import com.inkstack.common.NodeShapes;
+import com.inkstack.common.Pricing;
 import com.inkstack.entity.SeriesHead;
 import com.inkstack.entity.SeriesItem;
 import com.inkstack.entity.SeriesRows;
 import com.inkstack.mapper.SeriesMapper;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -117,22 +117,11 @@ public class SeriesService {
   }
 
   private static SeriesViews.Item itemOf(SeriesRows.Item row, Long viewerId) {
-    long price = effectivePrice(NodeShapes.num(row.getUnlockPrice()),
+    long price = Pricing.unlockPrice(NodeShapes.num(row.getUnlockPrice()),
         NodeShapes.num(row.getDiscountPrice()), row.getDiscountUntil());
     boolean own = viewerId != null && viewerId.equals(row.getAuthorId());
     boolean locked = price > 0 && !own && !NodeShapes.flag(row.getViewerUnlocked());
     return new SeriesViews.Item(row.getSlug(), row.getTitle(), NodeShapes.num(row.getReadCount()),
         NodeShapes.day(row.getPublishedAt()), price, locked);
-  }
-
-  /** 早鸟价：0 &lt; 折扣 &lt; 原价 且未到期才生效，否则原价（与 lib/data.ts effectiveUnlockPrice 同式）。 */
-  private static long effectivePrice(long original, long discount, LocalDateTime discountUntil) {
-    if (original <= 0 || discount <= 0 || discount >= original) {
-      return original;
-    }
-    if (discountUntil != null && !discountUntil.isAfter(LocalDateTime.now())) {
-      return original;
-    }
-    return discount;
   }
 }
