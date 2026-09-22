@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.ArrayList;
+import java.util.List;
 import org.springframework.util.StreamUtils;
 
 /**
@@ -80,5 +82,59 @@ public final class Bodies {
     } catch (NumberFormatException notANumber) {
       return 0L;
     }
+  }
+
+  /**
+   * JS 的 {@code String(value)}：标签这类"客户端可能塞任何类型"的数组要走它，
+   * 否则 {@code tags:[1,2]} 在两栈会变成不同的字符串（{@code "2"} vs {@code "2.0"}）。
+   */
+  public static String stringOf(JsonNode value) {
+    if (value == null || value.isMissingNode()) {
+      return "undefined";
+    }
+    if (value.isNull()) {
+      return "null";
+    }
+    if (value.isTextual()) {
+      return value.asText();
+    }
+    if (value.isBoolean()) {
+      return value.booleanValue() ? "true" : "false";
+    }
+    if (value.isNumber()) {
+      double d = value.doubleValue();
+      if (d == Math.rint(d) && Double.isFinite(d) && Math.abs(d) < 1e21) {
+        return Long.toString((long) d);
+      }
+      return value.decimalValue().stripTrailingZeros().toPlainString();
+    }
+    if (value.isArray()) {
+      // JS 的 String([a,b]) 是 join(",")，元素再各自递归
+      List<String> parts = new ArrayList<>();
+      value.forEach(item -> parts.add(stringOf(item)));
+      return String.join(",", parts);
+    }
+    return "[object Object]";
+  }
+
+  /**
+   * {@code Array.isArray(x) && x.length ? x.slice(0, limit).map(t => String(t).slice(0, eachMax)) : fallback}
+   * ——空数组也算"没填"，与 Node 一样回退到默认标签。
+   */
+  public static List<String> tagArray(JsonNode body, String field, int limit, int eachMax, String fallback) {
+    JsonNode node = body.get(field);
+    if (node == null || !node.isArray() || node.isEmpty()) {
+      return List.of(fallback);
+    }
+    List<String> out = new ArrayList<>();
+    int i = 0;
+    for (JsonNode item : node) {
+      if (i++ >= limit) {
+        break;
+      }
+      String text = stringOf(item);
+      out.add(text.length() <= eachMax ? text : text.substring(0, eachMax));
+    }
+    return out;
   }
 }

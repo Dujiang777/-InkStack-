@@ -26,7 +26,8 @@
 | P1b | 认证剩余端点（注册 / 邮箱验证码 / 重置 / 2FA / 改密 / 设备管理 / OAuth） | ✅ | 跨栈认证流程 **25/25**（一侧签发、另一侧消费），切流代理 10/10 |
 | P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ✅ | 资金闸门 **100/100**：六路跨栈并发双击零 500、`Δ余额 = ΔΣ流水` 精确成立、幂等分支跨栈一致；切流代理含资金路径 **16/16** |
 | P5a | 社区互动写侧（评论 / 点赞 / 收藏 / 关注 / 举报 / 站内信） | ✅ | 社区闸门 **108/108**（连跑三轮全绿）：并发举报只落 1 行、`like_count = 关系行数` 守恒、奖励日上限拒了不吞额度；切流代理含社区路径 **24/24** |
-| P5b | 创作台与运营台（发文 / 改删 / 草稿 / 审核 / 角色 / 举报处理） | ⏳ | — |
+| P5b | 创作台写侧（发布 / 存草稿 / 草稿转正 / 更新重审 / 撤回 / 硬删） | ✅ | 创作台闸门 **51/51**：8 路并发同名标题零 500 且 slug 互不相同、审核归属只认 Cookie 里的 role、草稿硬删连子表一并清 |
+| P5c | 运营台（举报处理 / 内容审核 / 用户与评论管理 / 角色） | ⏳ | — |
 | P6 | AI 分身：Spring AI Alibaba 替换 Python AgentScope 服务 | ⏳ | 需保持 NDJSON 契约 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
@@ -43,6 +44,9 @@
 - 社区互动：`GET|POST /api/articles/{slug}/comments` · `POST /api/articles/{slug}/like|bookmark|report|paywall-view`
   · `POST /api/comments/{id}/like|report` · `POST /api/users/{id}/follow` · `GET /api/notifications`
   · `POST /api/notifications/read`
+- 创作台：`POST /api/articles` · `PUT|DELETE /api/articles/{slug}`（与已有的 `GET` 两条合起来，
+  这两个路径上的方法集合已完整；但 `/api/articles` **前缀**还不能整体切——
+  同前缀下的 `{slug}/raw`、`{slug}/export` 还在 Node，切了就是 405，见闸门 8）
 - 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
   `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
@@ -112,7 +116,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过九道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -207,6 +211,17 @@ node scripts/community-check.mjs
 #   六路并发两栈零 500 且关系行至多一行、like_count = COUNT(article_likes)、
 #   游客也能发的评论其昵称裁剪与全角空格判空两侧同口径。
 #   ⚠ 一次约 150 个请求，贴着边缘限流（每 IP 120 次/分）的上沿：连跑要隔一分钟，否则红一片 429。
+
+# 10) 创作台闸门：发布/编辑/撤回这条链路的三个洞，读侧对拍一个都盖不住。
+node scripts/studio-check.mjs
+#   · 中文标题一律回退成 bo-日期-1 这种**可枚举且必撞**的 slug，8 路并发同名发布必须换号重试；
+#     原实现"SELECT 判重 → 裸 INSERT"是 7×500，用户以为没发出去、重试即重复稿。
+#   · 审核归属（普通用户 pending / 运营 approved）只能来自 Cookie 里的 role；
+#     闸门会往请求体里塞 reviewStatus/role 验证它无效。
+#   · 草稿是硬删：八张子表按 article_id 在同一个事务里清完才删主行，
+#     分条自动提交就会留下"稿子还在、点赞却被清空"的部分删除。
+#   · 早鸟折扣的入参时间走 JS `new Date(串)` 的口径解析（无时区的日期时间 = 本地时区），
+#     两侧对同一个 datetime-local 串必须算出同一个 UTC 瞬间，否则早鸟到点差一个时区。
 ```
 
 切流与回滚：
@@ -303,9 +318,9 @@ mvn spring-boot:run                  # http://localhost:3101
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── agent-service/          # Python AgentScope 分身服务（P6 替换）
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 九道闸门（parity / interop / paywall / page-parity / auth-flow /
-│                           #   proxy-cutover / money-check / route-inventory / community-check）
-│                           #   + 种子与运维脚本
+├── scripts/                # 十道闸门（parity / interop / paywall / page-parity / auth-flow /
+│                           #   proxy-cutover / money-check / route-inventory / community-check /
+│                           #   studio-check）+ 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
 

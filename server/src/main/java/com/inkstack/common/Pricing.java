@@ -39,4 +39,45 @@ public final class Pricing {
   public static long authorShare(long amount, double ratio) {
     return (long) Math.floor(amount * ratio);
   }
+
+  /** 早鸟折扣的解析结果；两个字段同时为 null 表示"不设折扣"。 */
+  public record Discount(Long price, String until) {
+
+    static Discount none() {
+      return new Discount(null, null);
+    }
+
+    boolean valid() {
+      return price != null;
+    }
+  }
+
+  /**
+   * 早鸟折扣入参的统一校验，对应 lib/data.ts 的 parseDiscount：
+   * {@code 0 < 折扣 < 原价}、截止时间必须<b>晚于此刻</b>且不超过 30 天，任一不满足就整对退回 null
+   * （宁可不给折扣，也不存一个"永远无效"的折扣让读者看到假价）。
+   *
+   * <p>时间解析走 {@link NodeDates}：前端 datetime-local 给的 "2026-10-01T08:00" 在 JS 里按本地时区
+   * 解释，若 Java 按 UTC 解释就会差一个时区，早鸟到点时刻两侧不同。落库串固定为 UTC 的
+   * 'YYYY-MM-DD HH:mm:ss'，与 Node 的 {@code toISOString().slice(0,19)} 同形。
+   */
+  public static Discount parseDiscount(double rawPrice, String rawUntil, long unlockPrice) {
+    long d = (long) Math.floor(Double.isNaN(rawPrice) ? 0d : rawPrice);
+    if (unlockPrice <= 0 || d <= 0 || d >= unlockPrice) {
+      return Discount.none();
+    }
+    if (rawUntil == null || rawUntil.isEmpty()) {
+      return Discount.none();
+    }
+    java.time.Instant until = NodeDates.parse(rawUntil);
+    if (until == null) {
+      return Discount.none();
+    }
+    long now = System.currentTimeMillis();
+    long ts = until.toEpochMilli();
+    if (ts <= now || ts > now + 30L * 24 * 3_600_000L) {
+      return Discount.none();
+    }
+    return new Discount(d, NodeDates.toSqlUtc(until));
+  }
 }
