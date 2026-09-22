@@ -25,7 +25,8 @@
 | P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | ✅ | 读侧 27 个函数全切；**11 页 × 4 身份 44/44 逐字一致**，检索防泄漏探针 4/4 |
 | P1b | 认证剩余端点（注册 / 邮箱验证码 / 重置 / 2FA / 改密 / 设备管理 / OAuth） | ✅ | 跨栈认证流程 **25/25**（一侧签发、另一侧消费），切流代理 10/10 |
 | P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ✅ | 资金闸门 **100/100**：六路跨栈并发双击零 500、`Δ余额 = ΔΣ流水` 精确成立、幂等分支跨栈一致；切流代理含资金路径 **16/16** |
-| P5 | 社区与运营台（评论 / 举报 / 审核 / 角色） | ⏳ | — |
+| P5a | 社区互动写侧（评论 / 点赞 / 收藏 / 关注 / 举报 / 站内信） | ✅ | 社区闸门 **108/108**（连跑三轮全绿）：并发举报只落 1 行、`like_count = 关系行数` 守恒、奖励日上限拒了不吞额度；切流代理含社区路径 **24/24** |
+| P5b | 创作台与运营台（发文 / 改删 / 草稿 / 审核 / 角色 / 举报处理） | ⏳ | — |
 | P6 | AI 分身：Spring AI Alibaba 替换 Python AgentScope 服务 | ⏳ | 需保持 NDJSON 契约 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
@@ -39,12 +40,15 @@
 - 墨水经济：`POST /api/articles/{slug}/unlock|tip|boost` · `POST /api/series/{id}/bundle`
   · `GET|POST /api/checkin` · `POST /api/me/badge-claim` · `GET|POST /api/topup/orders`
   · `POST /api/topup/pay`（这一组只能按段通配逐条切，见"切流与回滚"）
+- 社区互动：`GET|POST /api/articles/{slug}/comments` · `POST /api/articles/{slug}/like|bookmark|report|paywall-view`
+  · `POST /api/comments/{id}/like|report` · `POST /api/users/{id}/follow` · `GET /api/notifications`
+  · `POST /api/notifications/read`
 - 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
   `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
 
-移植资金链路时顺手修掉的两个 Node 侧既有 bug（都在 `lib/data.ts` / `app/api/checkin`，
-与换栈无关，但对拍要求两侧同口径，所以两边一起改）：
+移植过程中修掉的既有 bug（有的在原实现里就存在，有的差一点就跟着移植过去；对拍要求两侧同口径，
+所以一律两边一起改）：
 
 - `listAchievements` 把 mysql2 返回的 `Date` 直接 `String(date).slice(0, 10)` 当日期键，得到的是
   `"Mon Sep "` 而不是 `"2026-09-14"`，与查询键永不相等 → 连签徽章恒为 0、集齐奖励领不到。
@@ -53,6 +57,15 @@
   恒得 `undefined → 0`，"墨水富翁"徽章因此永远算不出来。
 - 同键并发插入 InnoDB 未必回 dup key，也可能回死锁 / 锁等待超时，两侧原先都把它当"签到失败"返回。
   现按 `isRetryableLockError` 重试三次（30ms×attempt），Node 与 Java 用同一套口径。
+  点赞链路上撞到了同一件事（`SELECT..FOR UPDATE` 在未命中的主键上取的是 gap 锁，两个并发事务
+  各持一把再去插入就成环），故 Java 的 `retryOnLock` 与 Node 点赞路由用同样的三次退避。
+- **Java 的 `String.trim()` 与 JS 的不是一个东西**：`trim()` 只裁 `<=U+0020`，全角空格 `U+3000`
+  裁不掉；`strip()` 走 `Character.isWhitespace`，又不认 `U+00A0` 与 `U+FEFF`。于是一条"纯全角空格"
+  的评论在 Node 是「内容不能为空」、在 Java 会正常落库。已补 `NodeShapes.jsTrim()` 按 JS 判据裁。
+- 举报的防重锚点曾被写在**事务外**（`submit(id, type, db.lockArticleAnchor(slug), reason)`——参数在
+  进 `tx.execute` 之前就已求值，那句 `FOR UPDATE` 自动提交、取到锁立刻放掉），六路并发于是落两行。
+  现在锚点以 `Supplier` 传进事务内执行。这类"看着只是风格"的差别，只有并发打才暴露，
+  而 `reports` 表上没有 `(reporter,target)` 唯一索引，没有任何第二道兜底。
 
 页面侧（Server Component 进程内取数，不经 HTTP）：`lib/data.ts` 的**只读内容面已全部可分流**
 ——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
@@ -99,7 +112,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过八道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过九道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -186,6 +199,14 @@ node scripts/money-check.mjs
 node scripts/route-inventory.mjs          # 列缺口 + 算出当前可整体切流的最长前缀
 node scripts/route-inventory.mjs --json   # 机器可读
 #   退出码恒 0：这是进度条不是判分。改完任一侧路由都要重跑一次再决定切流范围。
+
+# 9) 社区互动闸门：评论/点赞/收藏/关注/举报/站内信这六条链路，各有对拍表达不了的洞——
+#    奖励日上限"拒了不能吞额度"、举报防重靠的是锁而不是唯一键、并发 toggle 后计数要与关系行守恒。
+node scripts/community-check.mjs
+#   九节 108 项：跨栈看得懂（一侧发的评论另一侧读得到、一侧标的已读另一侧未读数跟着降）、
+#   六路并发两栈零 500 且关系行至多一行、like_count = COUNT(article_likes)、
+#   游客也能发的评论其昵称裁剪与全角空格判空两侧同口径。
+#   ⚠ 一次约 150 个请求，贴着边缘限流（每 IP 120 次/分）的上沿：连跑要隔一分钟，否则红一片 429。
 ```
 
 切流与回滚：
@@ -205,10 +226,13 @@ P4 的资金端点就是这样切走的，`/api/articles` 整前缀要等 P5/P6 
 
 ```bash
 NEXT_DIST_DIR=.next-cutover \
-JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,\
-/api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/series/*/bundle \
+JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,/api/notifications,\
+/api/users/*/follow,/api/comments/*/like,/api/comments/*/report,\
+/api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/articles/*/comments,\
+/api/articles/*/like,/api/articles/*/bookmark,/api/articles/*/report,/api/articles/*/paywall-view,\
+/api/series/*/bundle \
   node node_modules/next/dist/bin/next dev -p 3400
-node scripts/proxy-cutover-check.mjs --money --base=http://localhost:3400
+node scripts/proxy-cutover-check.mjs --money --community --base=http://localhost:3400
 ```
 
 临时实例会把 `next-env.d.ts` / `tsconfig.json` 里的构建目录指针改写成 `.next-cutover`，**提交前 revert 这两个文件**；
@@ -279,8 +303,9 @@ mvn spring-boot:run                  # http://localhost:3101
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── agent-service/          # Python AgentScope 分身服务（P6 替换）
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 八道闸门（parity / interop / paywall / page-parity / auth-flow /
-│                           #   proxy-cutover / money-check / route-inventory）+ 种子与运维脚本
+├── scripts/                # 九道闸门（parity / interop / paywall / page-parity / auth-flow /
+│                           #   proxy-cutover / money-check / route-inventory / community-check）
+│                           #   + 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
 

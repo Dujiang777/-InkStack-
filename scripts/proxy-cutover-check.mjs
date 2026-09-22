@@ -8,12 +8,13 @@
 // 的唯一硬证据。
 //
 //   node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
-//                                      [--keep=/api/articles] [--money]
+//                                      [--keep=/api/articles] [--money] [--community]
 //
 // --keep  声明"这一次必须仍由 Node 应答"的前缀：切流范围变了，这个负断言也要跟着换，
 //         否则"未切流"的断言会在切到 /api/articles 那一档时自己打自己。
 // --money 追加资金写链路经代理的证据（P4）。只挑不改账的用例：
 //         已签到用户的 POST /api/checkin → already；非法档位的 POST tip → 400。
+// --community 追加社区互动经代理的证据（P5）：未登录/参数非法/只读三类，同样一笔数据都不改。
 import fs from "node:fs";
 import path from "node:path";
 
@@ -29,6 +30,7 @@ const arg = (name, dflt) => {
 const base = arg("base", process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200");
 const KEEP_PREFIX = arg("keep", "/api/articles");
 const MONEY = process.argv.includes("--money");
+const COMMUNITY = process.argv.includes("--community");
 
 let pass = 0;
 let fail = 0;
@@ -132,6 +134,39 @@ if (MONEY) {
     { body: { amount: 10 }, cookie: c2, headers: { origin: "https://evil.example" } });
   if (moneyCsrf.status === 403 && moneyCsrf.backend === "") ok("资金写请求的 CSRF 也在边缘拦住");
   else bad("资金写请求的 CSRF 也在边缘拦住", `${moneyCsrf.status} backend=${moneyCsrf.backend || "无"}`);
+}
+
+// 7) P5 社区互动经代理：同样只挑"不改数据"的入口——未登录、参数非法、只读
+if (COMMUNITY) {
+  const login3 = await call("POST", "/api/auth/login", { body: { email: creds[0], password: creds[1] } });
+  const c3 = setCookie(login3.res);
+  const probes = [
+    ["未登录点赞评论 → 401", "POST", "/api/comments/1/like", undefined, undefined, 401, "登录后才能点赞评论"],
+    ["非数字评论 id → 400", "POST", "/api/comments/abc/like", undefined, c3, 400, "参数无效"],
+    ["未登录关注 → 401", "POST", "/api/users/1/follow", undefined, undefined, 401, "请先登录"],
+    ["未登录收藏 → 401", "POST", "/api/articles/bo-20260911-1/bookmark", undefined, undefined, 401, "登录后才能收藏"],
+    ["未登录举报 → 401", "POST", "/api/articles/bo-20260911-1/report", { reason: "经代理探针" }, undefined, 401, "登录后才能举报"],
+    ["未登录读站内信 → 401", "GET", "/api/notifications", undefined, undefined, 401, "请先登录"],
+  ];
+  for (const [label, method, p, body, cookie, want, text] of probes) {
+    const r = await call(method, p, { body, cookie });
+    if (r.status === want && r.backend === "inkstack-java" && r.json?.error === text) {
+      ok(`经代理的${label}`, `backend=${r.backend}`);
+    } else {
+      bad(`经代理的${label}`, `${r.status}/${want} backend=${r.backend || "无"} body=${r.text.slice(0, 70)}`);
+    }
+  }
+  const notices = await call("GET", "/api/notifications", { cookie: c3 });
+  if (notices.status === 200 && notices.backend === "inkstack-java"
+    && Array.isArray(notices.json?.notifications) && typeof notices.json?.unread === "number") {
+    ok("经代理读站内信回列表与未读数", `unread=${notices.json?.unread}`);
+  } else {
+    bad("经代理读站内信回列表与未读数", `${notices.status} backend=${notices.backend || "无"}`);
+  }
+  const likeCsrf = await call("POST", "/api/articles/bo-20260911-1/like",
+    { cookie: c3, headers: { origin: "https://evil.example" } });
+  if (likeCsrf.status === 403 && likeCsrf.backend === "") ok("社区写请求的 CSRF 也在边缘拦住");
+  else bad("社区写请求的 CSRF 也在边缘拦住", `${likeCsrf.status} backend=${likeCsrf.backend || "无"}`);
 }
 
 console.log(`\nbase=${base}  合计 ${pass + fail} 项，失败 ${fail} 项`);
