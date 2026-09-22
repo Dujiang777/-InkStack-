@@ -237,6 +237,18 @@ export type SessionRow = {
   current: boolean;
 };
 
+/**
+ * mysql2 的 DATETIME → ISO 串（UTC、带 Z）。
+ *
+ * 原先这几处直接 `String(r.created_at)`，得到的是 "Mon Sep 21 2026 17:40:00 GMT+0800 (中国标准时间)"，
+ * 而组件里的 fmtTime 用 `new Date(s.replace(" ", "T"))` 解析——只在首空格后插 T 恰好把这种串解析成
+ * Invalid Date，所以安全中心的"设备活跃/登录时间"一直显示 Invalid Date。换 ISO 后前端无需改动即可解析，
+ * 也让 Java 侧有可对拍的规范形态（NodeShapes.iso 输出同一格式）。
+ */
+export function isoOf(v: unknown): string {
+  return v instanceof Date ? v.toISOString() : String(v ?? "");
+}
+
 export async function listSessions(uid: number): Promise<SessionRow[]> {
   const pool = await getPool();
   if (!pool) return [];
@@ -252,8 +264,8 @@ export async function listSessions(uid: number): Promise<SessionRow[]> {
     id: Number(r.id),
     ua: (r.ua as string) ?? null,
     ip: (r.ip as string) ?? null,
-    created_at: String(r.created_at),
-    last_seen_at: String(r.last_seen_at),
+    created_at: isoOf(r.created_at),
+    last_seen_at: isoOf(r.last_seen_at),
     current: String(r.token_hash) === currentHash,
   }));
 }

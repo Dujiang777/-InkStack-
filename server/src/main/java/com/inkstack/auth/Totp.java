@@ -2,6 +2,9 @@ package com.inkstack.auth;
 
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.List;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -16,6 +19,7 @@ public final class Totp {
   private static final String B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
   private static final int STEP_SECONDS = 30;
   private static final int WINDOW = 1;
+  private static final SecureRandom RANDOM = new SecureRandom();
 
   private Totp() {}
 
@@ -79,4 +83,72 @@ public final class Totp {
     }
     return out.toByteArray();
   }
+
+  /** 生成 160 位随机密钥并编码为 base32（验证器 App 手动输入的格式）。 */
+  public static String generateSecret() {
+    byte[] raw = new byte[20];
+    RANDOM.nextBytes(raw);
+    return base32Encode(raw);
+  }
+
+  static String base32Encode(byte[] bytes) {
+    StringBuilder out = new StringBuilder();
+    int bits = 0;
+    int value = 0;
+    for (byte b : bytes) {
+      value = (value << 8) | (b & 0xFF);
+      bits += 8;
+      while (bits >= 5) {
+        out.append(B32.charAt((value >>> (bits - 5)) & 31));
+        bits -= 5;
+      }
+    }
+    if (bits > 0) {
+      out.append(B32.charAt((value << (5 - bits)) & 31));
+    }
+    return out.toString();
+  }
+
+  /** otpauth:// 迁移链接：参数顺序与 Node 的 URLSearchParams 一致（secret,issuer,algorithm,digits,period）。 */
+  public static String otpauthUrl(String secret, String account) {
+    String label = urlEncode("InkStack:" + account);
+    return "otpauth://totp/" + label
+        + "?secret=" + secret + "&issuer=InkStack&algorithm=SHA1&digits=6&period=30";
+  }
+
+  /** encodeURIComponent 的未保留字符集：字母数字与 -_.!~*'()，其余按 UTF-8 百分号编码。 */
+  private static String urlEncode(String value) {
+    StringBuilder out = new StringBuilder();
+    for (byte b : value.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+      char c = (char) (b & 0xFF);
+      boolean safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+          || c == '-' || c == '.' || c == '_' || c == '!' || c == '~' || c == '*' || c == '\''
+          || c == '(' || c == ')';
+      if (safe) {
+        out.append(c);
+      } else {
+        out.append('%').append(String.format("%02X", b));
+      }
+    }
+    return out.toString();
+  }
+
+  /** 一次性备份码：形如 4XK9-2QM7 的 10 枚，库里只存 sha256 hex。 */
+  public static BackupCodes generateBackupCodes() {
+    List<String> plain = new ArrayList<>();
+    List<String> hashed = new ArrayList<>();
+    for (int i = 0; i < 10; i++) {
+      byte[] raw = new byte[6];
+      RANDOM.nextBytes(raw);
+      String base64url = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
+      String token = base64url.replaceAll("[-_]", "");
+      token = (token.length() >= 8 ? token.substring(0, 8) : token).toUpperCase();
+      String code = token.substring(0, 4) + "-" + (token.length() > 4 ? token.substring(4, 8) : "");
+      plain.add(code);
+      hashed.add(com.inkstack.common.Hex.sha256Hex(code));
+    }
+    return new BackupCodes(plain, hashed);
+  }
+
+  public record BackupCodes(List<String> plain, List<String> hashed) {}
 }

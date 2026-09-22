@@ -23,7 +23,7 @@
 | P1 | 会话互通：HMAC Cookie + scrypt + sessions 表 + 登录/登出/me | ✅ | **双向 Cookie 互通 8/8** |
 | P2 | 双轨对拍闸门 + middleware 按模块切流 | ✅ | 切流/回滚实测通过 |
 | P3 | 只读内容模块（列表 / 详情 / 搜索 / 热榜 / 归档…） | ✅ | 读侧 27 个函数全切；**11 页 × 4 身份 44/44 逐字一致**，检索防泄漏探针 4/4 |
-| P1b | 认证剩余端点（注册 / 邮箱验证码 / 重置 / OAuth / 新设备邮件） | ⏳ | **完成前不切 `/api/auth/*`** |
+| P1b | 认证剩余端点（注册 / 邮箱验证码 / 重置 / 2FA / 改密 / 设备管理 / OAuth） | ✅ | 跨栈认证流程 **25/25**（一侧签发、另一侧消费），切流代理 10/10 |
 | P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ⏳ | 需并发对拍 |
 | P5 | 社区与运营台（评论 / 举报 / 审核 / 角色） | ⏳ | — |
 | P6 | AI 分身：Spring AI Alibaba 替换 Python AgentScope 服务 | ⏳ | 需保持 NDJSON 契约 |
@@ -31,8 +31,14 @@
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
 
-- `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/me`
-- `GET /api/articles` · `GET /api/articles/{slug}`
+- 认证：`POST /api/auth/login|logout|register|send-code|reset` · `GET /api/auth/me|providers`
+  · `GET /api/auth/{github,gitee,qq}` 与三家 `/{p}/callback` · `GET /api/auth/github/status`
+- 安全中心：`POST /api/security/password` · `GET|DELETE /api/security/sessions`
+  · `POST|PUT|DELETE /api/security/2fa`
+- 内容：`GET /api/articles` · `GET /api/articles/{slug}` · `GET /api/search`
+- 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
+  `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
+  `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
 
 页面侧（Server Component 进程内取数，不经 HTTP）：`lib/data.ts` 的**只读内容面已全部可分流**
 ——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
@@ -79,7 +85,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过四道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过六道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -119,6 +125,31 @@ NEXT_DIST_DIR=.next-java DATA_VIA_JAVA='*' \
 PAGES="/ /article/bo-20260911-1 /article/nei-rong-chuang-zuo-ai-shi-yong-shou-ce /author/9 /me /study"
 node scripts/page-parity.mjs $PAGES                    # 游客
 for ID in test writer probe; do node scripts/page-parity.mjs --login=$ID $PAGES; done
+
+# 5) 跨栈认证流程：验证码与会话必须"一侧签发、另一侧消费"才算互通。
+#    同栈自测永远发现不了哈希口径或时效写岔——只有交叉使用会暴露。
+node scripts/auth-flow-check.mjs
+#   Node 签发→Java 注册 / Java 签发→Node 注册 / 一码两吃被拒 / 假码停在验码分支 /
+#   Node 生成密钥→Java 校验开启→两栈都要二因子→备份码一次一毁→Node 关闭 /
+#   改密保留当前会话并下线其他设备（跨栈可见）…… 25 项
+#   ⚠ 本仓库 .env 里 SMTP 是**真实配置**，直连跑会真发信（注册成功即发欢迎邮件）。
+#     必须另起一对"邮件降级"临时实例，跑完即停：
+MSYS_NO_PATHCONV=1 SMTP_HOST="" NEXT_DIST_DIR=.next-mailtest \
+  JAVA_BASE=http://localhost:3199 JAVA_ROUTES=/api/auth \
+  node node_modules/next/dist/bin/next dev -p 3299 &
+SERVER_PORT=3199 INKSTACK_MAIL_HOST="" mvn -f server/pom.xml spring-boot:run &
+PARITY_NODE=http://localhost:3299 PARITY_JAVA=http://localhost:3199 \
+  node scripts/auth-flow-check.mjs
+#   两个坑：① MSYS 会把 "/api/auth" 改写成 "D:/Git/api/auth"，切流前缀必须带
+#     MSYS_NO_PATHCONV=1；② 临时实例会改写 next-env.d.ts / tsconfig.json 指向
+#     .next-mailtest，提交前记得 revert 这两个文件。
+
+# 6) 切流代理路径：浏览器只见 Next 地址，认证请求靠 middleware rewrite 转发。
+#    会在这条路上丢东西的三样是 Set-Cookie、请求体、边缘安全闸口——直连两栈都测不出来。
+node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
+#   X-Backend: inkstack-java 由 Java 过滤器打上，是"这条请求确实落在 Java"的唯一硬证据；
+#   同时反向断言 /api/articles 与 /api/articlesXYZ 仍由 Node 应答（切流不能过宽），
+#   并断言跨站 Origin 的写请求在边缘就 403（安全闸口不随切流下沉）。
 ```
 
 切流与回滚：

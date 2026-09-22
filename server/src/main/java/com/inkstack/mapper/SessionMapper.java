@@ -45,9 +45,8 @@ public interface SessionMapper extends BaseMapper<Session> {
   int revokeAllForUser(@Param("userId") long userId);
 
   /** 设备管理：只取仍在有效期内的会话，按最后活跃时间倒序，最多 30 条。 */
-  @Select("SELECT id, token_hash AS tokenHash, ua, ip,"
-      + " DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s') AS createdAt,"
-      + " DATE_FORMAT(last_seen_at,'%Y-%m-%dT%H:%i:%s') AS lastSeenAt"
+  @Select("SELECT id, token_hash AS tokenHash, ua, ip, created_at AS createdAt,"
+      + " last_seen_at AS lastSeenAt"
       + " FROM sessions WHERE user_id = #{userId} AND revoked = 0 AND expires_at > NOW()"
       + " ORDER BY last_seen_at DESC LIMIT 30")
   java.util.List<com.inkstack.entity.SessionRow> listActive(@Param("userId") long userId);

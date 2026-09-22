@@ -37,6 +37,14 @@ const out = [
   `SMTP_USER=${env.SMTP_USER ?? ''}`,
   `SMTP_PASS=${env.SMTP_PASS ?? ''}`,
   `SMTP_FROM=${env.SMTP_FROM ?? ''}`,
+  // 第三方登录凭证：缺任一项该家即"未配置"，两栈必须给出同一个布尔值，
+  // 否则 /api/auth/providers 对拍会假失败、前端气泡也会一边亮一边灭。
+  `GITHUB_CLIENT_ID=${env.GITHUB_CLIENT_ID ?? ''}`,
+  `GITHUB_CLIENT_SECRET=${env.GITHUB_CLIENT_SECRET ?? ''}`,
+  `GITEE_CLIENT_ID=${env.GITEE_CLIENT_ID ?? ''}`,
+  `GITEE_CLIENT_SECRET=${env.GITEE_CLIENT_SECRET ?? ''}`,
+  `QQ_CLIENT_ID=${env.QQ_CLIENT_ID ?? ''}`,
+  `QQ_CLIENT_SECRET=${env.QQ_CLIENT_SECRET ?? ''}`,
   '',
 ].join('\n');
 

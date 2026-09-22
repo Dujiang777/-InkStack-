@@ -56,6 +56,17 @@ inkstack:
     user: ${SMTP_USER:}
     pass: ${SMTP_PASS:}
     from: ${SMTP_FROM:}
+  # 第三方登录：id+secret 齐全该家才亮灯（/api/auth/providers 的布尔值就是这个判据）
+  oauth:
+    github:
+      client-id: ${GITHUB_CLIENT_ID:}
+      client-secret: ${GITHUB_CLIENT_SECRET:}
+    gitee:
+      client-id: ${GITEE_CLIENT_ID:}
+      client-secret: ${GITEE_CLIENT_SECRET:}
+    qq:
+      client-id: ${QQ_CLIENT_ID:}
+      client-secret: ${QQ_CLIENT_SECRET:}
 
 management:
   endpoints:

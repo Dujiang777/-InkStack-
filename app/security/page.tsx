@@ -1,7 +1,7 @@
 // /security 安全中心（v13.5）：登录历史 · 设备管理 · 改密 · 两步验证
 // 服务端取数：会话列表 + 审计日志（只取本人）；交互在 SecurityClient
 import { redirect } from "next/navigation";
-import { getCurrentUser, listSessions } from "@/lib/auth";
+import { getCurrentUser, listSessions, isoOf } from "@/lib/auth";
 import { getPool } from "@/lib/db";
 import SecurityClient from "@/components/SecurityClient";
 
@@ -34,7 +34,7 @@ export default async function SecurityPage() {
         event: String(r.event),
         ip: (r.ip as string) ?? null,
         detail: (r.detail as string) ?? null,
-        created_at: String(r.created_at),
+        created_at: isoOf(r.created_at),
       }));
     } catch {
       /* 审计查询失败不阻塞页面 */

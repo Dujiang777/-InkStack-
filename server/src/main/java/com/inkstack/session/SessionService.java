@@ -85,6 +85,15 @@ public class SessionService {
     response.addHeader(HttpHeaders.SET_COOKIE, cookie("", Duration.ZERO));
   }
 
+  /** 当前请求携带的会话令牌哈希；游客或令牌解不出时为空。"是不是本机"与"下线其他设备"都靠它。 */
+  public Optional<String> currentTokenHash(HttpServletRequest request) {
+    String token = readToken(request);
+    if (token == null || token.isBlank() || codec.verify(token).isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(Hex.sha256Hex(token));
+  }
+
   private String readToken(HttpServletRequest request) {
     if (request.getCookies() == null) {
       return null;
