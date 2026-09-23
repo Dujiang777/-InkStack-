@@ -99,6 +99,16 @@ public final class NodeShapes {
   }
 
   /**
+   * 与 {@link #jsWhitespace} 同集合的正则字符类（不含方括号），
+   * 需要拼否定形式 {@code [^…]} 的调用方用它自己包一层。
+   */
+  public static final String JS_SPACE_CHARS =
+      "\\t\\n\\u000B\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff";
+
+  /** {@link #jsWhitespace} 的正则形式，供"照抄 JS 正则"的地方拼进去用。 */
+  public static final String JS_SPACE = "[" + JS_SPACE_CHARS + "]";
+
+  /**
    * JS 的 {@code s.replace(/\s{2,}/g, " ")}：两个以上空白折成一个半角空格。
    *
    * <p>不能用 {@code replaceAll("\\s{2,}", " ")}——Java 的 {@code \s} 少认全角空格、
@@ -106,6 +116,15 @@ public final class NodeShapes {
    * 在 Node 会折成一个、在 Java 原样留着，两侧的昵称从此不同。
    */
   public static String jsCollapse(String value) {
+    return squeeze(value, true);
+  }
+
+  /** JS 的 {@code s.replace(/\s+/g, " ")}：任意一段空白折成<b>一个</b>半角空格（单个也折）。 */
+  public static String jsSqueeze(String value) {
+    return squeeze(value, false);
+  }
+
+  private static String squeeze(String value, boolean keepSingleton) {
     if (value == null) {
       return "";
     }
@@ -120,7 +139,8 @@ public final class NodeShapes {
       while (j < value.length() && isJsSpace(value.charAt(j))) {
         j++;
       }
-      out.append(j - i > 1 ? ' ' : value.charAt(i));
+      boolean single = j - i == 1;
+      out.append(keepSingleton && single ? value.charAt(i) : ' ');
       i = j;
     }
     return out.toString();

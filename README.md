@@ -29,7 +29,7 @@
 | P5b | 创作台写侧（发布 / 存草稿 / 草稿转正 / 更新重审 / 撤回 / 硬删） | ✅ | 创作台闸门 **51/51**：8 路并发同名标题零 500 且 slug 互不相同、审核归属只认 Cookie 里的 role、草稿硬删连子表一并清 |
 | P5c | 运营台（内容审核 / 评论删除 / 举报处理 / 用户管理）+ 两个全文出口 `{slug}/raw`、`{slug}/export` | ✅ | 运营台闸门 **65/65**：四条接口逐个 401/403、下架连带清置顶、扣回按真实余额记账、导出正文两侧逐字一致且不泄漏后端端口；切流代理含运营台路径 **31/31** |
 | P5d | 书房写侧（草稿箱 / 阅读足迹 / 外链审核 / 资料 / 改密 / 图片上传 / 专栏增删改） | ✅ | 书房闸门 **97/97**：门禁姿势逐个钉住（友链游客是 403 不是 401、足迹游客是 200 skipped）、昵称按 JS 空白判据折叠、上传两栈共用同一磁盘目录、12 路跨栈并发重设篇目零 500 且条目守恒；切流代理含书房路径 **41/41**（含 multipart 穿过 rewrite） |
-| P5e | 博主迁移工具 `POST /api/import`（RSS 抓取 + Markdown 批量导入） | ⏳ | 唯一剩下的非 AI 缺口：SSRF 私网黑名单要按 WHATWG 判、外部 HTML 消毒是七条正则、日期口径两栈得同 |
+| P5e | 博主迁移工具 `POST /api/import`（RSS 抓取 + Markdown 批量导入） | ✅ | 迁移闸门 **100/100**：SSRF 私网黑名单的十几种写法（十进制 / 十六进制 / 八进制 / 短写 / 全角句号 / userinfo 掩护 / IPv4 映射）两侧同码同文案、重定向逐跳复校、消毒七条正则的产物逐字比库、RFC 1123 各家日期落进同一个本地墙钟；切流代理含迁移工具 **48/48** |
 | P6 | AI 分身：Spring AI Alibaba 替换 Python AgentScope 服务 | ⏳ | 需保持 NDJSON 契约 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
@@ -58,6 +58,8 @@
   （`components/StudioClient.tsx` 正在吃它），Java 是公开合集架。切之前的动作是先把 Node 的
   `GET /api/series` 对齐成公开架、补一条 `GET /api/series/mine`，再改前端读法，两栈同语义之后
   整前缀才敢切，见闸门 8）
+- 迁移工具：`POST /api/import`（RSS 用 JSON、Markdown 用 multipart，同一个 URL 两种体）
+  —— 全平台唯一一处"由用户给地址、服务端替他联网"的入口，SSRF 防护见闸门 13
 - 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
   `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
@@ -99,6 +101,27 @@
   `begin 4, end 8, length 7`。按原写法实测**每四次"开启两步验证"就有一次 500**（22.7%），
   而 Node 侧同一句 `slice(4, 8)` 只是安静地给出一个短一点的码。已补 `NodeShapes.slice(value, from, to)`
   并在此后所有"从 Node 抄来的切片"处使用。这类差异不会出现在对拍里——它取决于随机数。
+- **SSRF 黑名单栽在"字符串前缀判"上**（写闸门 13 时抓到的真实绕过，两栈原本都有）：
+  `[::ffff:192.168.1.2]` 经过 `new URL()` 会被压成 `[::ffff:c0a8:102]`，而原实现判映射地址是
+  "取 `::ffff:` 之后的子串按 IPv4 正则匹配"——那子串是十六进制，正则不命中就当公网放行，
+  实测一个 200 打到了本机网卡地址。十进制 `2130706433`、十六进制、八进制、`127.1`、
+  全角句号 `127。1`、userinfo 掩护这些写法同理：只要有一种在某一侧被判成"域名"丢进 DNS，
+  整条黑名单就失效。现在两侧都把地址解析成**字节**再判（Node 在 `route.ts` 里、Java 在 `IpGuard` 里），
+  并且 Java 自带了一个 WHATWG 口径的地址解析器 `NodeUrl`——`java.net.URI` 与 `java.net.URL`
+  都不做 IPv4 归一化，不能拿来当判据用。
+- **V8 认识 RFC 1123，`java.time` 不认识**：RSS 的 `pubDate` 是 `Mon, 23 Sep 2026 08:00:00 GMT`，
+  移植时若只留 ISO 分支，Java 会把每一条日期判成"解析失败"，于是**全部**导入稿都落到
+  "导入时刻"兜底分支——两侧都有日期、都不报错，只有值不一样。补分支时要连 V8 的怪癖一起补：
+  两位年（0-49 归 2000 段、50-99 归 1900 段）、星期名不参与校验、缺时区按本地而 ISO 纯日期按 UTC。
+- **`NodeShapes.slice` 的两种签名又绊了一次**：JS 的 `title.slice(8)`（从下标 8 到结尾）被写成
+  单参数的 `slice(value, 8)`（那是 `slice(0, 8)`），于是"剥掉 `__SKIP__` 前缀"变成"只留前 8 个字符"，
+  回给用户的文件名成了 `__SKIP__`。与备份码那次的 `substring(4, 8)` 是同一类：从 Node 抄切片时，
+  先确认它是"截断"还是"取尾"。
+- **消毒正则少写一个 `+`**：未加引号的属性值那条分支 `[^\s>]+` 写成了 `[^\s>]`，Java 只吃掉一个字符，
+  `<img src="a.png" onerror=alert(1)>` 就留下 `<img src="a.png"lert(1)>` 这种残骸——
+  比"没消毒"更糟，因为它骗过了肉眼。这一条由"两栈各导一轮再逐列比库"报出来，
+  顺带确认了一件事：**每一条从 Node 抄来的正则都要过一遍 `Java \s ≠ JS \s` 这个筛子**，
+  消毒、标签匹配、空白折叠三处都在筛子上重写过。
 - Windows 上 `.properties` 里的反斜杠是转义符：`INKSTACK_UPLOAD_DIR=D:\Desktop\...\uploads`
   会让 `\u` 成为一个畸形的统一码转义，**JVM 在解析配置阶段就起不来**（`ConfigDataException`），
   报的还不是路径问题。生成脚本现在统一 `replace(/\\/g, "/")`。
@@ -158,7 +181,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十二道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十三道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -297,6 +320,26 @@ node scripts/study-check.mjs
 #   · ⚠ 会改联调账号的昵称与口令：清场按快照直接写回 `password_hash`，
 #     不走接口——那个密码在 HIBP 泄露名单里，接口拒它是对的，但不是清场该有的姿势。
 #   · ⚠ 同样吃边缘限流（每 IP 120 次/分）：连跑要隔一分钟，否则后半程红一片 429。
+
+# 13) 迁移工具闸门：全平台唯一一处"用户给地址、服务端替他联网"，防护本身就是被测对象。
+node scripts/import-check.mjs
+#   · 私网有十几种写法而它们必须是同一个结论：`new URL()` 会把 2130706433 / 0x7f000001 /
+#     0177.0.0.1 / 127.1 / `127。1`（全角句号）全部规范成 127.0.0.1。用 JDK 自带的
+#     `java.net.URI`/`URL` 一种都不认——它们会把这些串当"域名"丢进 DNS，而操作系统照样按
+#     IPv4 连出去，黑名单整条失效。Java 侧因此自带了一个 WHATWG 口径的解析器（NodeUrl）。
+#   · 编写这一道闸门时抓到的真实绕过：`[::ffff:192.168.1.2]` 被 WHATWG 压缩成
+#     `[::ffff:c0a8:102]`，于是 Node 原实现"取 `::ffff:` 之后按 IPv4 正则判"拿到的是十六进制串、
+#     不命中就放行，实测 200 打到了本机网卡。两侧现在都先解析成**字节**再判（闸门 13 / 2 节）。
+#   · 重定向必须手动逐跳：夹具用一个公网首跳 302 到 127.0.0.1，第二跳要拿到同一句拒绝——
+#     这一条需要外网，跑不到时记 SKIP 而不是 PASS（离线是唯一让它闭嘴的合法理由）。
+#   · 产物比的是**库里每一列**，而且是"两栈各清一遍各导一轮"：两个栈往同一张表写，
+#     同一轮里读两次只是把同一行读了两遍，连"Java 把正文写坏了"都报不出来。
+#     消毒那七条正则的期望结果是**手推**出来的常量，否则两栈一起错就一起绿。
+#   · 日期是 RFC 1123 的天下：`Wed, 23 Sep 26`（两位年）、星期名写错、缺时区、`+0800`，
+#     V8 全认；再加上 mysql2 按驱动本地时区绑定 Date、目标列 DATETIME(0) 会把 .700 进位成下一秒。
+#     四件事凑一起，"两侧读回同一个瞬间"必须逐条钉，否则早鸟到点那种口径错会原样复现。
+#   · ⚠ 需要一对 `IMPORT_ALLOW_PRIVATE=1` 的临时实例（夹具订阅源必然在 127.0.0.1 上）：
+#     常规那一对照旧拒绝所有本机地址，抓取成功类用例一条都跑不到。会真建真删文章，跑完自动清场。
 ```
 
 切流与回滚：
@@ -323,9 +366,9 @@ JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,
 /api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/articles/*/comments,\
 /api/articles/*/like,/api/articles/*/bookmark,/api/articles/*/report,/api/articles/*/paywall-view,\
 /api/articles/*/raw,/api/articles/*/export,/api/series/*/bundle,\
-/api/drafts,/api/history,/api/links,/api/uploads,/api/me/profile,/api/me/password \
+/api/drafts,/api/history,/api/links,/api/uploads,/api/me/profile,/api/me/password,/api/import \
   node node_modules/next/dist/bin/next dev -p 3400
-node scripts/proxy-cutover-check.mjs --money --community --admin --study --base=http://localhost:3400
+node scripts/proxy-cutover-check.mjs --money --community --admin --study --import --base=http://localhost:3400
 node scripts/admin-check.mjs          # 其中的"经代理导出可比对"一节会打这个实例
 ```
 
@@ -403,9 +446,9 @@ mvn spring-boot:run                  # http://localhost:3101
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── agent-service/          # Python AgentScope 分身服务（P6 替换）
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 十二道闸门（parity / interop / paywall / page-parity / auth-flow /
+├── scripts/                # 十三道闸门（parity / interop / paywall / page-parity / auth-flow /
 │                           #   proxy-cutover / money-check / route-inventory / community-check /
-│                           #   studio-check / admin-check / study-check）+ 种子与运维脚本
+│                           #   studio-check / admin-check / study-check / import-check）+ 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
 

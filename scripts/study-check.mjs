@@ -37,7 +37,7 @@ const START_MS = Date.now();
 function sweepUploads(sinceMs) {
   if (!fs.existsSync(UPLOAD_DIR)) return [];
   return fs.readdirSync(UPLOAD_DIR).filter((f) => {
-    const m = f.match(/^(d{13})-[0-9a-f]{8}.(png|jpg|gif|webp)$/);
+    const m = f.match(/^(\d{13})-[0-9a-f]{8}\.(png|jpg|gif|webp)$/);
     return m !== null && Number(m[1]) >= sinceMs;
   });
 }

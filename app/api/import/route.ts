@@ -18,11 +18,7 @@ const MAX_MD_FILE = 300_000;
 /* ---------- SSRF 防护：私网 / 环回地址黑名单 ---------- */
 const ALLOW_PRIVATE = process.env.IMPORT_ALLOW_PRIVATE === "1";
 
-function ipv4Private(ip: string): boolean {
-  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (!m) return false;
-  const a = Number(m[1]);
-  const b = Number(m[2]);
+function ipv4PrivateBytes(a: number, b: number): boolean {
   if (a === 0 || a === 10 || a === 127) return true; // 本网络 / 内网 / 环回
   if (a === 169 && b === 254) return true; // 链路本地（云厂商元数据常见）
   if (a === 172 && b >= 16 && b <= 31) return true;
@@ -31,12 +27,61 @@ function ipv4Private(ip: string): boolean {
   return false;
 }
 
+function ipv4Private(ip: string): boolean {
+  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  return ipv4PrivateBytes(Number(m[1]), Number(m[2]));
+}
+
+/** IPv6 文本 → 16 字节；不合法返回 null（支持 `::` 压缩、`%zone` 与尾段点分 IPv4）。 */
+function ipv6Bytes(ip: string): number[] | null {
+  let text = ip.toLowerCase();
+  const zone = text.indexOf("%");
+  if (zone >= 0) text = text.slice(0, zone);
+  const dotted = text.match(/^(.*:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (dotted) {
+    const o = dotted[2].split(".").map(Number);
+    if (o.some((n) => n > 255)) return null;
+    text = `${dotted[1]}${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
+  }
+  const double = text.indexOf("::");
+  const compressed = double >= 0;
+  if (compressed && double !== text.lastIndexOf("::")) return null;
+  const left = compressed ? text.slice(0, double) : text;
+  const right = compressed ? text.slice(double + 2) : "";
+  const lg = splitGroups(left);
+  const rg = splitGroups(right);
+  if (!lg || !rg) return null;
+  const groups = compressed ? [...lg, ...Array(Math.max(0, 8 - lg.length - rg.length)).fill(0), ...rg] : lg;
+  if (groups.length !== 8) return null;
+  const bytes: number[] = [];
+  for (const g of groups) bytes.push(g >> 8, g & 0xff);
+  return bytes;
+}
+
+function splitGroups(chunk: string): number[] | null {
+  if (chunk === "") return [];
+  const out: number[] = [];
+  for (const part of chunk.split(":")) {
+    if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+    out.push(parseInt(part, 16));
+  }
+  return out;
+}
+
 function ipv6Private(ip: string): boolean {
-  const s = ip.toLowerCase();
-  if (s === "::" || s === "::1") return true;
-  if (s.startsWith("fe8") || s.startsWith("fe9") || s.startsWith("fea") || s.startsWith("feb")) return true; // 链路本地
-  if (s.startsWith("fc") || s.startsWith("fd")) return true; // ULA
-  if (s.startsWith("::ffff:")) return ipv4Private(s.slice(7)); // IPv4 映射地址
+  const b = ipv6Bytes(ip);
+  if (!b) return false;
+  // IPv4 映射地址（::ffff:a.b.c.d）：按尾四节的 IPv4 规则判。
+  // 注意 `new URL()` 会把 [::ffff:192.168.1.2] 规范成 [::ffff:c0a8:102]，
+  // 所以这里必须按**字节**判而不是看字符串前缀——按前缀判时，压缩写法正好绕过整张黑名单。
+  let zero = true;
+  for (let i = 0; i < 10; i++) zero = zero && b[i] === 0;
+  if (zero && b[10] === 0xff && b[11] === 0xff) return ipv4PrivateBytes(b[12], b[13]);
+  if (b.every((x) => x === 0)) return true; // ::
+  if (b.every((x, i) => (i === 15 ? x === 1 : x === 0))) return true; // ::1
+  if (b[0] === 0xfe && (b[1] >> 4) >= 8 && (b[1] >> 4) <= 0xb) return true; // 链路本地 fe80::-febf:
+  if (b[0] === 0xfc || b[0] === 0xfd) return true; // ULA
   return false;
 }
 

@@ -8,7 +8,7 @@
 // 的唯一硬证据。
 //
 //   node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
-//                                      [--keep=/api/articles] [--money] [--community] [--admin] [--study]
+//                     [--keep=/api/articles] [--money] [--community] [--admin] [--study] [--import]
 //
 // --keep  声明"这一次必须仍由 Node 应答"的前缀：切流范围变了，这个负断言也要跟着换，
 //         否则"未切流"的断言会在切到 /api/articles 那一档时自己打自己。
@@ -36,6 +36,7 @@ const MONEY = process.argv.includes("--money");
 const COMMUNITY = process.argv.includes("--community");
 const ADMIN = process.argv.includes("--admin");
 const STUDY = process.argv.includes("--study");
+const IMPORT = process.argv.includes("--import");
 
 let pass = 0;
 let fail = 0;
@@ -285,6 +286,64 @@ if (STUDY) {
     { body: { title: "x", content: "y" }, cookie: c5, headers: { origin: "https://evil.example" } });
   if (studyCsrf.status === 403 && studyCsrf.backend === "") ok("书房写请求的 CSRF 也在边缘拦住");
   else bad("书房写请求的 CSRF 也在边缘拦住", `${studyCsrf.status} backend=${studyCsrf.backend || "无"}`);
+}
+
+// 9) P5e 迁移工具经代理：这条链路的防护**不能因为换了入口就松一档**——
+//    SSRF 黑名单要在落在 Java 的那一侧照样生效，multipart 的文件名要能穿过 rewrite。
+if (IMPORT) {
+  const login6 = await call("POST", "/api/auth/login", { body: { email: creds[0], password: creds[1] } });
+  const c6 = setCookie(login6.res);
+  const probes = [
+    ["未登录用迁移工具 → 401", { url: "http://127.0.0.1:4599/rss2" }, undefined, 401,
+      "登录后才能使用迁移工具（文章导入到你自己的账号）"],
+    ["环回地址经代理照样被拒", { url: "http://127.0.0.1:4599/rss2" }, c6, 400,
+      "禁止抓取内网/环回地址（安全防护）"],
+    ["十进制写法的环回也被拒（归一化在 Java 侧同样生效）",
+      { url: "http://2130706433:4599/rss2" }, c6, 400, "禁止抓取内网/环回地址（安全防护）"],
+  ];
+  for (const [label, body, cookie, want, text] of probes) {
+    const r = await call("POST", "/api/import", { body, cookie });
+    if (r.status === want && r.backend === "inkstack-java" && r.json?.error === text) {
+      ok(`经代理的${label}`, `backend=${r.backend}`);
+    } else {
+      bad(`经代理的${label}`, `${r.status}/${want} backend=${r.backend || "无"} body=${r.text.slice(0, 70)}`);
+    }
+  }
+  // Content-Type 与坏 JSON 都要发**原始**请求体，call() 会替我 JSON.stringify，这里直接 fetch
+  for (const [label, type, payload, text] of [
+    ["Content-Type 不认 → 400", "text/plain", "url=x",
+      "Content-Type 须为 application/json（RSS）或 multipart/form-data（Markdown）"],
+    ["坏 JSON → 覆盖整段解析的那条兜底", "application/json", "{not json", "抓取/解析失败，请检查内容格式"],
+  ]) {
+    const res = await fetch(`${base}/api/import`, {
+      method: "POST", headers: { "content-type": type, cookie: c6 }, body: payload,
+    });
+    const json = await res.json().catch(() => null);
+    const backend = res.headers.get("x-backend") ?? "";
+    if (res.status === 400 && backend === "inkstack-java" && json?.error === text) {
+      ok(`经代理的${label}`, `backend=${backend}`);
+    } else {
+      bad(`经代理的${label}`, `${res.status} backend=${backend || "无"} ${JSON.stringify(json).slice(0, 70)}`);
+    }
+  }
+  // 只传一个不合法的文件名：一条数据都不写，但要证明 multipart 的**文件名**穿过了 rewrite
+  const form = new FormData();
+  form.append("files", new Blob(["probe"], { type: "text/markdown" }), "probe.exe");
+  const up = await fetch(`${base}/api/import`, { method: "POST", headers: { cookie: c6 }, body: form });
+  const upJson = await up.json().catch(() => null);
+  if (up.status === 200 && (up.headers.get("x-backend") ?? "") === "inkstack-java"
+    && upJson?.imported === 0 && upJson?.skipped?.[0]?.title === "probe.exe") {
+    ok("经代理的 multipart 保留了原始文件名（没有退化成 __SKIP__）",
+      upJson?.skipped?.[0]?.title);
+  } else {
+    bad("经代理的 multipart 保留了原始文件名",
+      `${up.status} backend=${up.headers.get("x-backend") || "无"} ${JSON.stringify(upJson).slice(0, 90)}`);
+  }
+  const importCsrf = await call("POST", "/api/import",
+    { body: { url: "http://127.0.0.1:4599/rss2" }, cookie: c6, headers: { origin: "https://evil.example" } });
+  if (importCsrf.status === 403 && importCsrf.backend === "") ok("迁移工具的写请求 CSRF 也在边缘拦住");
+  else bad("迁移工具的写请求 CSRF 也在边缘拦住",
+    `${importCsrf.status} backend=${importCsrf.backend || "无"}`);
 }
 
 console.log(`\nbase=${base}  合计 ${pass + fail} 项，失败 ${fail} 项`);

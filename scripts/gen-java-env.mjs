@@ -58,6 +58,11 @@ const out = [
   // 必须写正斜杠：.properties 里反斜杠是转义符，`\uploads` 会被当成 \u 统一码转义起手，
   // 整个配置文件直接解析失败（Windows 上 Java 认正斜杠路径）。
   `INKSTACK_UPLOAD_DIR=${path.join(root, "public", "uploads").replace(/\\/g, "/")}`,
+  // RSS 抓取的私网黑名单总闸：两栈必须读同一个值，否则"一侧允许本机订阅源、另一侧一律拒绝"
+  // 会变成对拍里最难解释的那种红。默认不透传——未设置时 Java 侧按 0 处理，与 Node 同。
+  ...(process.env.IMPORT_ALLOW_PRIVATE || env.IMPORT_ALLOW_PRIVATE
+    ? [`IMPORT_ALLOW_PRIVATE=${process.env.IMPORT_ALLOW_PRIVATE || env.IMPORT_ALLOW_PRIVATE}`]
+    : []),
   "",
 ].join('\n');
 
