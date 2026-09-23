@@ -96,7 +96,7 @@ public interface UserMapper extends BaseMapper<User> {
   @Select("SELECT id FROM users WHERE email = #{email} LIMIT 1")
   Long idByEmail(@Param("email") String email);
 
-  /* ===== 余额改写入口：全工程只有这四条语句允许动 points_balance（充值/退款/签到/分账都走它们） ===== */
+  /* ===== 余额改写入口：全工程只有这五条语句允许动 points_balance（充值/退款/签到/分账/运营调整都走它们） ===== */
 
   /** 锁自己账户行后读余额。资金链路的扣款前置——不锁就有并发双花。 */
   @Select("SELECT points_balance FROM users WHERE id = #{uid} FOR UPDATE")
@@ -121,4 +121,12 @@ public interface UserMapper extends BaseMapper<User> {
   /** 入账。同上，必须与流水同事务。 */
   @Update("UPDATE users SET points_balance = points_balance + #{amount} WHERE id = #{uid}")
   int credit(@Param("uid") long uid, @Param("amount") long amount);
+
+  /**
+   * 运营台"扣回点墨"的<b>绝对值</b>写入：Node 先按真实余额算出 after 再整行覆盖，
+   * 因为账面必须与余额同源——用 GREATEST 把差额掩盖掉，Σ流水 就会与余额永久对不上。
+   * 只允许在 {@link #lockBalance} 之后调用，且必须与流水同事务。
+   */
+  @Update("UPDATE users SET points_balance = #{value} WHERE id = #{uid}")
+  int setBalanceAbsolute(@Param("uid") long uid, @Param("value") long value);
 }

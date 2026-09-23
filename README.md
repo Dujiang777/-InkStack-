@@ -27,7 +27,7 @@
 | P4 | 墨水经济（充值 / 打赏 / 解锁 / 打包 / 加热 / 签到 / 徽章） | ✅ | 资金闸门 **100/100**：六路跨栈并发双击零 500、`Δ余额 = ΔΣ流水` 精确成立、幂等分支跨栈一致；切流代理含资金路径 **16/16** |
 | P5a | 社区互动写侧（评论 / 点赞 / 收藏 / 关注 / 举报 / 站内信） | ✅ | 社区闸门 **108/108**（连跑三轮全绿）：并发举报只落 1 行、`like_count = 关系行数` 守恒、奖励日上限拒了不吞额度；切流代理含社区路径 **24/24** |
 | P5b | 创作台写侧（发布 / 存草稿 / 草稿转正 / 更新重审 / 撤回 / 硬删） | ✅ | 创作台闸门 **51/51**：8 路并发同名标题零 500 且 slug 互不相同、审核归属只认 Cookie 里的 role、草稿硬删连子表一并清 |
-| P5c | 运营台（举报处理 / 内容审核 / 用户与评论管理 / 角色） | ⏳ | — |
+| P5c | 运营台（内容审核 / 评论删除 / 举报处理 / 用户管理）+ 两个全文出口 `{slug}/raw`、`{slug}/export` | ✅ | 运营台闸门 **65/65**：四条接口逐个 401/403、下架连带清置顶、扣回按真实余额记账、导出正文两侧逐字一致且不泄漏后端端口；切流代理含运营台路径 **31/31** |
 | P6 | AI 分身：Spring AI Alibaba 替换 Python AgentScope 服务 | ⏳ | 需保持 NDJSON 契约 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
@@ -44,9 +44,11 @@
 - 社区互动：`GET|POST /api/articles/{slug}/comments` · `POST /api/articles/{slug}/like|bookmark|report|paywall-view`
   · `POST /api/comments/{id}/like|report` · `POST /api/users/{id}/follow` · `GET /api/notifications`
   · `POST /api/notifications/read`
-- 创作台：`POST /api/articles` · `PUT|DELETE /api/articles/{slug}`（与已有的 `GET` 两条合起来，
-  这两个路径上的方法集合已完整；但 `/api/articles` **前缀**还不能整体切——
-  同前缀下的 `{slug}/raw`、`{slug}/export` 还在 Node，切了就是 405，见闸门 8）
+- 创作台：`POST /api/articles` · `PUT|DELETE /api/articles/{slug}` · `GET /api/articles/{slug}/raw`
+  · `GET /api/articles/{slug}/export`（至此 `/api/articles` **整前缀**在 Java 上方法集合已齐，
+  闸门 8 现算出的可整体切流前缀包含它）
+- 运营台：`POST /api/admin/articles|comments|reports|users`（内容管理与审核、删评论连带回复、
+  举报三种处置、封禁与点墨增减；`setRole` 两栈都只认 developer，admin 也一样 403）
 - 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
   `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
@@ -70,6 +72,12 @@
   进 `tx.execute` 之前就已求值，那句 `FOR UPDATE` 自动提交、取到锁立刻放掉），六路并发于是落两行。
   现在锚点以 `Supplier` 传进事务内执行。这类"看着只是风格"的差别，只有并发打才暴露，
   而 `reports` 表上没有 `(reporter,target)` 唯一索引，没有任何第二道兜底。
+- 导出 Markdown 的 `md.trim()` 同样栽在上一条那个坑里：Java 的 `trim()` 留着全角空格与 BOM 开头，
+  两侧导出的字节就差在那里。已改 `NodeShapes.jsTrim()`。
+- **DATETIME 不是 UTC**：mysql2 按**驱动本地时区**解释库里的 `DATETIME`（实测 `+08` 机器上
+  `'2030-01-02 03:04:05'` → `2030-01-01T19:04:05.000Z`），Node 再 `toISOString()` 吐回。
+  Java 必须落在同一个瞬间上——两侧读的都是 `2030-01-01T19:04:05.000Z`，
+  而"库里存的串就是 UTC"这个直觉会把早鸟到点整体推后一个时区。
 
 页面侧（Server Component 进程内取数，不经 HTTP）：`lib/data.ts` 的**只读内容面已全部可分流**
 ——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
@@ -95,6 +103,11 @@ agent-service/ (Python FastAPI + AgentScope) :8100 —— 原实现，P6 换成 
 安全闸口（限流、CSRF、安全响应头）留在 Next 边缘中间件里，**与"谁来处理请求"解耦**——
 所以切流不会削弱任何一道防线。浏览器不直连 Java：会话 Cookie 是 host-only，而 CSRF 校验比对的是
 带端口的 Origin，因此所有到 Java 的请求都由 Next 服务端转发。
+转发这条路上有一处会静默出错：`NextResponse.rewrite` 会把请求的 **Host 覆写成后端地址**，
+所以任何"由请求自己算绝对链接"的逻辑（导出 Markdown 里的 `url:` 与原文链接）都会得到
+`http://localhost:3101/...` 这种用户不该看到的内网地址。middleware 因此在转发前显式
+`set` 了 `x-forwarded-host` / `x-forwarded-proto`（用 set 而非 append，客户端伪造的同名头到不了 Java），
+Java 侧按「站点配置 → x-forwarded-host → Host」三级取值，闸门 11 反向断言 `:3101` 绝不出现在导出里。
 
 ## ✨ 功能与归属
 
@@ -116,7 +129,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十一道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -222,6 +235,20 @@ node scripts/studio-check.mjs
 #     分条自动提交就会留下"稿子还在、点赞却被清空"的部分删除。
 #   · 早鸟折扣的入参时间走 JS `new Date(串)` 的口径解析（无时区的日期时间 = 本地时区），
 #     两侧对同一个 datetime-local 串必须算出同一个 UTC 瞬间，否则早鸟到点差一个时区。
+
+# 11) 运营台闸门：这一批的洞不在"算得对不对"，而在权限与状态机。
+node scripts/admin-check.mjs
+#   · 门禁逐条接口都要 401/403 两栈齐全：少一个，运营台就成了任何人都能调的写接口；
+#     `setRole` 更是 developer 专属——前端隐藏下拉不是防线，admin 打过去也必须 403。
+#   · 状态机要能回退且不留僵尸态：pin 是 toggle（跨栈同一套 1-pinned 语义）、
+#     下架必须连带 pinned=0/featured=0、通过审核要把旧的驳回说明清成 NULL。
+#   · 扣回点墨按**真实余额变化**记 `applied`：原写法 `GREATEST(0, …)` 会留下
+#     "账记 -10000、余额只掉 60"，`point_ledger` 求和与余额从此永久对不上。
+#   · `{slug}/raw` 认作者与运营、`{slug}/export` 认付费墙（未解锁 402）：这两个是全文出口，
+#     少判一句就是可以无限拉全文的洞。夹具正文刻意排到第 9 行——读侧在 SQL 层只留前 6 行，
+#     "导出的是全文"这句话只有这样才能被断言。
+#   · 导出内嵌绝对链接：两侧各用自己的 origin 拼接，比对前必须抹掉站点地址；
+#     经代理那一条反过来断言 `:3101` 绝不出现（见闸门 6 的 x-forwarded-host）。
 ```
 
 切流与回滚：
@@ -234,20 +261,23 @@ JAVA_ROUTES=/api/articles            # 逗号分隔前缀；* 为全切；留空
 
 前缀太粗时可用**段通配**逐条切：条目里的 `*` 只匹配一个路径段，其余字符按字面转义，
 命中判断仍是 `^前缀(?:/|$)`。所以 `/api/articles/*/unlock` 只把解锁这一个动作交给 Java，
-同前缀下的 `PUT /api/articles/{slug}`（Java 还没有）继续留在 Node——
-P4 的资金端点就是这样切走的，`/api/articles` 整前缀要等 P5/P6 补齐 POST/PUT/DELETE/like/bookmark 之后。
+同前缀下尚未迁完的分支继续留在 Node——P4 的资金端点就是这样切走的。
+P5c 之后 `/api/articles` 与 `/api/admin` 两个前缀已经**整前缀安全**（闸门 8 现算），
+下面的实例仍写成段通配是有意的：这样 `--keep=/api/articles` 那条"没在名单里的前缀不得被带走"
+的负断言才有落点。真要整体切，把这两条换成 `/api/articles,/api/admin` 并把 `--keep` 指到一个还没迁的前缀。
 
-闸门 6/7 用的那个"已切流"实例就是这么起的（第二个 dev 实例必须给独立 distDir）：
+闸门 6/7/11 用的那个"已切流"实例就是这么起的（第二个 dev 实例必须给独立 distDir）：
 
 ```bash
-NEXT_DIST_DIR=.next-cutover \
+MSYS_NO_PATHCONV=1 NEXT_DIST_DIR=.next-cutover \
 JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,/api/notifications,\
-/api/users/*/follow,/api/comments/*/like,/api/comments/*/report,\
+/api/admin,/api/users/*/follow,/api/comments/*/like,/api/comments/*/report,\
 /api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/articles/*/comments,\
 /api/articles/*/like,/api/articles/*/bookmark,/api/articles/*/report,/api/articles/*/paywall-view,\
-/api/series/*/bundle \
+/api/articles/*/raw,/api/articles/*/export,/api/series/*/bundle \
   node node_modules/next/dist/bin/next dev -p 3400
-node scripts/proxy-cutover-check.mjs --money --community --base=http://localhost:3400
+node scripts/proxy-cutover-check.mjs --money --community --admin --base=http://localhost:3400
+node scripts/admin-check.mjs          # 其中的"经代理导出可比对"一节会打这个实例
 ```
 
 临时实例会把 `next-env.d.ts` / `tsconfig.json` 里的构建目录指针改写成 `.next-cutover`，**提交前 revert 这两个文件**；
@@ -318,9 +348,9 @@ mvn spring-boot:run                  # http://localhost:3101
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── agent-service/          # Python AgentScope 分身服务（P6 替换）
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 十道闸门（parity / interop / paywall / page-parity / auth-flow /
+├── scripts/                # 十一道闸门（parity / interop / paywall / page-parity / auth-flow /
 │                           #   proxy-cutover / money-check / route-inventory / community-check /
-│                           #   studio-check）+ 种子与运维脚本
+│                           #   studio-check / admin-check）+ 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
 

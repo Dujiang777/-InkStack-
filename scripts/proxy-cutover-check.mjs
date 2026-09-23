@@ -8,13 +8,16 @@
 // 的唯一硬证据。
 //
 //   node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
-//                                      [--keep=/api/articles] [--money] [--community]
+//                                      [--keep=/api/articles] [--money] [--community] [--admin]
 //
 // --keep  声明"这一次必须仍由 Node 应答"的前缀：切流范围变了，这个负断言也要跟着换，
 //         否则"未切流"的断言会在切到 /api/articles 那一档时自己打自己。
 // --money 追加资金写链路经代理的证据（P4）。只挑不改账的用例：
 //         已签到用户的 POST /api/checkin → already；非法档位的 POST tip → 400。
 // --community 追加社区互动经代理的证据（P5）：未登录/参数非法/只读三类，同样一笔数据都不改。
+// --admin 追加运营台与两个全文出口经代理的证据（P5c）。导出这条额外断言一件事：
+//         经 rewrite 转发后，Markdown 里的绝对链接必须是**浏览器看到的地址**，
+//         不能是后端端口——Next 的 rewrite 会覆写 Host，所以 Java 必须读 x-forwarded-host。
 import fs from "node:fs";
 import path from "node:path";
 
@@ -31,6 +34,7 @@ const base = arg("base", process.env.PARITY_NODE || env.PARITY_NODE || "http://l
 const KEEP_PREFIX = arg("keep", "/api/articles");
 const MONEY = process.argv.includes("--money");
 const COMMUNITY = process.argv.includes("--community");
+const ADMIN = process.argv.includes("--admin");
 
 let pass = 0;
 let fail = 0;
@@ -167,6 +171,47 @@ if (COMMUNITY) {
     { cookie: c3, headers: { origin: "https://evil.example" } });
   if (likeCsrf.status === 403 && likeCsrf.backend === "") ok("社区写请求的 CSRF 也在边缘拦住");
   else bad("社区写请求的 CSRF 也在边缘拦住", `${likeCsrf.status} backend=${likeCsrf.backend || "无"}`);
+}
+
+// 8) P5c 运营台与两个全文出口经代理：门禁要落在 Java，导出不得泄漏后端端口
+if (ADMIN) {
+  const login4 = await call("POST", "/api/auth/login", { body: { email: creds[0], password: creds[1] } });
+  const c4 = setCookie(login4.res);
+  const readerLogin = await call("POST", "/api/auth/login", {
+    body: { email: env.INK_PROBE_EMAIL, password: env.INK_PROBE_PASSWORD },
+  });
+  const c4r = setCookie(readerLogin.res);
+  const SEED = "/api/articles/bo-20260911-1";
+  const probes = [
+    ["未登录打运营台 → 401", "POST", "/api/admin/users", { userId: 1, action: "unban" }, undefined, 401, "请先登录"],
+    ["读者打运营台 → 403", "POST", "/api/admin/users", { userId: 1, action: "unban" }, c4r, 403, "仅管理团队可操作"],
+    ["运营参数非法 → 400（两栈同文案）", "POST", "/api/admin/articles", { slug: "x", action: "nope" }, c4, 400,
+      "action ∈ publish|unpublish|pin|unpin|feature|unfeature|approve|reject"],
+    ["未登录读原文 → 401", "GET", `${SEED}/raw`, undefined, undefined, 401, "请先登录"],
+    ["读者读他人原文 → 403", "GET", `${SEED}/raw`, undefined, c4r, 403, "仅作者本人可读取原文"],
+  ];
+  for (const [label, method, p, body, cookie, want, text] of probes) {
+    const r = await call(method, p, { body, cookie });
+    if (r.status === want && r.backend === "inkstack-java" && r.json?.error === text) {
+      ok(`经代理的${label}`, `backend=${r.backend}`);
+    } else {
+      bad(`经代理的${label}`, `${r.status}/${want} backend=${r.backend || "无"} body=${r.text.slice(0, 70)}`);
+    }
+  }
+  // 导出经 rewrite：Next 会把 Host 覆写成后端地址，绝对链接若不读 x-forwarded-host 就会带出 3101
+  const ex = await call("GET", `${SEED}/export`, { cookie: c4 });
+  if (ex.status === 200 && ex.backend === "inkstack-java"
+    && ex.text.includes(`url: "${base}/article/bo-20260911-1"`) && !/:3101/.test(ex.text)) {
+    ok("经代理导出的绝对链接落在浏览器地址上（未泄漏后端端口）",
+      (ex.text.match(/^url: .*/m) ?? [""])[0]);
+  } else {
+    bad("经代理导出的绝对链接落在浏览器地址上",
+      `${ex.status} backend=${ex.backend || "无"} ${(ex.text.match(/^url: .*/m) ?? [""])[0]}`);
+  }
+  const adminCsrf = await call("POST", "/api/admin/articles",
+    { body: { slug: "x", action: "pin" }, cookie: c4, headers: { origin: "https://evil.example" } });
+  if (adminCsrf.status === 403 && adminCsrf.backend === "") ok("运营台写请求的 CSRF 也在边缘拦住");
+  else bad("运营台写请求的 CSRF 也在边缘拦住", `${adminCsrf.status} backend=${adminCsrf.backend || "无"}`);
 }
 
 console.log(`\nbase=${base}  合计 ${pass + fail} 项，失败 ${fail} 项`);

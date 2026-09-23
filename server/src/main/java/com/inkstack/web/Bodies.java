@@ -84,6 +84,15 @@ public final class Bodies {
     }
   }
 
+  /** {@code JSON.stringify(字符串)}：导出 frontmatter 用它，值里的冒号与引号才不会破坏 YAML 解析。 */
+  public static String jsonString(String value) {
+    try {
+      return MAPPER.writeValueAsString(value == null ? "" : value);
+    } catch (Exception impossible) {
+      return "\"" + value + "\"";
+    }
+  }
+
   /**
    * JS 的 {@code String(value)}：标签这类"客户端可能塞任何类型"的数组要走它，
    * 否则 {@code tags:[1,2]} 在两栈会变成不同的字符串（{@code "2"} vs {@code "2.0"}）。

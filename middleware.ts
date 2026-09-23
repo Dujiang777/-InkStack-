@@ -134,7 +134,15 @@ export function middleware(req: NextRequest) {
 
   const res = NextResponse.next();
   if (routedToJava(pathname)) {
-    const proxied = NextResponse.rewrite(new URL(pathname + req.nextUrl.search, javaBase));
+    const target = new URL(pathname + req.nextUrl.search, javaBase);
+    // 把浏览器看到的 host/proto 显式传给 Java：Next 的 rewrite 会把请求的 Host 换成后端地址，
+    // 于是 Java 自己算出来的 origin 是内网端口——导出的 Markdown 里每个链接都会变成
+    // http://localhost:3101/... 这种用户不该看到的地址。这里用 set 覆盖（不是 append），
+    // 客户端伪造的同名头到不了 Java。
+    const forwarded = new Headers(req.headers);
+    forwarded.set("x-forwarded-host", req.headers.get("host") ?? "");
+    forwarded.set("x-forwarded-proto", req.nextUrl.protocol.replace(/:$/, ""));
+    const proxied = NextResponse.rewrite(target, { request: { headers: forwarded } });
     for (const [k, v] of Object.entries(securityHeaders())) proxied.headers.set(k, v);
     return proxied;
   }
