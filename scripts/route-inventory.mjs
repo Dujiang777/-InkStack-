@@ -127,6 +127,18 @@ for (const [url, methods] of node) {
   if (onlyNode.length || onlyJava.length) divergent.push({ key, onlyNode, onlyJava });
 }
 
+/**
+ * 已知"同 URL 同方法、语义却不同"的冲突登记。
+ *
+ * <p>方法集合齐了不等于可以切：Node 的 {@code GET /api/series} 是书房管理器的"我的专栏"（要登录、
+ * 回 {ok,series:[{id,title,description}]}），Java 的同一条是公开合集架（匿名、回另一套形状）。
+ * 这种差别机器算不出来，一旦被算成"可整体切流"，切过去就是把书房管理器打成 200 空列表且不报错。
+ * 所以这类点必须由人写在这里，清单负责让它**挡住前缀**而不是被人忘掉。
+ */
+const SEMANTIC_CLASHES = [
+  "/api/series", // GET：Node=我的专栏 / Java=公开合集架（P7 删掉 Node 侧后此条自动失效）
+];
+
 /** 可安全切流的前缀：该前缀下所有 Node 路由的每个方法都在 Java 里存在。 */
 function safePrefixes() {
   const byPrefix = new Map();
@@ -146,7 +158,10 @@ function safePrefixes() {
     const blocked = routes.flatMap((r) => r.methods
       .filter((m) => !javaMethods(r.key).has(m))
       .map((m) => `${m} ${r.key}`));
-    if (!blocked.length) safe.push({ prefix, count: routes.length });
+    // 语义冲突按"URL 命中或位于该前缀之下"判：切 /api/series 当然会把 GET /api/series 一起带走
+    const clash = SEMANTIC_CLASHES.find((c) => prefix === c || prefix.startsWith(`${c}/`)
+      || routes.some((r) => r.key === c));
+    if (!blocked.length && !clash) safe.push({ prefix, count: routes.length });
   }
   return safe.sort((a, b) => b.count - a.count || a.prefix.localeCompare(b.prefix));
 }
@@ -192,6 +207,10 @@ if (JSON_ONLY) {
   for (const c of covered) console.log(`   ${c.methods.join(",").padEnd(12)} ${c.url}`);
   console.log(`\n【当前可安全整体切流的最长前缀】`);
   for (const s of longest) console.log(`   ${s.prefix.padEnd(34)} 覆盖 ${s.count} 个 URL 模式`);
+  const held = SEMANTIC_CLASHES.filter((c) => nodeKeys.includes(c));
+  if (held.length) {
+    console.log(`   （另有 ${held.length} 处已登记的"同 URL 同方法但语义不同"，其所在前缀已被扣住：${held.join("、")}）`);
+  }
   console.log(`\n判定：${missing.length ? "存在缺口 → 上面未列出的前缀一律不要整体切（可用段通配逐条切）" : "无缺口"}；`
     + `清单由本脚本现算，改完任一侧路由都要重跑一次再决定切流范围。`);
 }

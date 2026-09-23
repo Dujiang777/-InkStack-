@@ -8,7 +8,7 @@
 // 的唯一硬证据。
 //
 //   node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
-//                                      [--keep=/api/articles] [--money] [--community] [--admin]
+//                                      [--keep=/api/articles] [--money] [--community] [--admin] [--study]
 //
 // --keep  声明"这一次必须仍由 Node 应答"的前缀：切流范围变了，这个负断言也要跟着换，
 //         否则"未切流"的断言会在切到 /api/articles 那一档时自己打自己。
@@ -35,6 +35,7 @@ const KEEP_PREFIX = arg("keep", "/api/articles");
 const MONEY = process.argv.includes("--money");
 const COMMUNITY = process.argv.includes("--community");
 const ADMIN = process.argv.includes("--admin");
+const STUDY = process.argv.includes("--study");
 
 let pass = 0;
 let fail = 0;
@@ -212,6 +213,78 @@ if (ADMIN) {
     { body: { slug: "x", action: "pin" }, cookie: c4, headers: { origin: "https://evil.example" } });
   if (adminCsrf.status === 403 && adminCsrf.backend === "") ok("运营台写请求的 CSRF 也在边缘拦住");
   else bad("运营台写请求的 CSRF 也在边缘拦住", `${adminCsrf.status} backend=${adminCsrf.backend || "无"}`);
+}
+
+// 8) P5d 书房写侧经代理：门禁姿势要落在 Java，最要紧的一条是 **multipart 能不能穿过 rewrite**
+//    （上传的请求体是二进制边界，rewrite 掉任何一帧的表现都是"上传成功但图是坏的"）
+if (STUDY) {
+  const login5 = await call("POST", "/api/auth/login", { body: { email: creds[0], password: creds[1] } });
+  const c5 = setCookie(login5.res);
+  const probes = [
+    ["未登录存草稿 → 401", "PUT", "/api/drafts", { title: "经代理探针", content: "x" }, undefined, 401, "未登录，草稿将暂存本地"],
+    ["未登录读草稿 → 401", "GET", "/api/drafts?title=x", undefined, undefined, 401, "未登录，草稿将暂存本地"],
+    ["运营读外链队列参数非法 → 400", "PUT", "/api/links", { id: 0, action: "approve" }, c5, 400,
+      "参数：id + action(approve|reject)"],
+    ["未登录改资料 → 401", "PATCH", "/api/me/profile", { nickname: "经代理" }, undefined, 401, "请先登录"],
+    ["未登录改密 → 401", "PATCH", "/api/me/password", { oldPassword: "a", newPassword: "b" }, undefined, 401, "请先登录"],
+  ];
+  for (const [label, method, p, body, cookie, want, text] of probes) {
+    const r = await call(method, p, { body, cookie });
+    if (r.status === want && r.backend === "inkstack-java" && r.json?.error === text) {
+      ok(`经代理的${label}`, `backend=${r.backend}`);
+    } else {
+      bad(`经代理的${label}`, `${r.status}/${want} backend=${r.backend || "无"} body=${r.text.slice(0, 70)}`);
+    }
+  }
+  // 已登记的语义冲突前缀必须**留在 Node**：闸门 8 记下 GET /api/series 两栈不同义之后，
+  // 这里反向断言它确实没被切走——登记表不配上这条负断言，就只是一段注释。
+  // 用非法题名打（Node 会先校验再落库），这样既不写数据又能看出是谁应答的。
+  const seriesKept = await call("POST", "/api/series", { body: { title: "x" }, cookie: c5 });
+  if (seriesKept.backend === "" && seriesKept.status === 400) {
+    ok("/api/series 仍在 Node 应答（同 URL 语义冲突：Node=我的专栏 / Java=公开合集架）");
+  } else {
+    bad("/api/series 仍在 Node 应答", `${seriesKept.status} backend=${seriesKept.backend || "无"}`);
+  }
+  // 游客上报足迹：经代理也必须保持"200 skipped 而不是 401"这个反直觉的姿势
+  const skip = await call("POST", "/api/history", { body: { slug: "bo-20260911-1" } });
+  if (skip.status === 200 && skip.backend === "inkstack-java" && skip.json?.skipped === true) {
+    ok("经代理的游客足迹上报仍是 200 skipped", `backend=${skip.backend}`);
+  } else {
+    bad("经代理的游客足迹上报仍是 200 skipped", `${skip.status} backend=${skip.backend || "无"} ${skip.text.slice(0, 60)}`);
+  }
+  // multipart 经 rewrite：一张 16 字节的合法 PNG，上传完把磁盘上的文件删掉
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const form = new FormData();
+  form.append("file", new Blob([png], { type: "image/png" }), "probe.png");
+  let uploaded = "";
+  try {
+    const res = await fetch(`${base}/api/uploads`, { method: "POST", headers: { cookie: c5 }, body: form });
+    const body = await res.json().catch(() => null);
+    uploaded = String(body?.url ?? "");
+    if (res.status === 200 && (res.headers.get("x-backend") ?? "") === "inkstack-java"
+      && /^\/uploads\/\d{13}-[0-9a-f]{8}\.png$/.test(uploaded)) {
+      ok("multipart 上传经 rewrite 完整到达 Java（边界与二进制体都没丢）", uploaded);
+    } else {
+      bad("multipart 上传经 rewrite 完整到达 Java", `${res.status} backend=${res.headers.get("x-backend") || "无"} ${uploaded}`);
+    }
+  } catch (down) {
+    bad("multipart 上传经 rewrite 完整到达 Java", String(down?.message ?? down));
+  }
+  if (uploaded) {
+    // 经代理上传的图要能从**另一个栈**读到：两栈共用同一个 public/uploads 才算真接通
+    const sibling = await fetch(`${base}${uploaded}`, { method: "GET" });
+    const onDisk = path.join(root, "public", "uploads", path.basename(uploaded));
+    if (sibling.status === 200 && fs.existsSync(onDisk)) {
+      ok("经代理上传的图能原样读回", `${sibling.status} ${sibling.headers.get("content-type")}`);
+    } else {
+      bad("经代理上传的图能原样读回", `${sibling.status} 落盘=${fs.existsSync(onDisk)}`);
+    }
+    fs.rmSync(onDisk, { force: true });
+  }
+  const studyCsrf = await call("PUT", "/api/drafts",
+    { body: { title: "x", content: "y" }, cookie: c5, headers: { origin: "https://evil.example" } });
+  if (studyCsrf.status === 403 && studyCsrf.backend === "") ok("书房写请求的 CSRF 也在边缘拦住");
+  else bad("书房写请求的 CSRF 也在边缘拦住", `${studyCsrf.status} backend=${studyCsrf.backend || "无"}`);
 }
 
 console.log(`\nbase=${base}  合计 ${pass + fail} 项，失败 ${fail} 项`);

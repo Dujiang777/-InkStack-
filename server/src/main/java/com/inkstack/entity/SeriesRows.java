@@ -56,4 +56,34 @@ public final class SeriesRows {
     private Long c;
     private Long unlocked;
   }
+
+  /** 篇目重设时的 slug → 主键对照行。 */
+  @Data
+  public static class SlugId {
+    private Long id;
+    private String slug;
+  }
+
+  /** 新建专栏的入参行。{@code id} 由 {@code useGeneratedKeys} 回写，所以必须是对象而不是散参数。 */
+  @Data
+  public static class New {
+    private Long id;
+    private long authorId;
+    private String title;
+    private String description;
+  }
+
+  /** 要落进 {@code series_items} 的一篇：position 就是请求数组里的下标。 */
+  @Data
+  public static class Positioned {
+    private Long articleId;
+    private Integer position;
+
+    public Positioned() {}
+
+    public Positioned(Long articleId, int position) {
+      this.articleId = articleId;
+      this.position = position;
+    }
+  }
 }

@@ -2,9 +2,9 @@ package com.inkstack.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.inkstack.auth.LoginGuard;
+import com.inkstack.auth.PasswordChangeService;
 import com.inkstack.auth.PasswordHasher;
 import com.inkstack.auth.Totp;
-import com.inkstack.common.PwnedPasswords;
 import com.inkstack.entity.SessionRow;
 import com.inkstack.entity.User;
 import com.inkstack.common.NodeShapes;
@@ -49,29 +49,24 @@ public class SecurityController {
   private final AuditMapper audit;
   private final SessionService sessionService;
   private final LoginGuard guard;
-  private final PwnedPasswords pwned;
+  private final PasswordChangeService passwords;
   private final boolean trustProxy;
   private final ObjectMapper json = new ObjectMapper();
 
   public SecurityController(UserMapper users, SessionMapper sessions, AuditMapper audit,
-      SessionService sessionService, LoginGuard guard, PwnedPasswords pwned,
+      SessionService sessionService, LoginGuard guard, PasswordChangeService passwords,
       @Value("${inkstack.trust-proxy:0}") String trustProxy) {
     this.users = users;
     this.sessions = sessions;
     this.audit = audit;
     this.sessionService = sessionService;
     this.guard = guard;
-    this.pwned = pwned;
+    this.passwords = passwords;
     this.trustProxy = "1".equals(trustProxy);
   }
 
   private static final ResponseEntity<Map<String, Object>> NEED_LOGIN =
       ResponseEntity.status(401).body(Map.of("error", "请先登录"));
-  private static final String PW_RULE = "至少 8 位，且需同时包含字母和数字";
-
-  private static boolean weak(String pw) {
-    return pw.length() < 8 || !pw.matches(".*[a-zA-Z].*") || !pw.matches(".*[0-9].*");
-  }
 
   private void audit(String event, long uid, ClientMeta meta, String detail) {
     try {
@@ -93,38 +88,14 @@ public class SecurityController {
     if (me == null) {
       return NEED_LOGIN;
     }
-    ClientMeta meta = ClientMeta.from(request, trustProxy);
-    String key = "pwdchg:" + me.id() + ":" + meta.ip();
-    if (guard.verdict(key).locked()) {
-      return tooFrequent();
-    }
     String oldPw = body == null || body.oldPassword() == null ? "" : body.oldPassword();
     String newPw = body == null || body.newPassword() == null ? "" : body.newPassword();
-    if (weak(newPw)) {
-      return ResponseEntity.badRequest().body(Map.of("error", "新密码" + PW_RULE));
-    }
-    User u = users.byIdForSecurity(me.id());
-    if (u == null || !PasswordHasher.verify(oldPw, u.getPasswordHash())) {
-      LoginGuard.Verdict after = guard.hit(key);
-      audit("password_change", me.id(), meta, "旧密码错误");
-      return ResponseEntity.status(401).body(Map.of("error",
-          "旧密码不正确（还可尝试 " + after.remaining() + " 次）"));
-    }
-    guard.clear(key);
-    int leaked = pwned.count(newPw);
-    if (leaked > 0) {
-      return ResponseEntity.badRequest().body(Map.of("error",
-          "新密码已出现在 " + leaked + " 次已知泄露中，请换一个"));
-    }
-    users.replacePassword(me.id(), PasswordHasher.hash(newPw));
-    String currentHash = sessionService.currentTokenHash(request).orElse("");
-    int revoked = sessions.revokeOthers(me.id(), currentHash);
-    audit("password_change", me.id(), meta, "成功，下线 " + revoked + " 台其他设备");
-    Map<String, Object> out = new LinkedHashMap<>();
-    out.put("ok", true);
-    out.put("revoked", revoked);
-    out.put("hint", revoked > 0 ? "已下线其他 " + revoked + " 台设备" : "密码已更新");
-    return ResponseEntity.ok(out);
+    return toResponse(passwords.change(me.id(), oldPw, newPw, false, request));
+  }
+
+  /** 流程搬进 {@link PasswordChangeService} 后这里只剩一层壳：两个入口共用同一份安全策略。 */
+  static ResponseEntity<Map<String, Object>> toResponse(PasswordChangeService.Outcome outcome) {
+    return ResponseEntity.status(outcome.status()).body(outcome.body());
   }
 
   /** 会话列表：键名沿用 Node 的 snake_case（前端类型就是这么写的），时间统一 ISO。 */

@@ -25,16 +25,68 @@ public final class Bodies {
 
   /** 只认 JSON 对象；其余（缺体、数组、标量、坏 JSON）按空对象处理。 */
   public static JsonNode json(HttpServletRequest request) {
+    return read(request, true);
+  }
+
+  /**
+   * Node 的 {@code try { body = await req.json() } catch { return 400("请求格式有误") }}。
+   *
+   * <p>与 {@link #json} 是两种失败姿势，不能互相顶替：那一行 catch 之外没有兜底，
+   * 坏 JSON 在路由层就是一条 400；而 {@link #json} 对应的是 {@code .catch(() => ({}))}，
+   * 坏 JSON 退化成空对象、由业务校验给出自己的提示。两者的状态码和文案都不一样，
+   * 用错一处，对拍就红在"一个回 400 参数提示、一个回 400 请求格式有误"这种看不见的地方。
+   *
+   * @return 解析出的节点；读不到或不是 JSON 时返回 {@code null}，由调用方回 400
+   */
+  public static JsonNode strictJson(HttpServletRequest request) {
+    JsonNode node = read(request, false);
+    return node == null || node.isMissingNode() ? null : node;
+  }
+
+  private static JsonNode read(HttpServletRequest request, boolean lenient) {
     try {
       byte[] raw = StreamUtils.copyToByteArray(request.getInputStream());
       if (raw.length == 0) {
-        return EMPTY;
+        return lenient ? EMPTY : null;
       }
       JsonNode node = MAPPER.readTree(raw);
-      return node != null && node.isObject() ? node : EMPTY;
+      if (node == null) {
+        return lenient ? EMPTY : null;
+      }
+      if (!lenient) {
+        return node;
+      }
+      return node.isObject() ? node : EMPTY;
     } catch (Exception unreadable) {
-      return EMPTY;
+      return lenient ? EMPTY : null;
     }
+  }
+
+  /**
+   * 键是否存在（{@code body.x !== undefined}）——PATCH 类接口靠它区分"没传"与"传了空值"。
+   *
+   * <p>显式的 JSON {@code null} 算"传了"：{@code {"bundlePrice": null}} 是关闭打包的合法指令，
+   * 只有键根本不存在才是 undefined。所以这里不能用 {@code isNull()} 排除。
+   */
+  public static boolean has(JsonNode body, String field) {
+    return body != null && body.get(field) != null;
+  }
+
+  /** {@code Array.isArray(x) ? x.slice(0, limit).map(String) : null}——非数组按"没传"处理。 */
+  public static List<String> stringArray(JsonNode body, String field, int limit) {
+    JsonNode node = body == null ? null : body.get(field);
+    if (node == null || !node.isArray()) {
+      return null;
+    }
+    List<String> out = new ArrayList<>();
+    int i = 0;
+    for (JsonNode item : node) {
+      if (i++ >= limit) {
+        break;
+      }
+      out.add(stringOf(item));
+    }
+    return out;
   }
 
   /** {@code Number(body[field])}：缺字段、null、布尔之外的非标量都给 NaN，由档位校验拒掉。 */

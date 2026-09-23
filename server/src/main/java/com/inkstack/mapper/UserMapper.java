@@ -96,6 +96,25 @@ public interface UserMapper extends BaseMapper<User> {
   @Select("SELECT id FROM users WHERE email = #{email} LIMIT 1")
   Long idByEmail(@Param("email") String email);
 
+  /**
+   * 书房「印章工坊」保存资料。五个字段一并覆盖，空值口径由服务层算好：
+   * {@code avatar_text} 空时落昵称首字、{@code bio} 空时落 NULL（Node 的 {@code bio || null}）。
+   * 印泥色与印式已经过白名单，走到这里的只可能是色板 key 或空串。
+   */
+  @Update("""
+      UPDATE users
+         SET nickname = #{nickname}, avatar_text = #{avatarText},
+             avatar_tone = #{avatarTone}, avatar_shape = #{avatarShape}, bio = #{bio}
+       WHERE id = #{uid}
+      """)
+  int updateProfile(
+      @Param("uid") long uid,
+      @Param("nickname") String nickname,
+      @Param("avatarText") String avatarText,
+      @Param("avatarTone") String avatarTone,
+      @Param("avatarShape") String avatarShape,
+      @Param("bio") String bio);
+
   /* ===== 余额改写入口：全工程只有这五条语句允许动 points_balance（充值/退款/签到/分账/运营调整都走它们） ===== */
 
   /** 锁自己账户行后读余额。资金链路的扣款前置——不锁就有并发双花。 */

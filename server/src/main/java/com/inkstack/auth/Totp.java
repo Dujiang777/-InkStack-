@@ -1,5 +1,6 @@
 package com.inkstack.auth;
 
+import com.inkstack.common.NodeShapes;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -140,10 +141,13 @@ public final class Totp {
     for (int i = 0; i < 10; i++) {
       byte[] raw = new byte[6];
       RANDOM.nextBytes(raw);
-      String base64url = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
-      String token = base64url.replaceAll("[-_]", "");
-      token = (token.length() >= 8 ? token.substring(0, 8) : token).toUpperCase();
-      String code = token.substring(0, 4) + "-" + (token.length() > 4 ? token.substring(4, 8) : "");
+      // 6 字节 base64url 是 8 个字符，但去掉 -/_ 之后长度会掉到 5~8：
+      // Node 用 slice 安静地给出短一点的码，这里也必须用 NodeShapes.slice，
+      // 用 substring 就是在"随机数恰好带上 -/_"的那一天线上 500。
+      String token = NodeShapes.slice(
+          java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(raw)
+              .replaceAll("[-_]", ""), 8).toUpperCase();
+      String code = NodeShapes.slice(token, 4) + "-" + NodeShapes.slice(token, 4, 8);
       plain.add(code);
       hashed.add(com.inkstack.common.Hex.sha256Hex(code));
     }

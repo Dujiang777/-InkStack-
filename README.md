@@ -28,7 +28,8 @@
 | P5a | 社区互动写侧（评论 / 点赞 / 收藏 / 关注 / 举报 / 站内信） | ✅ | 社区闸门 **108/108**（连跑三轮全绿）：并发举报只落 1 行、`like_count = 关系行数` 守恒、奖励日上限拒了不吞额度；切流代理含社区路径 **24/24** |
 | P5b | 创作台写侧（发布 / 存草稿 / 草稿转正 / 更新重审 / 撤回 / 硬删） | ✅ | 创作台闸门 **51/51**：8 路并发同名标题零 500 且 slug 互不相同、审核归属只认 Cookie 里的 role、草稿硬删连子表一并清 |
 | P5c | 运营台（内容审核 / 评论删除 / 举报处理 / 用户管理）+ 两个全文出口 `{slug}/raw`、`{slug}/export` | ✅ | 运营台闸门 **65/65**：四条接口逐个 401/403、下架连带清置顶、扣回按真实余额记账、导出正文两侧逐字一致且不泄漏后端端口；切流代理含运营台路径 **31/31** |
-| P5d | 书房剩余写侧（草稿箱 / 阅读历史 / 友情链接 / 图片上传 / 导入 / 专栏增删改 / 资料与改密） | ⏳ | 缺口 **16 条**（含 P6 的 3 条 AI），由闸门 8 现算，不靠人记 |
+| P5d | 书房写侧（草稿箱 / 阅读足迹 / 外链审核 / 资料 / 改密 / 图片上传 / 专栏增删改） | ✅ | 书房闸门 **97/97**：门禁姿势逐个钉住（友链游客是 403 不是 401、足迹游客是 200 skipped）、昵称按 JS 空白判据折叠、上传两栈共用同一磁盘目录、12 路跨栈并发重设篇目零 500 且条目守恒；切流代理含书房路径 **41/41**（含 multipart 穿过 rewrite） |
+| P5e | 博主迁移工具 `POST /api/import`（RSS 抓取 + Markdown 批量导入） | ⏳ | 唯一剩下的非 AI 缺口：SSRF 私网黑名单要按 WHATWG 判、外部 HTML 消毒是七条正则、日期口径两栈得同 |
 | P6 | AI 分身：Spring AI Alibaba 替换 Python AgentScope 服务 | ⏳ | 需保持 NDJSON 契约 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
@@ -50,6 +51,13 @@
   闸门 8 现算出的可整体切流前缀包含它）
 - 运营台：`POST /api/admin/articles|comments|reports|users`（内容管理与审核、删评论连带回复、
   举报三种处置、封禁与点墨增减；`setRole` 两栈都只认 developer，admin 也一样 403）
+- 书房：`GET|PUT /api/drafts` · `POST /api/history` · `GET|POST|PUT /api/links`
+  · `PATCH /api/me/profile` · `PATCH /api/me/password` · `POST /api/uploads`
+  · `POST /api/series` · `PATCH|DELETE /api/series/{id}`（这四条**已实现却还切不过去**：
+  切流只有前缀粒度，而 `/api/series` 的 `GET` 两栈同 URL 同方法却不同义——Node 是"我的专栏"
+  （`components/StudioClient.tsx` 正在吃它），Java 是公开合集架。切之前的动作是先把 Node 的
+  `GET /api/series` 对齐成公开架、补一条 `GET /api/series/mine`，再改前端读法，两栈同语义之后
+  整前缀才敢切，见闸门 8）
 - 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
   `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
@@ -79,6 +87,26 @@
   `'2030-01-02 03:04:05'` → `2030-01-01T19:04:05.000Z`），Node 再 `toISOString()` 吐回。
   Java 必须落在同一个瞬间上——两侧读的都是 `2030-01-01T19:04:05.000Z`，
   而"库里存的串就是 UTC"这个直觉会把早鸟到点整体推后一个时区。
+- **`affectedRows` 在两栈默认值下不是同一个数**：Connector/J 给连接打上 `CLIENT_FOUND_ROWS`，
+  UPDATE 回的是"匹配几行"；mysql2 没打这个标志，回的是"真正改动几行"。同一句 no-op UPDATE
+  （把 `bundle_price` 改成它当前的值）Node 拿 0、Java 拿 1，而工程里到处拿 affectedRows 当
+  "这行到底存不存在 / 是不是新建"的判据。已在全局生成 JDBC 串时补 `useAffectedRows=true`。
+  顺带一处证据：`OauthService` 里 `created = affected == 1` 那句注释写的就是 affectedRows 语义——
+  默认值下它会把"老用户第 N 次登录"读成"刚建档"并补发欢迎邮件。
+  这个洞是书房闸门拿"改专栏打包价"逼出来的：跨栈比 `GET` 回来的价格一致、写回的却是两个世界。
+- **JS 的 `slice` 会夹取，Java 的 `substring` 会抛**：生成 TOTP 备份码时，6 字节 base64url 是 8 个字符，
+  去掉 `-` / `_` 之后长度掉到 5~8，于是 `token.substring(4, 8)` 在长度 7 时抛
+  `begin 4, end 8, length 7`。按原写法实测**每四次"开启两步验证"就有一次 500**（22.7%），
+  而 Node 侧同一句 `slice(4, 8)` 只是安静地给出一个短一点的码。已补 `NodeShapes.slice(value, from, to)`
+  并在此后所有"从 Node 抄来的切片"处使用。这类差异不会出现在对拍里——它取决于随机数。
+- Windows 上 `.properties` 里的反斜杠是转义符：`INKSTACK_UPLOAD_DIR=D:\Desktop\...\uploads`
+  会让 `\u` 成为一个畸形的统一码转义，**JVM 在解析配置阶段就起不来**（`ConfigDataException`），
+  报的还不是路径问题。生成脚本现在统一 `replace(/\\/g, "/")`。
+
+双轨期的一个已知缺口（不是 bug，是还没并到一起的状态）：**登录 / 改密的失败计数是各进程自己记的**
+——Node 的 `lib/rate-limit.ts` 用一个 `Map`，Java 的 `LoginGuard` 另用一个 `Map`，同一账号在
+两栈各试 5 次不会锁住。单栈部署没这个问题，双轨窗口内靠"切流按前缀、同一时刻只有一栈在应答"兜着。
+P7 把它连同边缘限流一起搬到共享存储（Redis 或库表）。
 
 页面侧（Server Component 进程内取数，不经 HTTP）：`lib/data.ts` 的**只读内容面已全部可分流**
 ——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
@@ -130,7 +158,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十一道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十二道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -252,6 +280,23 @@ node scripts/admin-check.mjs
 #     "导出的是全文"这句话只有这样才能被断言。
 #   · 导出内嵌绝对链接：两侧各用自己的 origin 拼接，比对前必须抹掉站点地址；
 #     经代理那一条反过来断言 `:3101` 绝不出现（见闸门 6 的 x-forwarded-host）。
+
+# 12) 书房闸门：这批的洞在"门禁姿势不齐"和"字符串口径"，不在算术。
+node scripts/study-check.mjs
+#   · 三条反直觉的姿势必须原样照搬，"顺手统一"就是一次静默的接口变更：
+#     友链 GET/PUT 对游客回 **403**（不是 401）、足迹上报对游客回 **200 skipped**、
+#     外链审核不存在的 id 照样回 ok（Node 不判 affectedRows）。
+#   · 标题裁 200 但**不 trim** 去查、正文**不 trim** 去存、昵称却必须按 JS 的空白判据折叠：
+#     "张　　三"要折成"张 三"，Java 的 `\s` 与 `trim()` 都不认全角空格，一处用错两栈就分叉。
+#   · 上传两栈必须写**同一个磁盘目录**：Java 的 cwd 是 server/，配错的表现是
+#     "上传成功、URL 回来了、图片 404"，而两侧各测各自的都发现不了。
+#   · 重设专栏篇目是整单语义：混进一篇别人的稿就整单拒、且原柜子一篇不少
+#     （DELETE 必须排在校验之后、同一个事务里，先删后插就是"双击保存把柜子清空"）。
+#   · 坏 JSON 与空对象是**两个不同的 400**（"请求格式有误" vs 业务提示），
+#     用 `Bodies.json()` 一把兜成空对象就把其中一条分支抹掉了。
+#   · ⚠ 会改联调账号的昵称与口令：清场按快照直接写回 `password_hash`，
+#     不走接口——那个密码在 HIBP 泄露名单里，接口拒它是对的，但不是清场该有的姿势。
+#   · ⚠ 同样吃边缘限流（每 IP 120 次/分）：连跑要隔一分钟，否则后半程红一片 429。
 ```
 
 切流与回滚：
@@ -277,11 +322,16 @@ JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,
 /api/admin,/api/users/*/follow,/api/comments/*/like,/api/comments/*/report,\
 /api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/articles/*/comments,\
 /api/articles/*/like,/api/articles/*/bookmark,/api/articles/*/report,/api/articles/*/paywall-view,\
-/api/articles/*/raw,/api/articles/*/export,/api/series/*/bundle \
+/api/articles/*/raw,/api/articles/*/export,/api/series/*/bundle,\
+/api/drafts,/api/history,/api/links,/api/uploads,/api/me/profile,/api/me/password \
   node node_modules/next/dist/bin/next dev -p 3400
-node scripts/proxy-cutover-check.mjs --money --community --admin --base=http://localhost:3400
+node scripts/proxy-cutover-check.mjs --money --community --admin --study --base=http://localhost:3400
 node scripts/admin-check.mjs          # 其中的"经代理导出可比对"一节会打这个实例
 ```
+
+书房那六条是**整前缀**切的（`/api/drafts` 等下面没有未迁分支），而 `/api/series` 只能继续按段通配
+留一条 `/api/series/*/bundle`：`--study` 里专门有一句反向断言，拿非法标题打 `POST /api/series`，
+要求它**没有** `x-backend` 头（仍在 Node 应答）——语义冲突登记表若不配这条断言，就只是一段注释。
 
 临时实例会把 `next-env.d.ts` / `tsconfig.json` 里的构建目录指针改写成 `.next-cutover`，**提交前 revert 这两个文件**；
 跑完顺手把 `.next-cutover` 和这个进程一起清掉。
@@ -345,15 +395,17 @@ mvn spring-boot:run                  # http://localhost:3101
 │   ├── settings.xml        #    工程内 Maven 镜像（不改全局）
 │   └── src/main/java/com/inkstack/
 │       ├── article/ auth/ points/ session/   # 按领域分包
-│       ├── money/                            # 资金原子链路：解锁/打赏/加热/打包/签到/徽章/充值
+│       ├── money/ community/ admin/          # 资金链路 / 社区互动 / 运营台
+│       ├── series/ user/ study/              # 专栏读写 / 资料与改密 / 书房（草稿·足迹·友链·上传）
 │       ├── entity/ mapper/                   # MyBatis-Plus：实体与手写 SQL 映射
-│       ├── common/                           # NodeShapes / Pricing：Node 取值语义与分账口径
+│       ├── common/                           # NodeShapes / Nicknames / Links / Slugs / Pricing：
+│       │                                     #   Node 的取值语义与口径，逐条对齐的落点
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── agent-service/          # Python AgentScope 分身服务（P6 替换）
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 十一道闸门（parity / interop / paywall / page-parity / auth-flow /
+├── scripts/                # 十二道闸门（parity / interop / paywall / page-parity / auth-flow /
 │                           #   proxy-cutover / money-check / route-inventory / community-check /
-│                           #   studio-check / admin-check）+ 种子与运维脚本
+│                           #   studio-check / admin-check / study-check）+ 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
 

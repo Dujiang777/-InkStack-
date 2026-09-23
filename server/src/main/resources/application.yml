@@ -33,6 +33,13 @@ spring:
     default-property-inclusion: always
     serialization:
       write-dates-as-timestamps: false
+  servlet:
+    multipart:
+      # 故意放宽到业务上限（5MB）之上：真拒由控制器判，才能回出与 Node 一字不差的
+      # {"error":"图片不能超过 5MB"} + 413。让 Tomcat 先拦下，客户端收到的就是 Spring 的
+      # MaxUploadSizeExceededException 页面——换栈期这就是"接口看起来一样其实不一样"。
+      max-file-size: 20MB
+      max-request-size: 20MB
 
 mybatis-plus:
   configuration:
@@ -45,6 +52,10 @@ mybatis-plus:
 inkstack:
   session-secret: ${SESSION_SECRET}
   site-url: ${NEXT_PUBLIC_SITE_URL:}
+  # 图片上传落盘目录。双轨期文件由 Next 从 public/uploads 直接伺服，而 Java 进程的工作目录
+  # 是 server/，所以这里必须是**指向同一个目录的显式路径**（gen-java-env 写绝对路径）。
+  # 配错的表现为"上传成功、URL 回来了、图片 404"，两侧各测各的都发现不了。
+  upload-dir: ${INKSTACK_UPLOAD_DIR:public/uploads}
   trust-proxy: ${TRUST_PROXY:0}
   # devCode 回显的门禁：Node 侧读的是 process.env.NODE_ENV，这里由 gen-java-env.mjs 派生同一个值，
   # 否则同一份 .env 起两栈会出现"一侧回显验证码、另一侧不回显"这种对拍假象。

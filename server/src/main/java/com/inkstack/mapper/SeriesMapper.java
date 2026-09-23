@@ -4,9 +4,13 @@ import com.inkstack.entity.SeriesHead;
 import com.inkstack.entity.SeriesItem;
 import com.inkstack.entity.SeriesRows;
 import java.util.List;
+import org.apache.ibatis.annotations.Delete;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Options;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 @Mapper
 public interface SeriesMapper {
@@ -113,4 +117,75 @@ public interface SeriesMapper {
         FROM series_purchases WHERE series_id = #{seriesId}
       """)
   SeriesRows.Sold soldStats(@Param("seriesId") long seriesId);
+
+  /* ==================== 写侧：书房里的新建 / 改柜 / 删柜 ==================== */
+
+  /**
+   * 新建专栏。生成键回写进入参对象的 {@code id}——{@code useGeneratedKeys} 只认对象参数，
+   * 标量参数表拿不回自增值，而"建完立刻把 id 回给前端"是这条接口的全部产出。
+   */
+  @Insert("""
+      INSERT INTO series (author_id, title, description)
+       VALUES (#{authorId}, #{title}, #{description})
+      """)
+  @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
+  int insertSeries(SeriesRows.New newSeries);
+
+  /**
+   * 改元信息。<b>三个 SET 子句恒定存在、用 IF 决定要不要覆盖</b>，而不是按入参拼 SQL：
+   * Node 那边是动态拼 {@code sets[]}，但"未传的列保持原值"与"传了却与现值相同"在
+   * affectedRows 上本来就无法区分，写死三条 + IF 既免掉拼串又保住这个语义。
+   * {@code bundlePrice} 可以真的是 NULL（关闭打包），所以 jdbcType 必须给。
+   */
+  @Update("""
+      UPDATE series
+         SET title = IF(#{setTitle}, #{title}, title),
+             description = IF(#{setDescription}, #{description}, description),
+             bundle_price = IF(#{setBundlePrice}, #{bundlePrice,jdbcType=INTEGER}, bundle_price)
+       WHERE id = #{id} AND author_id = #{authorId}
+      """)
+  int updateMeta(
+      @Param("id") long id,
+      @Param("authorId") long authorId,
+      @Param("setTitle") boolean setTitle,
+      @Param("title") String title,
+      @Param("setDescription") boolean setDescription,
+      @Param("description") String description,
+      @Param("setBundlePrice") boolean setBundlePrice,
+      @Param("bundlePrice") Integer bundlePrice);
+
+  /** 删柜。条目靠 {@code ON DELETE CASCADE} 走，所以不需要先清 series_items。 */
+  @Delete("DELETE FROM series WHERE id = #{id} AND author_id = #{authorId}")
+  int deleteOwned(@Param("id") long id, @Param("authorId") long authorId);
+
+  /** 重设篇目前先锁柜：同一专栏的并发重设必须串行，否则 DELETE 已提交而 INSERT 撞主键。 */
+  @Select("SELECT id FROM series WHERE id = #{id} AND author_id = #{authorId} LIMIT 1 FOR UPDATE")
+  Long lockOwned(@Param("id") long id, @Param("authorId") long authorId);
+
+  /** 只认"本人 + 已发布 + 已过审"。命中行数与入参篇数不等即整单拒，半收就是替别人改柜。 */
+  @Select("""
+      <script>
+      SELECT id, slug FROM articles
+       WHERE author_id = #{authorId} AND status = 'published' AND review_status = 'approved'
+         AND slug IN
+      <foreach collection="slugs" item="s" open="(" separator="," close=")">#{s}</foreach>
+      </script>
+      """)
+  List<SeriesRows.SlugId> pickOwnPublished(
+      @Param("authorId") long authorId, @Param("slugs") List<String> slugs);
+
+  @Delete("DELETE FROM series_items WHERE series_id = #{seriesId}")
+  int clearItems(@Param("seriesId") long seriesId);
+
+  /** 多行 VALUES 一次落完：position 就是数组下标，整体重设的顺序只有这一处来源。 */
+  @Insert("""
+      <script>
+      INSERT INTO series_items (series_id, article_id, position) VALUES
+      <foreach collection="items" item="it" separator=",">
+        (#{seriesId}, #{it.articleId}, #{it.position})
+      </foreach>
+      </script>
+      """)
+  int insertItems(
+      @Param("seriesId") long seriesId, @Param("items") List<SeriesRows.Positioned> items);
 }

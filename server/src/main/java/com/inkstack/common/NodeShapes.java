@@ -93,12 +93,63 @@ public final class NodeShapes {
     };
   }
 
+  /** {@link #jsTrim} 与 {@link #jsCollapse} 共用的判据，口径只留一处。 */
+  public static boolean jsWhitespace(char c) {
+    return isJsSpace(c);
+  }
+
+  /**
+   * JS 的 {@code s.replace(/\s{2,}/g, " ")}：两个以上空白折成一个半角空格。
+   *
+   * <p>不能用 {@code replaceAll("\\s{2,}", " ")}——Java 的 {@code \s} 少认全角空格、
+   * {@code U+00A0}、{@code U+2028/29} 等一整排，昵称里的"张　　三"（两个全角空格）
+   * 在 Node 会折成一个、在 Java 原样留着，两侧的昵称从此不同。
+   */
+  public static String jsCollapse(String value) {
+    if (value == null) {
+      return "";
+    }
+    StringBuilder out = new StringBuilder(value.length());
+    int i = 0;
+    while (i < value.length()) {
+      if (!isJsSpace(value.charAt(i))) {
+        out.append(value.charAt(i++));
+        continue;
+      }
+      int j = i;
+      while (j < value.length() && isJsSpace(value.charAt(j))) {
+        j++;
+      }
+      out.append(j - i > 1 ? ' ' : value.charAt(i));
+      i = j;
+    }
+    return out.toString();
+  }
+
   /** JS 的 {@code s.slice(0, n)}：null 视调用方决定，这里只管按 UTF-16 码元截断。 */
   public static String slice(String value, int max) {
     if (value == null) {
       return null;
     }
     return value.length() <= max ? value : value.substring(0, max);
+  }
+
+  /**
+   * JS 的 {@code s.slice(from, to)}——<b>越界不报错</b>，端点各自被夹到 [0, length]。
+   *
+   * <p>这条在移植里必须存在而不是"反正下标算得准"：JS 里 {@code raw.slice(4, 8)} 碰到
+   * 只有 7 个字符的串就安静地给出 3 个字符，Java 的 {@code substring(4, 8)} 直接抛
+   * StringIndexOutOfBoundsException。备份码就是撞在这一条上（base64url 去掉 -/_ 之后
+   * 长度本来就会掉），表现为"偶发的 500"，最难复现也最容易被误判成环境问题。
+   */
+  public static String slice(String value, int from, int to) {
+    if (value == null) {
+      return "";
+    }
+    int len = value.length();
+    int start = Math.min(Math.max(from < 0 ? len + from : from, 0), len);
+    int end = Math.min(Math.max(to < 0 ? len + to : to, 0), len);
+    return end <= start ? "" : value.substring(start, end);
   }
 
   /** EXISTS()/IF() 回 0/1，Node 用 Number(x) === 1 归真。 */

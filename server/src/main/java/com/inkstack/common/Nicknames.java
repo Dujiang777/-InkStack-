@@ -17,8 +17,10 @@ public final class Nicknames {
   public static String clean(Object raw, int max) {
     String s = raw == null ? "" : String.valueOf(raw);
     s = s.replaceAll("[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028\\u2029\\ufeff]", "");
-    s = s.replaceAll("\\s{2,}", " ");
-    s = s.trim();
+    // 折叠与裁剪都必须走 JS 的空白判据：Java 的 \s 与 trim() 都不认全角空格，
+    // "张　　三"在 Node 折成"张 三"、在 Java 原样留着，两侧昵称从此分叉。
+    s = NodeShapes.jsCollapse(s);
+    s = NodeShapes.jsTrim(s);
     return s.length() > max ? s.substring(0, max) : s;
   }
 }
