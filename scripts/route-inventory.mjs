@@ -81,6 +81,24 @@ function normalize(url) {
 const node = nodeRoutes();
 const java = javaRoutes();
 
+/**
+ * Java 常把一个路径段声明成 `{provider}` 而 Node 用目录名写死（app/api/auth/github、
+ * app/api/auth/gitee…）。归一之后 `/api/auth/:seg` 与 `/api/auth/github` 两个键永不相等，
+ * 于是已迁完的 OAuth 会被这清单报成缺口——反过来更危险：真实冲突也可能被藏起来。
+ * 所以查找前先做一次"字面段 ↔ 通配段"的匹配解析。
+ */
+const javaWild = [...java.keys()].filter((k) => k.includes(":seg"));
+function javaKeyFor(key) {
+  if (java.has(key)) return key;
+  const segs = key.split("/");
+  return javaWild.find((w) => {
+    const ws = w.split("/");
+    return ws.length === segs.length
+      && ws.every((s, i) => s === ":seg" || s === segs[i]);
+  }) ?? key;
+}
+const javaMethods = (key) => java.get(javaKeyFor(key)) ?? new Set();
+
 const nodeKeys = [...node.keys()].map(normalize);
 const javaKeys = new Set(java.keys());
 // 两栈都挂了端点的 URL 模式：方法集合齐了也不代表语义相同，对拍只覆盖这一批
@@ -90,7 +108,7 @@ const overlap = [...javaKeys].filter((k) => nodeKeys.includes(k)).sort();
 const missing = [];
 for (const [url, methods] of node) {
   const key = normalize(url);
-  const have = java.get(key) ?? new Set();
+  const have = javaMethods(key);
   for (const m of methods) {
     if (!have.has(m)) missing.push({ key, method: m });
   }
@@ -101,7 +119,7 @@ const javaOnly = [...java.keys()].filter((k) => !nodeKeys.includes(k));
 // 同一 URL 两栈都有、但方法集合不同 → 该前缀切过去会改变行为
 const divergent = [];
 for (const [url, methods] of node) {
-  const key = normalize(url);
+  const key = javaKeyFor(normalize(url));
   if (!javaKeys.has(key)) continue;
   const have = java.get(key);
   const onlyNode = [...methods].filter((m) => !have.has(m));
@@ -126,7 +144,7 @@ function safePrefixes() {
   const safe = [];
   for (const [prefix, routes] of byPrefix) {
     const blocked = routes.flatMap((r) => r.methods
-      .filter((m) => !(java.get(r.key) ?? new Set()).has(m))
+      .filter((m) => !javaMethods(r.key).has(m))
       .map((m) => `${m} ${r.key}`));
     if (!blocked.length) safe.push({ prefix, count: routes.length });
   }
@@ -135,7 +153,7 @@ function safePrefixes() {
 
 /** 逐条已被 Java 完整覆盖的 URL 模式：这些可以直接按段通配写进 JAVA_ROUTES。 */
 const covered = [...node.entries()]
-  .filter(([url, methods]) => [...methods].every((m) => (java.get(normalize(url)) ?? new Set()).has(m)))
+  .filter(([url, methods]) => [...methods].every((m) => javaMethods(normalize(url)).has(m)))
   .map(([url, methods]) => ({ url: normalize(url), methods: [...methods] }))
   .sort((a, b) => a.url.localeCompare(b.url));
 
