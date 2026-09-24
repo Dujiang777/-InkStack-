@@ -136,11 +136,15 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: spend.error }, { status: 402 });
           }
           pool
-            .query(`INSERT INTO agent_qa (question, answer, citations) VALUES (?, ?, ?)`, [
-              question,
-              "(AgentScope streamed)",
-              JSON.stringify([]),
-            ])
+            .query(
+              `INSERT INTO agent_qa (asker_id, question, answer, citations) VALUES (?, ?, ?, ?)`,
+              [
+                viewer.id,
+                question,
+                "(AgentScope streamed)",
+                JSON.stringify([]),
+              ]
+            )
             .catch(() => {});
         }
         return new Response(upstream.body, {
@@ -250,9 +254,9 @@ export async function POST(req: Request) {
           // 问答流水入库（登录 + 积分扣减已在上方完成）
           try {
             await pool!.query(
-              `INSERT INTO agent_qa (question, answer, citations)
-               VALUES (?, ?, ?)`,
-              [question, "(streamed)", JSON.stringify(cited.map((s) => s.title))]
+              `INSERT INTO agent_qa (asker_id, question, answer, citations)
+               VALUES (?, ?, ?, ?)`,
+              [viewer!.id, question, "(streamed)", JSON.stringify(cited.map((s) => s.title))]
             );
           } catch { /* 流水失败不阻塞回答 */ }
         } catch (e) {

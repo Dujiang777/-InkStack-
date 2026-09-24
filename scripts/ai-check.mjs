@@ -640,7 +640,9 @@ async function suit() {
   /* ---------- 8 AgentScope 透传通道 ---------- */
   console.log("\n## 8 透传通道：上游字节原样搬运，扣墨在拿到 2xx 之后");
   const qaRows = async () => only(`SELECT COUNT(*) AS n, IFNULL(MAX(answer),'') AS a,
-      IFNULL(MAX(citations),'') AS c FROM agent_qa WHERE id > ?`, [qaMark]);
+      IFNULL(MAX(citations),'') AS c, SUM(asker_id IS NULL) AS missing,
+      SUM(asker_id = ?) AS mine
+      FROM agent_qa WHERE id > ?`, [uid, qaMark]);
   agentMode = "ok";
   agentHits.length = 0;
   const [pN, pJ] = await Promise.all([
@@ -663,8 +665,10 @@ async function suit() {
     () => agentHits.map((h) => JSON.stringify(h)).join(" "));
   const qaShape = await qaRows();
   check(Number(qaShape?.n) === 2 && qaShape?.a === "(AgentScope streamed)"
-    && qaShape?.c === "[]",
-    "问答流水按 Node 的占位形状落库（answer 是标记串、citations 是空数组）",
+    && qaShape?.c === "[]" && Number(qaShape?.missing) === 0
+    && Number(qaShape?.mine) === 2,
+    "问答流水按 Node 的占位形状落库（answer 是标记串、citations 是空数组），asker_id 两栈都落提问者"
+    + "（成就「十问分身」的计数就是 WHERE asker_id = ?，这列空着徽章永远不动）",
     () => JSON.stringify(qaShape));
   const [npN, npJ] = await Promise.all([
     ask(ANODE, { question: "about 缺席轮" }, writerA), ask(AJAVA, { question: "about 缺席轮" }, writerA),
@@ -739,9 +743,10 @@ async function suit() {
     "历史裁到 600 字、本次提问原样收尾",
     () => `历史=${String(sentDeep.messages?.[3]?.content).length} 收尾=${JSON.stringify(lastText)}`);
   const qaLive = await qaRows();
-  check(Number(qaLive?.n) === 6 && qaLive?.a === "(streamed)",
+  check(Number(qaLive?.n) === 6 && qaLive?.a === "(streamed)"
+    && Number(qaLive?.missing) === 0 && Number(qaLive?.mine) === 6,
     "live 通道的问答流水落的是 (streamed) 标记，条数与前面几轮加起来对得上"
-    + "（透传 2 + about 缺席 2 + 本轮 2；坏态与 401/402 一律不落）",
+    + "（透传 2 + about 缺席 2 + 本轮 2；坏态与 401/402 一律不落），而且六条都挂得上提问者",
     () => JSON.stringify(qaLive));
   sseMode = "error";
   const ledBeforeBad = await ledgerRows();

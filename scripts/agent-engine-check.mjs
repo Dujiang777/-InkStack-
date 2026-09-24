@@ -411,14 +411,16 @@ async function suit() {
 
   /* ---------- 4 问答流水的落库形状 ---------- */
   console.log("\n## 4 agent_qa：整段回答与引用都要落库");
-  const qaRow = await only(`SELECT question, answer, citations FROM agent_qa
+  const qaRow = await only(`SELECT asker_id, question, answer, citations FROM agent_qa
     WHERE id > ? ORDER BY id DESC LIMIT 1`, [qaMark]);
   // mysql2 会把 JSON 列直接解析成数组/对象（闸门 13 真踩过），所以这里两种形状都要接住
   const cited = typeof qaRow?.citations === "string"
     ? qaRow.citations : JSON.stringify(qaRow?.citations);
   check(qaRow?.answer === FINAL_TEXT
-    && cited === '["《手写 Promise》第 2 节「then 的微任务语义」"]',
-    "引擎通道把**完整回答**存了下来（Python 时代只存一个占位串，问答记录等于没留）",
+    && cited === '["《手写 Promise》第 2 节「then 的微任务语义」"]'
+    && Number(qaRow?.asker_id) === uid,
+    "引擎通道把**完整回答**存了下来（Python 时代只存一个占位串，问答记录等于没留），"
+    + "并挂上提问者的 id —— 成就「十问分身」按 asker_id 计数，这一列空着徽章永远不动",
     () => JSON.stringify(qaRow).slice(0, 120));
 
   /* ---------- 5 写作助手走引擎 ---------- */

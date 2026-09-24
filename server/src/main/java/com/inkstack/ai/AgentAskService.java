@@ -149,7 +149,7 @@ public class AgentAskService {
             closeQuietly(upstream.body());
             return new Reply.Status(402, Map.of("error", nullToEmpty(spend.error())));
           }
-          insertQa(question, "(AgentScope streamed)", "[]");
+          insertQa(uid, question, "(AgentScope streamed)", "[]");
           long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
           return new Reply.Stream(out -> pump(upstream.body(), out, deadline));
         }
@@ -194,7 +194,7 @@ public class AgentAskService {
       return new Reply.Status(402, Map.of("error", nullToEmpty(spend.error())));
     }
     try {
-      insertQa(question, reply.text(), reply.citation() == null
+      insertQa(uid, question, reply.text(), reply.citation() == null
           ? "[]" : json.writeValueAsString(List.of(reply.citation())));
     } catch (Exception qaFailed) {
       // 流水失败不阻塞回答
@@ -249,7 +249,7 @@ public class AgentAskService {
       List<String> titles = snippets.stream().map(s -> "《" + s.title() + "》").toList();
       send(out, frame("type", "cite", "citation", titles.isEmpty() ? null : String.join("、", titles)));
       try {
-        insertQa(question, "(streamed)", json.writeValueAsString(
+        insertQa(uid, question, "(streamed)", json.writeValueAsString(
             snippets.stream().map(RagService.Snippet::title).toList()));
       } catch (Exception qaFailed) {
         // 流水失败不阻塞回答
@@ -471,9 +471,9 @@ public class AgentAskService {
     }
   }
 
-  private void insertQa(String question, String answer, String citations) {
+  private void insertQa(Long askerId, String question, String answer, String citations) {
     try {
-      qa.insert(question, answer, citations);
+      qa.insert(askerId, question, answer, citations);
     } catch (Exception failed) {
       // 流水写失败不阻塞回答，与 Node 的 .catch(() => {}) 同形
     }
