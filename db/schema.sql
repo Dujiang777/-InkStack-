@@ -1,5 +1,13 @@
 -- 墨栈 InkStack · MySQL 建表脚本（P0）
 -- 用法：mysql -u root -p < db/schema.sql
+--
+-- 这份文件同时是 Java 进程启动时建库用的脚本（server/ 的 SchemaBootstrap 从 classpath 读它的
+-- 副本，Maven 打包时从本路径拷贝——所以只有一份定义，不存在"两边各写一份再对不上"）。
+-- 里面的 CREATE 都是 IF NOT EXISTS；历史 ALTER 不是（MySQL 没有 ADD COLUMN IF NOT EXISTS），
+-- 靠执行器放行"已经存在"这类错误：Java 侧的 SchemaBootstrap 按错误码 1050/1060/1061/1091/1826 继续，
+-- 命令行重跑这份文件请带 --force，否则第一条重复的 ALTER 就会让 mysql 退出。
+-- ⚠ 顶部两行的 CREATE DATABASE / USE 会决定语句落在哪个库：程序化应用必须先剥掉它们，
+--   否则会话会被 USE 切进 inkstack 主库，而不是你连上去的那个库。
 
 CREATE DATABASE IF NOT EXISTS inkstack
   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -416,6 +424,30 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 ) ENGINE=InnoDB;
 
 -- users 表 2FA 列（已有库执行 ALTER；新库可并入 users 定义）
--- ALTER TABLE users ADD COLUMN totp_secret  VARCHAR(64) NULL;
--- ALTER TABLE users ADD COLUMN totp_enabled TINYINT(1) NOT NULL DEFAULT 0;
--- ALTER TABLE users ADD COLUMN totp_backup  TEXT NULL COMMENT '一次性备份码 sha256 JSON 数组';
+ALTER TABLE users ADD COLUMN totp_secret  VARCHAR(64) NULL;
+ALTER TABLE users ADD COLUMN totp_enabled TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN totp_backup  TEXT NULL COMMENT '一次性备份码 sha256 JSON 数组';
+
+-- ============================================================
+-- 补录：以前只活在 Node 运行时懒迁移里的三条
+--
+-- 这三条在 Java 侧建库之前一直只有 `lib/*.ts` 的 ensure* 会执行，所以一份只跑过建表脚本、
+-- 又没点开过对应功能的库是缺它们的。P7 要把 Node 侧的 SQL 删干净，"谁来建库"就只剩一个答案，
+-- 于是把它们收进这里；重复执行时的"列已存在/表已存在"由建库执行器按错误码放行（与
+-- 上面那批历史 ALTER 同一个姿势）。
+-- ============================================================
+
+-- 评论点赞（lib/data.ts ensureCommentLikesTable）
+CREATE TABLE IF NOT EXISTS comment_likes (
+  id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  comment_id BIGINT UNSIGNED NOT NULL,
+  user_id    BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_cl (comment_id, user_id),
+  INDEX idx_cl_comment (comment_id),
+  CONSTRAINT fk_cl_comment FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE,
+  CONSTRAINT fk_cl_user FOREIGN KEY (user_id) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- 站内信的 unlock 档（lib/notify.ts ensureUnlockEnum）：早于它的库这里补宽
+ALTER TABLE notifications MODIFY type ENUM('comment','tip','review','like','unlock','system') NOT NULL DEFAULT 'system';

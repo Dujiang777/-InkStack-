@@ -35,7 +35,12 @@ FLUSH PRIVILEGES;
 ```
 
 - [ ] 建库建用户（应用连接只给这个库的权限，不要用 root）
-- [ ] 首次启动会**自动懒建表**（articles/users/sessions/审计等），无需手动导 schema
+- [ ] 首次启动会**自动建表**：Java 侧由 `SchemaBootstrap` 在启动时应用 `db/schema.sql` 里的
+      `CREATE TABLE` / `ALTER TABLE`（只执行这两类语句，演示数据的两条 INSERT 归 `scripts/seed.mjs`），
+      无需手动导 schema。**权限收紧到只有 DML 的部署请把 `INKSTACK_SCHEMA_AUTO=false` 设进环境**，
+      否则每次启动都会因为建表被拒刷一遍告警。
+      ⚠ 这个开关是闸门 16 用反例验过的：关掉之后对着空库启动，一张表都不建、接口确实应不上——
+      也就是说"唯一入口"是真的唯一，不是目前没找到第二处。
 
 ## 4. 应用部署
 
@@ -55,7 +60,9 @@ cp .env.example .env
 | **SESSION_SECRET** | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | SMTP_* | 生产强烈建议配（注册/重置/2FA 邮箱恢复依赖；漏配时生产不会回显验证码，但用户收不到信） |
 | GITEE/GITHUB_CLIENT_* | OAuth 回调统一填 `https://你的域名/api/auth/<厂商>/callback` |
-| AGENT_SERVICE_URL | 分身服务地址，如 `http://127.0.0.1:8100`（不用分身可不填，走演示模式） |
+| AGENT_SERVICE_URL | 外部智能体服务的兼容转发地址，P6c 起仓库里已无对应实现，**自己没另起服务就留空**（空 + `AGENT_ENGINE=spring-ai` 才用内置引擎；开引擎前这里必须是空串，转发通道优先级会压住它） |
+| AGENT_ENGINE / AGENT_MODEL_* | 内置智能体引擎开关与 OpenAI 兼容端点（`AGENT_MODEL_BASE_URL/API_KEY/NAME`，默认回落 `DEEPSEEK_*`）。只有 Java 侧有引擎，开了就要把 `/api/ai`、`/api/agent` 整前缀切给 Java |
+| INKSTACK_SCHEMA_AUTO | 默认 `true`：Java 启动时自动建表/加列。DB 用户没有 DDL 权限时设 `false`，改为手工导 schema |
 
 ```bash
 npm run build

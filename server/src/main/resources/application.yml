@@ -73,6 +73,13 @@ inkstack:
   # 关掉它就没法在本机跑通任何一次抓取（本机订阅源夹具必然落在环回上），所以两侧都必须认这个值。
   import:
     allow-private: ${IMPORT_ALLOW_PRIVATE:0}
+  # 启动时把建表脚本应用到当前数据源。双轨期建库是 Node 的 ensure* 顺手做的，P7 删掉那些
+  # SQL 之后"谁来建库"只剩这一个答案，所以现在就得由 Java 顶上——闸门 16 拿空库真起进程验。
+  schema:
+    auto: ${INKSTACK_SCHEMA_AUTO:true}
+    # 默认读 classpath 里那份，而它是 Maven 从仓库根 db/schema.sql 拷进来的（见 pom 的
+    # <resources>）：建表定义只有一份，不存在"两边各写一份再慢慢对不上"。
+    location: ${INKSTACK_SCHEMA_LOCATION:classpath:db/schema.sql}
   # AI 分身：这两个值共同决定 GET /api/agent/status 报的是哪一档（agentscope / live / demo）。
   # Node 读的是 process.env，Java 进程不继承 .env，所以必须由 gen-java-env 派生同一个值——
   # 否则同一份配置下徽标一边亮一边灭，"没配 Key 就绝不真调大模型"这条前提也只有一侧成立。

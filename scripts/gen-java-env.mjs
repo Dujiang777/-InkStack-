@@ -80,6 +80,11 @@ const out = [
   // 必须写正斜杠：.properties 里反斜杠是转义符，`\uploads` 会被当成 \u 统一码转义起手，
   // 整个配置文件直接解析失败（Windows 上 Java 认正斜杠路径）。
   `INKSTACK_UPLOAD_DIR=${path.join(root, "public", "uploads").replace(/\\/g, "/")}`,
+  // 建库开关：Java 进程读的是这份 properties 而不是 .env，所以运维在 .env 里写
+  // INKSTACK_SCHEMA_AUTO=false 必须被派生过来，否则 DEPLOY.md 那一行是假的。
+  // 判空走 firstSet 而不是留给占位符回落：一行空的 `INKSTACK_SCHEMA_AUTO=` 会把
+  // application.yml 的 `:true` 默认值盖成空串，DBA 关不掉建库反倒引入了第三种取值。
+  `INKSTACK_SCHEMA_AUTO=${firstSet(process.env.INKSTACK_SCHEMA_AUTO, env.INKSTACK_SCHEMA_AUTO, 'true')}`,
   // RSS 抓取的私网黑名单总闸：两栈必须读同一个值，否则"一侧允许本机订阅源、另一侧一律拒绝"
   // 会变成对拍里最难解释的那种红。默认不透传——未设置时 Java 侧按 0 处理，与 Node 同。
   ...(process.env.IMPORT_ALLOW_PRIVATE || env.IMPORT_ALLOW_PRIVATE

@@ -97,6 +97,24 @@
   </dependencies>
 
   <build>
+    <!--
+      P7b 之后建库这件事只剩一个执行者（Java 进程），而建表脚本的权威定义在仓库根的
+      db/schema.sql 里——Node 的页面取数与 scripts/seed.mjs 都读它。这里在打包时把它
+      拷进 classpath，而不是另抄一份：两份定义早晚会漂移，而且漂移第一次表现为"新库缺某张表"。
+      闸门 16 拿一个空库真起一次 Java，把这条链路整个验一遍。
+    -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <resource>
+        <directory>../db</directory>
+        <targetPath>db</targetPath>
+        <includes>
+          <include>schema.sql</include>
+        </includes>
+      </resource>
+    </resources>
     <plugins>
       <plugin>
         <groupId>org.springframework.boot</groupId>

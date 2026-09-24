@@ -34,6 +34,7 @@
 | P6b | 分身问答 `POST /api/agent/ask`（NDJSON 流式，三条通道） | ✅ | 三条通道逐个钉：透传**分块到达**（代理不攒包）、SSE 只放行 content 帧、演示档游客可问且零扣墨；上游 503 → error 帧同文案零扣墨、吐两帧再掐线 → 明说"本次已按成功计费"；DeepSeek 收到的请求体两栈逐字一致（system prompt 里就是 RAG 挑出的那几段）。AI 闸门 **63/63**、切流代理 **56/56** |
 | P6c | Spring AI 智能体顶掉 Python 的 `agent-service/`（已删除） | ✅ | 引擎闸门 **20/20**：ReAct 那一圈真的转（模型先拿工具清单、第二轮带工具结果继续）、检索语料带付费墙与审核闸门（Python 版两条都缺，逐条对照钉死）、切块宽度与 cite 抽取照原实现、上游 502/空白一律落演示档零扣墨、`AGENT_MODEL_*` 决定徽标档位 |
 | P7a | 解除 `/api/series` 的跨栈语义冲突，整前缀切流 | ✅ | 书房闸门 **117/117**（新增 17 项：三条 URL 逐个逐字节对拍，含 `limit`/`author` 的 11 种取值与 6 种 id 形态）、切流代理 **56/56**（原来那条"必须仍在 Node"的反向断言翻成正向：前缀下每个 URL 每个方法都要带 `x-backend`）；闸门 8 现算出的最长可切前缀已经是 **`/api`**（Node 58 个 URL 模式全部被 Java 覆盖、方法集合零差异、语义冲突登记表已空） |
+| P7b | 建库收进 Java 进程（`SchemaBootstrap`），Node 侧懒建表/加列从此有了对等物 | ✅ | 建库闸门 **15/15**：对着三个空临时库真起 `spring-boot:run`，建出来的表/列/类型/可空性/默认值/索引/外键与「手工应用 `db/schema.sql`」逐条一致，并覆盖运行库每一张表；0 用户 0 文章（建库不越界造演示数据）；同库再起一次表数列数一条不变（幂等）；`INKSTACK_SCHEMA_AUTO=false` 时一张表都不建、接口确实应不上 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -187,6 +188,19 @@
   顺带一条同族的口径坑：Java 侧原来用带类型的 `@RequestParam int limit`，`?limit=abc` 就是 400
   加一段带时间戳的默认错误体，而 Node 是 `Number("abc") || 60` → 200 正常数据；现在两侧共用
   `NodeShapes.jsNumber()`（JS 的 `Number(字符串)`：认 `0x10` 不认 `1d`）把这类取值收成一份实现。
+- **一份建表脚本里写着 `USE`，程序化应用它就会走进生产库**：`db/schema.sql` 开头两行是
+  `CREATE DATABASE IF NOT EXISTS inkstack; USE inkstack;`——对 mysql 客户端这是贴心，对
+  `multipleStatements` 的连接池这是一次劫持：你指定了临时库，语句却跑在 `USE` 之后的那个库里。
+  本仓库为此修完 `SchemaBootstrap` 之后仍看到"临时库里有表"，一查是参照库自己也被写花了。
+  建库器因此**只执行 CREATE / ALTER 语句**，而闸门 16 额外钉两条：参照库应用脚本前先剥 `USE`，
+  并且每一步都断言 `SELECT DATABASE()` 还在预期库里。教训：**凡是会被程序喂的 SQL 文件，
+  要么不含会话级语句，要么执行者必须显式过滤**——"人手工跑没问题"不是证据。
+- **删掉一处懒建表，要先确认它是唯一一处**：`SendCodeController` 上挂着一个 `@PostConstruct`
+  直接调 `EmailCodeMapper.ensureTable()`，那是建表脚本之外的第二条 DDL 路径。它让闸门 16 的
+  "`auto=false` 时一张表都不建"整条红掉（表数 = 1），顺带暴露了更糟的一半：**数据库不可达时它
+  抛异常、进程直接起不来**，而 `SchemaBootstrap` 是按语句容错的。现在建库只有 `SchemaBootstrap`
+  一个执行者。规则：**灰度一个"唯一入口"之前，先拿开关反证它真的唯一**——正例（开着能建）
+  绿了不算数，反例（关着不能建）才是排他性证明。
 
 双轨期的一个已知缺口（不是 bug，是还没并到一起的状态）：**登录 / 改密的失败计数是各进程自己记的**
 ——Node 的 `lib/rate-limit.ts` 用一个 `Map`，Java 的 `LoginGuard` 另用一个 `Map`，同一账号在
@@ -255,7 +269,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十五道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十六道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -477,6 +491,28 @@ node scripts/agent-engine-check.mjs
 #     夹具是一个本地 OpenAI 兼容端点（默认 4702），假 Key 配假地址，永远碰不到官方 API。
 #   · ⚠ 会真建三篇文章、真扣墨、真写 agent_qa，跑完按快照与 slug 全清；全文索引刚写完可能查不到，
 #     闸门遇到这种情况直接停下提示重跑，而不是把检索类用例静默跳成绿。
+
+# 16) 建库闸门：Java 进程自己把库建出来，且建出来的形状 == Node 那套 DDL 全跑完的形状。
+#     双轨期建库是 Node 的 ensure* 顺手做的；P7 删掉那些 SQL 之后「谁来建库」只剩一个答案，
+#     所以现在就得有人证明这个答案够用——而不是等删完才发现少一张表。
+node scripts/schema-check.mjs
+#   · 五个环节，每一环都是拿**真库**比的，不是拿代码比的：
+#     ① 对着一个空的临时库 `spring-boot:run`，起来之后 `GET /api/articles` 必须是 200
+#       （表不存在时这里是 500，所以这一条同时钉住了「200 是建库建的」）；
+#     ② 逐表、逐列、逐索引、逐外键与「手工应用 db/schema.sql」的参照库对 information_schema，
+#       再确认覆盖运行库 inkstack_j 的每一张表——少一张就是 P7 删完才炸出来的洞。
+#       比的对象是 information_schema 里的类型、可空性、默认值，不是「看着差不多」：
+#       DEFAULT 0 与 DEFAULT '' 差一个，「这行算不算已扣墨」就可能两栈不同。
+#     ③ 新库里 0 用户 0 文章：schema.sql 末尾那两条演示 INSERT 归 scripts/seed.mjs，
+#       不归每次启动。建库只执行 CREATE TABLE / ALTER TABLE，别的语句一律丢掉。
+#     ④ 同一个库再起一次：仍然 200，且表/列/索引一个没变（幂等，不是先删再建）。
+#     ⑤ `INKSTACK_SCHEMA_AUTO=false` 对着空库起进程：一张表都不建，且接口确实应不上——
+#       这一条是反证，缺了它上面那个 200 就可能是别的什么顺手建的。
+#   · ⚠ 这道闸门自己会 `CREATE DATABASE`（三个临时库），所以要拿有建库权限的连接跑，
+#     并且**必须**在 finally 里把临时库 DROP 掉。⚠ 程序化应用 `db/schema.sql` 前必须先剥掉
+#     开头的 `CREATE DATABASE …` 与 `USE …`，否则会话被带走、脚本往生产库里建表
+#     （这一条是被一次真实事故换来的，见「迁移进度」一节末尾那两条教训）。
+#   · ⚠ 参照库只读。闸门全程不许对 inkstack / inkstack_j 写任何东西。
 ```
 
 切流与回滚：
@@ -599,10 +635,10 @@ mvn spring-boot:run                  # http://localhost:3101
 │       │                                     #   Node 的取值语义与口径，逐条对齐的落点
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 十五道闸门（parity / interop / paywall / page-parity / auth-flow /
+├── scripts/                # 十六道闸门（parity / interop / paywall / page-parity / auth-flow /
 │                           #   proxy-cutover / money-check / route-inventory / community-check /
 │                           #   studio-check / admin-check / study-check / import-check / ai-check
-│                           #   / agent-engine-check）
+│                           #   / agent-engine-check / schema-check）
 │                           #   + 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
@@ -623,6 +659,7 @@ mvn spring-boot:run                  # http://localhost:3101
 | `AGENT_MODEL_BASE_URL` / `AGENT_MODEL_API_KEY` / `AGENT_MODEL_NAME` | 引擎接的 OpenAI 兼容端点与模型名，默认指向 DeepSeek 的 `/v1` 并复用 `DEEPSEEK_API_KEY`；换百炼只改这三行 |
 | `DEEPSEEK_API_KEY` | 没有分身服务时的降档判据（有 Key → `live`，无 → `demo`）；同样派生给 Java。**跑闸门时不要把真 Key 写进 `.env`**：`/api/ai/write` 的计费链路会照着它去问真上游，烧的是账号里的墨水 |
 | `DEEPSEEK_BASE_URL` | live 通道的大模型地址，默认官方。**留这个口子是给闸门指的**：`ai-check` 把它指向自己的 SSE 夹具，否则"上游 503 不许扣墨"这类用例每跑一次就真发一次请求 |
+| `INKSTACK_SCHEMA_AUTO` | 默认 `true`：Java 启动时把 `db/schema.sql` 里的 `CREATE TABLE` / `ALTER TABLE` 应用到当前数据源。DB 用户没有 DDL 权限时设 `false`，改由 DBA 手工导 schema（闸门 16 §5 用反例验过它确实关得掉、且关不掉别的东西） |
 
 后端（`server/config/application-local.properties`，由 `scripts/gen-java-env.mjs` 生成、已 gitignore）：
 `INKSTACK_DB_URL` / `INKSTACK_DB_USER` / `INKSTACK_DB_PASSWORD` / `SESSION_SECRET` 等。

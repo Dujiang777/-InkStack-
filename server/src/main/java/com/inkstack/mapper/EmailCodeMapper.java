@@ -10,25 +10,15 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 /**
- * 邮箱验证码表。表结构与 lib/verify-code.ts 的懒建表逐字一致（同一张表两栈共用，
- * 所以 DDL 必须等价，否则一侧建出来的列宽/索引不同）。
+ * 邮箱验证码表。表结构以 {@code db/schema.sql} 的 {@code email_codes} 为准（同一张表两栈共用，
+ * Node 的 {@code lib/verify-code.ts} 也照着它懒建，所以列宽与索引必须等价）。
+ *
+ * <p>建表这件事以前在这里（一个 {@code @PostConstruct} 直接 {@code CREATE TABLE IF NOT EXISTS}），
+ * P7b 收进 {@code SchemaBootstrap} 统一做：那个钩子连不上库时会把整个应用拖死，
+ * 而且它让"关掉建库开关就真的什么都不建"这句话不成立。
  */
 @Mapper
 public interface EmailCodeMapper {
-
-  @Update("""
-      CREATE TABLE IF NOT EXISTS email_codes (
-        id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        email      VARCHAR(190) NOT NULL,
-        code_hash  CHAR(64) NOT NULL,
-        purpose    VARCHAR(20) NOT NULL DEFAULT 'register',
-        attempts   INT UNSIGNED NOT NULL DEFAULT 0,
-        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-        expires_at DATETIME(3) NOT NULL,
-        INDEX idx_ec_email (email, created_at DESC)
-      ) ENGINE=InnoDB
-      """)
-  int ensureTable();
 
   /** 锁住"最近 5 条"这一批行：冷却与窗口频控必须和后面的 INSERT 同事务，见 EmailCodeService。 */
   @Select("""

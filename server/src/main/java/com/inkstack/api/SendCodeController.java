@@ -4,10 +4,8 @@ import com.inkstack.auth.EmailCodeService;
 import com.inkstack.auth.LoginGuard;
 import com.inkstack.entity.User;
 import com.inkstack.mail.Mailer;
-import com.inkstack.mapper.EmailCodeMapper;
 import com.inkstack.mapper.UserMapper;
 import com.inkstack.web.ClientMeta;
-import jakarta.annotation.PostConstruct;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -35,30 +33,22 @@ public class SendCodeController {
   private static final String EMAIL_PATTERN = "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$";
 
   private final EmailCodeService codes;
-  private final EmailCodeMapper codeRows;
   private final UserMapper users;
   private final Mailer mailer;
   private final LoginGuard guard;
   private final String nodeEnv;
   private final boolean trustProxy;
 
-  public SendCodeController(EmailCodeService codes, EmailCodeMapper codeRows, UserMapper users,
+  public SendCodeController(EmailCodeService codes, UserMapper users,
       Mailer mailer, LoginGuard guard,
       @Value("${inkstack.node-env:development}") String nodeEnv,
       @Value("${inkstack.trust-proxy:0}") String trustProxy) {
     this.codes = codes;
-    this.codeRows = codeRows;
     this.users = users;
     this.mailer = mailer;
     this.guard = guard;
     this.nodeEnv = nodeEnv;
     this.trustProxy = "1".equals(trustProxy);
-  }
-
-  /** 两栈共用 email_codes：谁先起来谁建表，DDL 与 Node 的懒建表逐字一致。 */
-  @PostConstruct
-  void ensureTable() {
-    codeRows.ensureTable();
   }
 
   public record Body(String email, String purpose) {}
