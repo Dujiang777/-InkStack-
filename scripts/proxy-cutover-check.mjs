@@ -273,14 +273,36 @@ if (STUDY) {
       bad(`经代理的${label}`, `${r.status}/${want} backend=${r.backend || "无"} body=${r.text.slice(0, 70)}`);
     }
   }
-  // 已登记的语义冲突前缀必须**留在 Node**：闸门 8 记下 GET /api/series 两栈不同义之后，
-  // 这里反向断言它确实没被切走——登记表不配上这条负断言，就只是一段注释。
-  // 用非法题名打（Node 会先校验再落库），这样既不写数据又能看出是谁应答的。
-  const seriesKept = await call("POST", "/api/series", { body: { title: "x" }, cookie: c5 });
-  if (seriesKept.backend === "" && seriesKept.status === 400) {
-    ok("/api/series 仍在 Node 应答（同 URL 语义冲突：Node=我的专栏 / Java=公开合集架）");
+  // /api/series 曾经整前缀被扣在 Node：闸门 8 登记过一处"同 URL 同方法却不同义"
+  // （Node 的 GET 是"我的专栏"、Java 的是公开架）。现在两条语义各占一条 URL，登记表已清空，
+  // 这一档就从"必须没被切走"翻成正向断言：**前缀下每个 URL、每个方法都落在 Java**，
+  // 且状态码与文案与直连时对岸一致——切流的正确性不等于接口的正确性，两条都要钉。
+  const cut = [
+    ["公开架匿名可读", "GET", "/api/series", undefined, undefined, 200, null],
+    ["我的专栏匿名是 401（不是空列表）", "GET", "/api/series/mine", undefined, undefined, 401, "请先登录"],
+    ["我的专栏登录后带 ok 与自己的柜", "GET", "/api/series/mine", undefined, c5, 200, null],
+    ["落地页不存在是 {detail:null}", "GET", "/api/series/999999", undefined, undefined, 200, null],
+    ["建柜的非法题名先被校验拦下", "POST", "/api/series", { title: "x" }, c5, 400, "专栏题名需 2-60 字"],
+    ["改不存在的柜 → 404", "PATCH", "/api/series/0", { title: "经代理" }, c5, 404, "专栏不存在"],
+    ["删别人的柜 → 403 同文案", "DELETE", "/api/series/999999", undefined, c5, 403, "专栏不存在或无权删除"],
+    ["打包不存在的柜 → 404", "POST", "/api/series/999999/bundle", undefined, c5, 404, "专栏不存在"],
+  ];
+  for (const [label, method, p, body, cookie, want, text] of cut) {
+    const r = await call(method, p, { body, cookie });
+    const msgOk = text === null || r.json?.error === text;
+    if (r.status === want && r.backend === "inkstack-java" && msgOk) {
+      ok(`经代理的${label}`, `backend=${r.backend}`);
+    } else {
+      bad(`经代理的${label}`, `${r.status}/${want} backend=${r.backend || "无"} body=${r.text.slice(0, 70)}`);
+    }
+  }
+  const mine = await call("GET", "/api/series/mine", { cookie: c5 });
+  if (mine.json?.ok === true && Array.isArray(mine.json?.series)
+    && JSON.stringify(Object.keys(mine.json ?? {})) === '["ok","series"]') {
+    ok("经代理的我的专栏返回体键序是 {ok,series}（Node 的 JSON.stringify 顺序，Java 侧要用 LinkedHashMap）",
+      `柜数=${mine.json.series.length}`);
   } else {
-    bad("/api/series 仍在 Node 应答", `${seriesKept.status} backend=${seriesKept.backend || "无"}`);
+    bad("经代理的我的专栏返回体键序", mine.text.slice(0, 70));
   }
   // 游客上报足迹：经代理也必须保持"200 skipped 而不是 401"这个反直觉的姿势
   const skip = await call("POST", "/api/history", { body: { slug: "bo-20260911-1" } });

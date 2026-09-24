@@ -281,7 +281,7 @@ export default function StudioClient({ editSlug = null, isAdmin = false }: Props
   /* ---------- 发布台：拉取我的专栏；编辑模式回填当前所属 ---------- */
   useEffect(() => {
     let alive = true;
-    fetch("/api/series")
+    fetch("/api/series/mine")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!alive || !d?.series) return;

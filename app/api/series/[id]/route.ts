@@ -1,8 +1,22 @@
+// GET    /api/series/[id] — 专栏落地页数据（公开；不存在回 {detail:null}）
 // PATCH  /api/series/[id] — 更新专栏（题名/简介/篇目整体重排，仅作者本人）
 // DELETE /api/series/[id] — 删除专栏（条目级联清除）
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { updateSeriesMeta, deleteSeries, setSeriesItems } from "@/lib/data";
+import { getSeriesDetail, updateSeriesMeta, deleteSeries, setSeriesItems } from "@/lib/data";
+
+/**
+ * 落地页。"不存在"一律是 {@code {detail: null}} + 200，不是 404——读侧没有"你访问的东西没了"
+ * 这种要报给浏览器的事，页面自己按 null 渲染空态；上面 PATCH/DELETE 的 404 是写侧的权限与
+ * 归属判定，两回事。id 非整数同一条路（与 Java 的 SeriesReadController.detail 同式）。
+ */
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id: rawId } = await params;
+  const id = Number(rawId);
+  if (!Number.isInteger(id)) return NextResponse.json({ detail: null });
+  const user = await getCurrentUser();
+  return NextResponse.json({ detail: await getSeriesDetail(id, { id: user?.id ?? null }) });
+}
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getCurrentUser();

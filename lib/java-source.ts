@@ -145,7 +145,7 @@ export const remoteSeriesNav = cache(async (slug: string): Promise<ArticleSeries
 });
 
 export async function remoteMySeries(): Promise<MySeries[]> {
-  const body = await ask<{ series: MySeries[] }>("/api/series/mine");
+  const body = await ask<{ ok?: boolean; series: MySeries[] }>("/api/series/mine");
   return body.series;
 }
 

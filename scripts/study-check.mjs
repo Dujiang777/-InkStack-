@@ -510,6 +510,53 @@ async function suit() {
     "Java 建柜并回自增 id", mk.json);
   const mkN = await call(NODE, "POST", "/api/series", { title: `${TAG}·柜 N` }, writer);
   const seriesIdN = Number(mkN.json?.id);
+
+  /* ---------- 7.5 三条 URL 的两栈等价：语义冲突解除的落点 ---------- */
+  // GET /api/series 曾经是"我的专栏"（Node）与"公开合集架"（Java）共用一条 URL，
+  // 切流只有前缀粒度，于是整个 /api/series 被钉住。现在两件事各占一条 URL，
+  // 这一节钉的就是"拆开之后没有各自跑偏"：匿名架 200、匿名 mine 401、登录 mine 才是我的柜。
+  const [shelfN, shelfJ] = await Promise.all([
+    call(NODE, "GET", "/api/series"), call(JAVA, "GET", "/api/series"),
+  ]);
+  check(shelfN.status === 200 && shelfJ.status === 200 && shelfN.text === shelfJ.text
+    && shelfN.json?.ok === undefined && Array.isArray(shelfJ.json?.series),
+    "匿名 GET /api/series 两栈同字节，且回的是公开架（没有 ok 键，也不是 401）",
+    `node=${shelfN.status} java=${shelfJ.status} 长度=${shelfN.text.length}/${shelfJ.text.length}`);
+  const [mine401N, mine401J] = await Promise.all([
+    call(NODE, "GET", "/api/series/mine"), call(JAVA, "GET", "/api/series/mine"),
+  ]);
+  check(mine401N.status === 401 && mine401J.status === 401
+    && mine401N.json?.error === "请先登录" && mine401J.json?.error === mine401N.json.error,
+    "匿名 GET /api/series/mine 是 401 而不是空列表（把「会话没解出来」报成「你没有专栏」是谎报）",
+    `${mine401N.status}/${mine401J.status}`);
+  const [mineN, mineJ] = await Promise.all([
+    call(NODE, "GET", "/api/series/mine", undefined, writer),
+    call(JAVA, "GET", "/api/series/mine", undefined, writer),
+  ]);
+  check(mineN.status === 200 && mineJ.status === 200 && mineN.text === mineJ.text
+    && mineJ.json?.ok === true
+    && JSON.stringify(Object.keys(mineJ.json ?? {})) === '["ok","series"]'
+    && [`${TAG}·柜`, `${TAG}·柜 N`].every((t) => String(mineJ.text).includes(t)),
+    "登录后两栈同字节：键序是 {ok,series}（Java 侧必须是 LinkedHashMap，Map.of 会乱）、"
+    + "两个夹具柜都在，且带着 items 的 slug/title",
+    `java=${JSON.stringify(mineJ.json?.series?.map((s) => s.title))}`);
+  for (const q of ["?limit=1", "?limit=0", "?limit=abc", "?limit=9999", "?limit=2.7",
+    "?author=0", "?author=-1", "?author=abc", "?author=2.5", `?author=${writerId}`, "?author=0x2"]) {
+    const [n, j] = await Promise.all([
+      call(NODE, "GET", `/api/series${q}`), call(JAVA, "GET", `/api/series${q}`),
+    ]);
+    check(n.status === j.status && n.text === j.text,
+      `查询参数 ${q} 两侧同式（limit 夹到 1..200、非整数按 Number() 的口径，author 非整数=没传）`,
+      `node=${n.status}/${n.text.length} java=${j.status}/${j.text.length}`);
+  }
+  for (const seg of [seriesId, seriesIdN, 0, 999999, "abc", "2.5"]) {
+    const [n, j] = await Promise.all([
+      call(NODE, "GET", `/api/series/${seg}`), call(JAVA, "GET", `/api/series/${seg}`),
+    ]);
+    check(n.status === j.status && n.text === j.text,
+      `落地页 /api/series/${seg} 两栈同字节（不存在与 id 非法都是 {detail:null}，不是 4xx）`,
+      `node=${n.status} java=${j.status} ${j.text.slice(0, 40)}`);
+  }
   const onlyDesc = await call(NODE, "PATCH", `/api/series/${seriesId}`, { description: "只改简介" }, writer);
   const afterDesc = await only("SELECT title, description, bundle_price FROM series WHERE id = ?", [seriesId]);
   check(onlyDesc.status === 200 && afterDesc?.title === `${TAG}·柜` && afterDesc?.description === "只改简介"

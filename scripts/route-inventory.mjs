@@ -2,11 +2,12 @@
 // 路由清单闸门：回答"今天到底能往 JAVA_ROUTES 里写哪些前缀"——而且是机器算出来的，不是人记的。
 //
 // 为什么需要它：middleware 的切流是**前缀级**的，一旦把 /api/series 写进 JAVA_ROUTES，
-// 该前缀下的每个方法都会换人应答。而两栈在同一 URL 上的方法集合并不天然相同：
-// Node 的 GET /api/series 是"我的专栏"（要登录），Java 的 GET /api/series 是公开合集架——
+// 该前缀下的每个方法都会换人应答。而两栈在同一 URL 上的方法集合与语义并不天然相同：
+// 历史上这里就踩过——Node 的 GET /api/series 是"我的专栏"（要登录），Java 的同一条是公开合集架，
 // 路径同名、语义不同，切了就把书房管理器打成 200 空列表，且不会有任何报错。
-// 这类差异靠对拍测不出来（对拍只比"两边都有的路由"），所以单独一道：
-// 逐个 URL 模式核对方法集合，凡是"Node 有、Java 没有"的，整个前缀都不许切。
+// 对拍测不出这类差异（对拍只比"两边都有的路由"），所以单独一道：
+// 逐个 URL 模式核对方法集合，凡是"Node 有、Java 没有"的，整个前缀都不许切；
+// 机器算不出来的"同方法不同义"由人写进 SEMANTIC_CLASHES，让它挡住前缀而不是被人忘掉。
 //
 //   node scripts/route-inventory.mjs            列清单 + 给出可安全切流的前缀
 //   node scripts/route-inventory.mjs --json     机器可读输出
@@ -130,14 +131,16 @@ for (const [url, methods] of node) {
 /**
  * 已知"同 URL 同方法、语义却不同"的冲突登记。
  *
- * <p>方法集合齐了不等于可以切：Node 的 {@code GET /api/series} 是书房管理器的"我的专栏"（要登录、
- * 回 {ok,series:[{id,title,description}]}），Java 的同一条是公开合集架（匿名、回另一套形状）。
- * 这种差别机器算不出来，一旦被算成"可整体切流"，切过去就是把书房管理器打成 200 空列表且不报错。
+ * <p>方法集合齐了不等于可以切：两边都能接这个请求，不代表回的是同一件事。这种差别机器算不出来，
+ * 一旦被算成"可整体切流"，切过去就是把某个界面悄悄变成一份看着正常的错误数据且不报错。
  * 所以这类点必须由人写在这里，清单负责让它**挡住前缀**而不是被人忘掉。
+ *
+ * <p>当前为空。第一条登记的是 {@code GET /api/series}（Node=我的专栏 / Java=公开合集架），
+ * 解法是把两件事拆成两条 URL：Node 的 GET 对齐成公开架、另开 {@code GET /api/series/mine}，
+ * 前端改读新 URL，两栈同语义之后整前缀才切——过程写在闸门 6 与闸门 10 的断言里。
+ * 登记着的时候它挡住过一次误切，这条机制就算回本了；清空不等于它可以被删掉。
  */
-const SEMANTIC_CLASHES = [
-  "/api/series", // GET：Node=我的专栏 / Java=公开合集架（P7 删掉 Node 侧后此条自动失效）
-];
+const SEMANTIC_CLASHES = [];
 
 /** 可安全切流的前缀：该前缀下所有 Node 路由的每个方法都在 Java 里存在。 */
 function safePrefixes() {
@@ -200,8 +203,8 @@ if (JSON_ONLY) {
   console.log(`\n【Java 独有】${javaOnly.length} 条（为 RSC 新增的聚合端点，Node 无对位，不参与对拍）：`);
   for (const k of javaOnly.sort()) console.log(`   ${k}`);
   console.log(`\n【两栈同 URL】${overlap.length} 条 —— 方法齐了不等于语义相同，`
-    + `逐条过 scripts/parity.mjs 才算等价（Node 的 GET /api/series 是"我的专栏"，`
-    + `Java 的是公开合集架，就是这个坑）：`);
+    + `逐条过 scripts/parity.mjs 才算等价（曾经咬过人的是 GET /api/series：Node 回"我的专栏"、`
+    + `Java 回公开合集架，同 URL 同方法却不同义，机器算不出来）：`);
   for (const k of overlap) console.log(`   ${k}`);
   console.log(`\n【已被 Java 完整覆盖的 URL 模式】${covered.length} 条 —— 这些可逐条写进 JAVA_ROUTES：`);
   for (const c of covered) console.log(`   ${c.methods.join(",").padEnd(12)} ${c.url}`);

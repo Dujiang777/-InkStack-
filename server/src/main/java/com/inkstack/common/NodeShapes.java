@@ -1,11 +1,13 @@
 package com.inkstack.common;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigInteger;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * 把 JDBC 结果转成 Node 侧 JSON 的取值语义。双轨期这些细节就是契约本身，
@@ -62,6 +64,62 @@ public final class NodeShapes {
   public static long num(Long value) {
     return value == null ? 0L : value;
   }
+
+  /**
+   * JS 的 {@code Number(字符串)}，按 StringNumericLiteral 判形状后再取值。
+   *
+   * <p>不能直接拿 {@link Double#parseDouble} 顶替：JDK 认 {@code "1d"}、{@code "0x1p3"}
+   * 却不认 {@code "0x10"}，JS 正相反——十六进制/八进制/二进制<b>整数字面量</b>都认
+   * （{@code Number("0x10") === 16}），带类型后缀的都是 NaN。用在查询参数上，
+   * "这个参数到底是不是数字"两侧就会给出不同答案，而这正是双轨期最贵的一类分歧。
+   *
+   * @return 解析出的值；不是合法数字字面量时返回 {@link Double#NaN}（与 JS 同）
+   */
+  public static double jsNumber(String raw) {
+    if (raw == null) {
+      return 0;                       // JS: Number(null) === 0
+    }
+    String s = raw.replaceAll("^" + JS_SPACE + "+|" + JS_SPACE + "+$", "");
+    if (s.isEmpty()) {
+      return 0;                       // JS: Number("") === Number("   ") === 0
+    }
+    int sign = 1;
+    if (s.startsWith("+")) {
+      s = s.substring(1);
+    } else if (s.startsWith("-")) {
+      sign = -1;
+      s = s.substring(1);
+    }
+    if (s.equals("Infinity")) {
+      return sign * Double.POSITIVE_INFINITY;
+    }
+    if (s.equals("NaN")) {
+      return Double.NaN;              // 带负号的 NaN 还是 NaN
+    }
+    String marker = s.toLowerCase();
+    int radix = marker.startsWith("0x") ? 16 : marker.startsWith("0o") ? 8
+        : marker.startsWith("0b") ? 2 : 0;
+    if (radix != 0) {
+      return sign * radixValue(s.substring(2), radix);
+    }
+    if (!JS_DECIMAL.matcher(s).matches()) {
+      return Double.NaN;
+    }
+    return sign * Double.parseDouble(s);
+  }
+
+  /** 进位字面量的取值：空串（{@code "0x"}）与非法数字符都是 NaN，与 JS 一致。 */
+  private static double radixValue(String digits, int radix) {
+    try {
+      return new BigInteger(digits, radix).doubleValue();
+    } catch (NumberFormatException notANumber) {
+      return Double.NaN;
+    }
+  }
+
+  /** StringNumericLiteral 的十进制分支：{@code 1} / {@code 1.} / {@code .5} / {@code 1e-3}。 */
+  private static final Pattern JS_DECIMAL =
+      Pattern.compile("(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?");
 
   /**
    * 与 JS {@code String.prototype.trim} 等价的裁剪。Java 的两个内建版本都不等价，而且差别

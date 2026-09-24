@@ -33,6 +33,7 @@
 | P6a | AI 写作助手 `POST /api/ai/write` + 分身状态 `GET /api/agent/status` | ✅ | AI 闸门 **41/41**：四段兜底模板逐字节相同、"上游真产出才扣墨"两侧同式（探针拦住 → 上游 0 次、上游坏态 → 零扣墨且落同一份模板）、数字/数组/对象入参转发给上游的字符串两边同式、六路并发 40→10 只有两路成功、`流水条数 == 扣费次数`；切流代理含 AI 路径 **54/54** |
 | P6b | 分身问答 `POST /api/agent/ask`（NDJSON 流式，三条通道） | ✅ | 三条通道逐个钉：透传**分块到达**（代理不攒包）、SSE 只放行 content 帧、演示档游客可问且零扣墨；上游 503 → error 帧同文案零扣墨、吐两帧再掐线 → 明说"本次已按成功计费"；DeepSeek 收到的请求体两栈逐字一致（system prompt 里就是 RAG 挑出的那几段）。AI 闸门 **63/63**、切流代理 **56/56** |
 | P6c | Spring AI 智能体顶掉 Python 的 `agent-service/`（已删除） | ✅ | 引擎闸门 **20/20**：ReAct 那一圈真的转（模型先拿工具清单、第二轮带工具结果继续）、检索语料带付费墙与审核闸门（Python 版两条都缺，逐条对照钉死）、切块宽度与 cite 抽取照原实现、上游 502/空白一律落演示档零扣墨、`AGENT_MODEL_*` 决定徽标档位 |
+| P7a | 解除 `/api/series` 的跨栈语义冲突，整前缀切流 | ✅ | 书房闸门 **117/117**（新增 17 项：三条 URL 逐个逐字节对拍，含 `limit`/`author` 的 11 种取值与 6 种 id 形态）、切流代理 **56/56**（原来那条"必须仍在 Node"的反向断言翻成正向：前缀下每个 URL 每个方法都要带 `x-backend`）；闸门 8 现算出的最长可切前缀已经是 **`/api`**（Node 58 个 URL 模式全部被 Java 覆盖、方法集合零差异、语义冲突登记表已空） |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -55,20 +56,22 @@
   举报三种处置、封禁与点墨增减；`setRole` 两栈都只认 developer，admin 也一样 403）
 - 书房：`GET|PUT /api/drafts` · `POST /api/history` · `GET|POST|PUT /api/links`
   · `PATCH /api/me/profile` · `PATCH /api/me/password` · `POST /api/uploads`
-  · `POST /api/series` · `PATCH|DELETE /api/series/{id}`（这四条**已实现却还切不过去**：
-  切流只有前缀粒度，而 `/api/series` 的 `GET` 两栈同 URL 同方法却不同义——Node 是"我的专栏"
-  （`components/StudioClient.tsx` 正在吃它），Java 是公开合集架。切之前的动作是先把 Node 的
-  `GET /api/series` 对齐成公开架、补一条 `GET /api/series/mine`，再改前端读法，两栈同语义之后
-  整前缀才敢切，见闸门 8）
+  · `GET|POST /api/series` · `GET|PATCH|DELETE /api/series/{id}` · `GET /api/series/mine`
+  · `POST /api/series/{id}/bundle`（P5d 时这四条**已实现却切不过去**：切流只有前缀粒度，
+  而 `GET /api/series` 两栈同 URL 同方法却不同义——Node 是"我的专栏"
+  （`components/StudioClient.tsx` 正在吃它），Java 是公开合集架。P6d 把两件事拆成两条 URL：
+  Node 的 `GET /api/series` 对齐成公开架、另开 `GET /api/series/mine`，前端改读新 URL，
+  整前缀这才切得动，见闸门 8 与闸门 10 §7.5）
 - 迁移工具：`POST /api/import`（RSS 用 JSON、Markdown 用 multipart，同一个 URL 两种体）
   —— 全平台唯一一处"由用户给地址、服务端替他联网"的入口，SSRF 防护见闸门 13
 - AI 面：`POST /api/ai/write` · `POST /api/agent/ask` · `GET /api/agent/status`。P6b 之后
   `/api/agent` 与 `/api/ai` 两个前缀都**整前缀安全**（闸门 8 现算，判定已从"存在缺口"翻成"无缺口"）。
   问答是 NDJSON 流式，切过去之后仍然逐块吐帧（闸门 6 有一项专门盯这个：代理把响应攒成一坨，
   功能不坏但前端从打字机变成"等十几秒再整篇砸脸"）
-- 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
-  `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
-  `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
+- 只读聚合（为 RSC 分流新增）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
+  `/api/users/{id}/relation`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
+  `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项。它们中的大部分 Node 侧至今无对位路由
+  （页面直连 `lib/data.ts` 取数，没有 HTTP 入口），只有 `/api/series` 那一族在 P7a 之后两栈都有了
 
 移植过程中修掉的既有 bug（有的在原实现里就存在，有的差一点就跟着移植过去；对拍要求两侧同口径，
 所以一律两边一起改）：
@@ -176,6 +179,14 @@
   可两条 INSERT 语句一条都没写这一列——全是 NULL，进度恒为 0。**两侧一起错的对拍自然看不见**，
   这一条是读 SQL 读出来的。现在三条通道（透传 / live / 引擎）都落 `asker_id`，
   闸门 14 §8 §9 与闸门 15 §4 各钉一条"流水挂得上提问者"。
+- **一条 URL 干两件事，切流就切不动**（`GET /api/series`）：Node 侧它是书房的"我的专栏"
+  （要登录、回 `{ok,series}`），Java 侧它是公开合集架（匿名、回另一套形状）。**两侧各自都没有 bug**，
+  所以对拍是绿的、页面是好的、接口测试全过——只有"把 `/api/series` 整前缀切过去"这个动作会引爆它，
+  而那时的表现是最难查的一种：书房管理器拿到 200 空列表，一声不吭。修法是把两件事拆成两条 URL。
+  教训是**双轨期的接口清单要按"URL × 方法 × 语义"三元组核，按"URL 存在不存在"核会漏**。
+  顺带一条同族的口径坑：Java 侧原来用带类型的 `@RequestParam int limit`，`?limit=abc` 就是 400
+  加一段带时间戳的默认错误体，而 Node 是 `Number("abc") || 60` → 200 正常数据；现在两侧共用
+  `NodeShapes.jsNumber()`（JS 的 `Number(字符串)`：认 `0x10` 不认 `1d`）把这类取值收成一份实现。
 
 双轨期的一个已知缺口（不是 bug，是还没并到一起的状态）：**登录 / 改密的失败计数是各进程自己记的**
 ——Node 的 `lib/rate-limit.ts` 用一个 `Map`，Java 的 `LoginGuard` 另用一个 `Map`，同一账号在
@@ -380,6 +391,12 @@ node scripts/study-check.mjs
 #     （DELETE 必须排在校验之后、同一个事务里，先删后插就是"双击保存把柜子清空"）。
 #   · 坏 JSON 与空对象是**两个不同的 400**（"请求格式有误" vs 业务提示），
 #     用 `Bodies.json()` 一把兜成空对象就把其中一条分支抹掉了。
+#   · §7.5 钉的是"一条 URL 只干一件事"：`GET /api/series` 是公开架（匿名 200、不带 `ok` 键）、
+#     `GET /api/series/mine` 是我的柜子（匿名 401 而不是空列表）。这两句合起来才是那次拆分的
+#     验收——只测"两边返回一样"会放过最坏的那种错法：把两条都改成同一个意思。
+#     参数与 id 的取值形态也逐条比字节（`limit=0`/`abc`/`9999`、`author=0x2`/`2.5`/`-1`、
+#     `id=abc`/`2.5`），因为这类解析在 Java 侧一旦图省事用带类型的 `@RequestParam int`，
+#     对岸就是 400 加一段带时间戳的默认错误体——两台机器都没 bug，只是不再相同。
 #   · ⚠ 会改联调账号的昵称与口令：清场按快照直接写回 `password_hash`，
 #     不走接口——那个密码在 HIBP 泄露名单里，接口拒它是对的，但不是清场该有的姿势。
 #   · ⚠ 同样吃边缘限流（每 IP 120 次/分）：连跑要隔一分钟，否则后半程红一片 429。
@@ -485,7 +502,7 @@ JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,
 /api/admin,/api/users/*/follow,/api/comments/*/like,/api/comments/*/report,\
 /api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/articles/*/comments,\
 /api/articles/*/like,/api/articles/*/bookmark,/api/articles/*/report,/api/articles/*/paywall-view,\
-/api/articles/*/raw,/api/articles/*/export,/api/series/*/bundle,\
+/api/articles/*/raw,/api/articles/*/export,/api/series,\
 /api/drafts,/api/history,/api/links,/api/uploads,/api/me/profile,/api/me/password,/api/import,/api/ai,/api/agent \
   node node_modules/next/dist/bin/next dev -p 3400
 node scripts/proxy-cutover-check.mjs --money --community --admin --study --import --base=http://localhost:3400
@@ -503,11 +520,14 @@ node scripts/proxy-cutover-check.mjs --ai --base=http://localhost:3400
 # 3194 是闸门 14 那对"裸"Java 实例（见下一节的 ③）：同一个工程、同样的空配置，换端口而已
 ```
 
-书房那六条是**整前缀**切的（`/api/drafts` 等下面没有未迁分支），而 `/api/series` 只能继续按段通配
-留一条 `/api/series/*/bundle`：`--study` 里专门有一句反向断言，拿非法标题打 `POST /api/series`，
-要求它**没有** `x-backend` 头（仍在 Node 应答）——语义冲突登记表若不配这条断言，就只是一段注释。
-P6b 之后 `/api/ai` 与 `/api/agent` 两个前缀也整段安全了，闸门 8 的判定因此从"存在缺口"翻成"无缺口"；
-但 `/api/series` 那句还在，所以清单里唯一的扣住项就是它。
+书房那六条是**整前缀**切的（`/api/drafts` 等下面没有未迁分支），`/api/series` 从 P6d 起也是整前缀：
+它的 `GET` 曾经是两栈同 URL 却不同义（Node=我的专栏 / Java=公开合集架），所以只能按段通配留一条
+`/api/series/*/bundle`，并在闸门 6 里反向断言"其余的必须仍在 Node"。现在两条语义各占一条 URL
+（公开架留在 `GET /api/series`，"我的"挪到 `GET /api/series/mine`），那一档也翻成了正向断言：
+前缀下每个 URL、每个方法都要带 `x-backend: inkstack-java`，且状态码与文案与直连对岸一致。
+P6b 之后 `/api/ai` 与 `/api/agent` 两个前缀整段安全，P6d 之后闸门 8 现算出的最长可切前缀已经是
+`/api` 本身（Node 侧 58 个 URL 模式、Java 全的方法集合齐、语义冲突登记表已空）——剩下的收尾
+不是"还有哪些切不过去"，而是 P7 那件"把 Node 侧的取数代码删干净"。
 
 临时实例会把 `next-env.d.ts` / `tsconfig.json` 里的构建目录指针改写成 `.next-cutover`，**提交前 revert 这两个文件**；
 跑完顺手把 `.next-cutover` 和这个进程一起清掉。
