@@ -12,12 +12,13 @@ type Msg = { role: "user" | "agent"; text: string; cite?: string | null };
 
 const SUGGESTIONS = ["用一句话概括这篇文章", "这篇文章最容易被误解的点？", "接下来我该读什么？"];
 
-/** 分身引擎状态：demo=内置知识库演示（免费）；live=DeepSeek 直连；agentscope=Python 智能体 */
-type EngineMode = "demo" | "live" | "agentscope";
+/** 分身引擎状态：demo=内置知识库演示（免费）；live=DeepSeek 直连；agentscope=Python 智能体（旧）；spring-ai=Java 智能体 */
+type EngineMode = "demo" | "live" | "agentscope" | "spring-ai";
 const ENGINE_BADGE: Record<EngineMode, { label: string; title: string }> = {
-  demo: { label: "演示模式", title: "当前由内置知识库模拟回答（免费）。管理员在 .env 配置 DEEPSEEK_API_KEY 或启动 agent-service 后自动切换为真实大模型。" },
+  demo: { label: "演示模式", title: "当前由内置知识库模拟回答（免费）。管理员在 .env 配置 DEEPSEEK_API_KEY，或启用 Java 侧智能体引擎（AGENT_ENGINE=spring-ai）后，自动切换为真实大模型。" },
   live: { label: "DeepSeek 驱动", title: "由 DeepSeek 大模型基于博主文章检索生成回答。" },
   agentscope: { label: "AgentScope 智能体", title: "由 AgentScope 智能体服务（DeepSeek + 检索工具）生成回答。" },
+  "spring-ai": { label: "Spring AI 智能体", title: "由 Java 侧 Spring AI 智能体（大模型 + 文章检索工具）生成回答。" },
 };
 
 export default function AgentChat({

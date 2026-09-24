@@ -28,6 +28,13 @@ const jdbc =
   '?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia%2FShanghai&useSSL=false'
   + '&allowPublicKeyRetrieval=true&useAffectedRows=true';
 
+// "没给"与"给了空串"必须分开判：Spring 的 `${A:B}` 只在 A **完全没定义**时才回落到 B，
+// 把空串写进 properties 会静默吃掉回落。表现就是运营按 DEPLOY.md 只填了 DEEPSEEK_API_KEY
+// 和 AGENT_ENGINE=spring-ai，引擎却因为 AGENT_MODEL_API_KEY= 是空串而没起来，
+// /api/agent/status 报 live —— 一个"开关开了、Key 没读到"的半开态，最难查。
+const firstSet = (...vs) => vs.map((v) => (v ?? '').trim()).find((v) => v) ?? '';
+const aiDeepseekKey = process.env.DEEPSEEK_API_KEY ?? env.DEEPSEEK_API_KEY ?? '';
+
 const out = [
   '# 由 scripts/gen-java-env.mjs 生成，勿提交、勿手改',
   `INKSTACK_DB_URL=${jdbc}`,
@@ -58,8 +65,15 @@ const out = [
   // 取 process.env 优先：Next 读 .env 时**不会覆盖**已存在的环境变量，所以 Node 看到的
   // 就是 shell 里那一份；properties 里写空串等于假装"两边都没配"，换台机器起 Java 就分叉了。
   `AGENT_SERVICE_URL=${process.env.AGENT_SERVICE_URL ?? env.AGENT_SERVICE_URL ?? ''}`,
-  `DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY ?? env.DEEPSEEK_API_KEY ?? ''}`,
+  `DEEPSEEK_API_KEY=${aiDeepseekKey}`,
   `DEEPSEEK_BASE_URL=${process.env.DEEPSEEK_BASE_URL ?? env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com'}`,
+  // Java 侧智能体引擎（P6c 起顶掉 Python 的 agent-service）。这四个值一起决定
+  // /api/agent/status 报哪一档，也决定"会不会真去问大模型"，所以必须显式派生而不是留空：
+  // 开关 off 或 Key 为空时引擎不构造，两侧行为都退回演示档。
+  `AGENT_ENGINE=${process.env.AGENT_ENGINE ?? env.AGENT_ENGINE ?? 'off'}`,
+  `AGENT_MODEL_BASE_URL=${process.env.AGENT_MODEL_BASE_URL ?? env.AGENT_MODEL_BASE_URL ?? 'https://api.deepseek.com/v1'}`,
+  `AGENT_MODEL_API_KEY=${firstSet(process.env.AGENT_MODEL_API_KEY, env.AGENT_MODEL_API_KEY, aiDeepseekKey)}`,
+  `AGENT_MODEL_NAME=${process.env.AGENT_MODEL_NAME ?? env.AGENT_MODEL_NAME ?? 'deepseek-chat'}`,
   // 图片上传落盘目录。Java 进程的工作目录是 server/（spring-boot:run 的 basedir），
   // 而双轨期这些文件是 Next 从 public/uploads 直接伺服的——不写同一个目录，
   // 表现就是"上传成功、URL 也回来了、图片却 404"，且两侧各测各的都发现不了。

@@ -32,7 +32,7 @@
 | P5e | 博主迁移工具 `POST /api/import`（RSS 抓取 + Markdown 批量导入） | ✅ | 迁移闸门 **100/100**：SSRF 私网黑名单的十几种写法（十进制 / 十六进制 / 八进制 / 短写 / 全角句号 / userinfo 掩护 / IPv4 映射）两侧同码同文案、重定向逐跳复校、消毒七条正则的产物逐字比库、RFC 1123 各家日期落进同一个本地墙钟；切流代理含迁移工具 **48/48** |
 | P6a | AI 写作助手 `POST /api/ai/write` + 分身状态 `GET /api/agent/status` | ✅ | AI 闸门 **41/41**：四段兜底模板逐字节相同、"上游真产出才扣墨"两侧同式（探针拦住 → 上游 0 次、上游坏态 → 零扣墨且落同一份模板）、数字/数组/对象入参转发给上游的字符串两边同式、六路并发 40→10 只有两路成功、`流水条数 == 扣费次数`；切流代理含 AI 路径 **54/54** |
 | P6b | 分身问答 `POST /api/agent/ask`（NDJSON 流式，三条通道） | ✅ | 三条通道逐个钉：透传**分块到达**（代理不攒包）、SSE 只放行 content 帧、演示档游客可问且零扣墨；上游 503 → error 帧同文案零扣墨、吐两帧再掐线 → 明说"本次已按成功计费"；DeepSeek 收到的请求体两栈逐字一致（system prompt 里就是 RAG 挑出的那几段）。AI 闸门 **63/63**、切流代理 **56/56** |
-| P6c | Spring AI Alibaba 替换 Python AgentScope 服务并移除 `agent-service/` | ⏳ | RAG 口径以 `lib/rag.ts` 为准 |
+| P6c | Spring AI 智能体顶掉 Python 的 `agent-service/`（已删除） | ✅ | 引擎闸门 **20/20**：ReAct 那一圈真的转（模型先拿工具清单、第二轮带工具结果继续）、检索语料带付费墙与审核闸门（Python 版两条都缺，逐条对照钉死）、切块宽度与 cite 抽取照原实现、上游 502/空白一律落演示档零扣墨、`AGENT_MODEL_*` 决定徽标档位 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -153,6 +153,24 @@
   同一个文件里转发给 DeepSeek 的消息用 `Map.of("role",…,"content",…)`，`Map.of` 不保证顺序，
   两侧发给上游的 JSON 键序就不一样（语义相同、字节不同，夹具一比就露）。规则补两条：
   从 Node 抄切片先定它是"截断"还是"取尾"；**凡是要把字节交给别人的 Map，一律 LinkedHashMap**。
+- **Spring AI 的 starter 会替"每种模型"都装 Bean，而没配 Key 时直接把整个应用炸掉**：
+  实测启动失败的原因不是聊天模型，是 `OpenAiAudioSpeechAutoConfiguration` 的语音合成 Bean
+  （"OpenAI API key must be set"）。一个部署不需要语音，却要被它的可选 Bean 拦住启动，
+  所以 `spring.ai.model.*` 一律设成 `none`，由 `AvatarEngine` 自己按"开关 + 有没有 Key"构造
+  ChatModel——没 Key 的部署照样起得来，并照旧落模板兜底。
+- **Spring AI 自带的指数退避重试把一次 502 拖成四分钟**（2s / 10s / 50s / 180s 各撞一次超时）：
+  一个 Tomcat 线程被占死，远超读者等分身回答的 60 秒预算，而 Node 那条 live 通道本来就是一次
+  fetch 定生死。引擎侧显式 `RetryTemplate.maxAttempts(1)`，与参照实现同口径——**框架的默认值
+  不是"更安全"的选项**，它只是另一个人的默认值。
+- **被删掉的那台 Python 服务，检索 SQL 缺两道判定**：它的 `search_blog_articles` 只过
+  `status='published'`，既不看 `review_status='approved'` 也不看付费墙，于是"读者花 5 点墨问一句、
+  分身把没解锁的付费正文念出来"这条 P3 时代就堵掉的洞，在智能体这一侧一直开着。引擎按
+  `lib/rag.ts` 的口径重做，闸门 15 用"旧 SQL 查得到 vs 引擎没发给模型"成对钉住它。
+- **派生配置时写空串，会静默吃掉 Spring 的占位符回落**：`application.yml` 里写的是
+  `${AGENT_MODEL_API_KEY:${DEEPSEEK_API_KEY:}}`，可 `gen-java-env` 只要在 properties 里留下
+  一行 `AGENT_MODEL_API_KEY=`，A 就算"已定义"、回落不再生效——运营照 DEPLOY.md 只填一个 Key，
+  引擎却因为空串没起来，而徽标照样报 `live`（它确实有 Key，只是走的不是引擎）。规则补一条：
+  **派生脚本只写有值的行，回落链在脚本里判空，不要留给占位符语法**。
 
 双轨期的一个已知缺口（不是 bug，是还没并到一起的状态）：**登录 / 改密的失败计数是各进程自己记的**
 ——Node 的 `lib/rate-limit.ts` 用一个 `Map`，Java 的 `LoginGuard` 另用一个 `Map`，同一账号在
@@ -181,8 +199,9 @@ Next.js 15 (App Router)  :3100
   ├─ 页面（Server Component）…… 目前仍进程内直调 lib/data.ts → MySQL
   ├─ /api/*  ── 未切流 ──────────→ Node Route Handler → MySQL
   └─ /api/*  ── JAVA_ROUTES 命中 ─rewrite─▶ Spring Boot :3101 → MySQL（同一库）
-                                                └─ MyBatis-Plus 手写 SQL
-agent-service/ (Python FastAPI + AgentScope) :8100 —— 原实现，P6 换成 Spring AI 后移除
+                                                ├─ MyBatis-Plus 手写 SQL
+                                                └─ 智能体引擎（Spring AI + 文章检索工具）→ OpenAI 兼容端点
+（原 agent-service/ (Python FastAPI + AgentScope) :8100 已在 P6c 移除，引擎收进 Java 进程内）
 ```
 
 安全闸口（限流、CSRF、安全响应头）留在 Next 边缘中间件里，**与"谁来处理请求"解耦**——
@@ -214,7 +233,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十四道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十五道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -410,6 +429,26 @@ node scripts/ai-check.mjs
 #   · ⚠ 绝不允许拿真大模型跑这道闸门：本机的 `DEEPSEEK_API_KEY` 在 shell 环境里而不是 `.env`，
 #     闸门用的两栈实例都不带它，模式判据因此写成"两栈一致 + 上游不在场就绝不报 agentscope"，
 #     而不是硬编码 `demo`——硬编码在有 Key 的机器上会假红。
+
+# 15) 引擎闸门：Java 侧 Spring AI 智能体顶掉 Python 的 agent-service。这一道**没有对岸可比**
+#     （引擎只存在于 Java 侧），所以全部换成绝对判据。
+node scripts/agent-engine-check.mjs
+#   · 先证明"检索真的跑了"：模型第一轮拿到分身 system prompt 与工具清单，第二轮才带着
+#     role=tool 的消息继续。少一轮就说明 ReAct 被写成了单次直连——那才是换引擎最容易偷偷降级处。
+#   · 再证明语料带两道闸门。判据必须成对：先用 Python 原版那条**缺防护**的 SQL 查出
+#     "未解锁的付费正文"和"未过审稿"本来会进检索集，再证明引擎发给模型的那份里没有它们。
+#     只写后半句是空断言——检索集里本来就没有它，任何时候都绿。
+#     （哨兵刻意用稀有中文串：用 FREE-SENTINEL 这类写法时 ngram 二元组会命中库里现成文章，
+#     三篇夹具稿被挤下 LIMIT 3，前面那句"本来会进检索集"就查不出来了。）
+#   · 契约与手感：delta 拼回去必须等于模型的整段回答、末尾恰好一条 cite、cite 是从
+#     「依据：《…》」那行抽出来的、切块宽度仍是 Python 的 max(1, len // 40)。
+#   · 钱：探针拦住 → 模型收到 0 次请求；引擎 502 或只回空白 → 落演示档、Δ余额=0；
+#     成功一轮才有一条「分身问答」流水。写作档同理（坏态落模板、零扣墨）。
+#   · ⚠ 需要一台只开引擎的 Java 实例（`--inkstack.agent.engine=spring-ai`，同时把 service-url
+#     与 deepseek-key 留空）：那样"引擎失败之后落到哪一档"才是确定的演示档，不会去敲某台真服务。
+#     夹具是一个本地 OpenAI 兼容端点（默认 4702），假 Key 配假地址，永远碰不到官方 API。
+#   · ⚠ 会真建三篇文章、真扣墨、真写 agent_qa，跑完按快照与 slug 全清；全文索引刚写完可能查不到，
+#     闸门遇到这种情况直接停下提示重跑，而不是把检索类用例静默跳成绿。
 ```
 
 切流与回滚：
@@ -523,16 +562,16 @@ mvn spring-boot:run                  # http://localhost:3101
 │       ├── article/ auth/ points/ session/   # 按领域分包
 │       ├── money/ community/ admin/          # 资金链路 / 社区互动 / 运营台
 │       ├── series/ user/ study/              # 专栏读写 / 资料与改密 / 书房（草稿·足迹·友链·上传）
-│       ├── importer/ ai/                     # 迁移工具（RSS+Markdown）/ AI 写作与分身状态
+│       ├── importer/ ai/ agent/              # 迁移工具 / AI 写作与分身状态 / Spring AI 智能体引擎
 │       ├── entity/ mapper/                   # MyBatis-Plus：实体与手写 SQL 映射
 │       ├── common/                           # NodeShapes / Nicknames / Links / Slugs / Pricing：
 │       │                                     #   Node 的取值语义与口径，逐条对齐的落点
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
-├── agent-service/          # Python AgentScope 分身服务（P6 替换）
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 十四道闸门（parity / interop / paywall / page-parity / auth-flow /
+├── scripts/                # 十五道闸门（parity / interop / paywall / page-parity / auth-flow /
 │                           #   proxy-cutover / money-check / route-inventory / community-check /
-│                           #   studio-check / admin-check / study-check / import-check / ai-check）
+│                           #   studio-check / admin-check / study-check / import-check / ai-check
+│                           #   / agent-engine-check）
 │                           #   + 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
@@ -548,7 +587,9 @@ mvn spring-boot:run                  # http://localhost:3101
 | `JAVA_BASE` / `JAVA_ROUTES` | 双轨切流开关（见上） |
 | `NEXT_PUBLIC_SITE_URL` | 站点地址；决定会话 Cookie 是否带 `Secure` |
 | `TRUST_PROXY` | 反代后设 `1`，限流与审计才取真实 IP |
-| `AGENT_SERVICE_URL` | Python 分身服务地址；未配置时走 Node 内置模式。Java 侧由脚本派生成 `inkstack.agent.service-url`，**两栈必须同值**，否则 `/api/agent/status` 的徽标一边亮一边灭 |
+| `AGENT_SERVICE_URL` | 旧的 Python 分身服务地址（P6c 起仓库里已无该服务）。配了它，Java/Node 仍会把问答透传过去——留着是为了兼容既有部署，新部署请用下面的引擎 |
+| `AGENT_ENGINE` | `off`（默认）或 `spring-ai`。`spring-ai` = 启用 Java 侧智能体引擎（Spring AI + 文章检索工具）。**只有 Java 侧有这个引擎**，开了就必须把 `/api/ai`、`/api/agent` 整前缀切给 Java |
+| `AGENT_MODEL_BASE_URL` / `AGENT_MODEL_API_KEY` / `AGENT_MODEL_NAME` | 引擎接的 OpenAI 兼容端点与模型名，默认指向 DeepSeek 的 `/v1` 并复用 `DEEPSEEK_API_KEY`；换百炼只改这三行 |
 | `DEEPSEEK_API_KEY` | 没有分身服务时的降档判据（有 Key → `live`，无 → `demo`）；同样派生给 Java。**跑闸门时不要把真 Key 写进 `.env`**：`/api/ai/write` 的计费链路会照着它去问真上游，烧的是账号里的墨水 |
 | `DEEPSEEK_BASE_URL` | live 通道的大模型地址，默认官方。**留这个口子是给闸门指的**：`ai-check` 把它指向自己的 SSE 夹具，否则"上游 503 不许扣墨"这类用例每跑一次就真发一次请求 |
 

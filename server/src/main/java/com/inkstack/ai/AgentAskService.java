@@ -2,6 +2,7 @@ package com.inkstack.ai;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.inkstack.agent.AvatarEngine;
 import com.inkstack.common.NodeShapes;
 import com.inkstack.mapper.AgentQaMapper;
 import com.inkstack.points.PointsService;
@@ -86,6 +87,7 @@ public class AgentAskService {
   private final PointsService points;
   private final RagService rag;
   private final AgentQaMapper qa;
+  private final AvatarEngine engine;
   private final String agentServiceUrl;
   private final String deepseekKey;
   private final String deepseekBase;
@@ -94,13 +96,14 @@ public class AgentAskService {
       .connectTimeout(Duration.ofSeconds(8))
       .build();
 
-  public AgentAskService(PointsService points, RagService rag, AgentQaMapper qa,
+  public AgentAskService(PointsService points, RagService rag, AgentQaMapper qa, AvatarEngine engine,
       @Value("${inkstack.agent.service-url:}") String agentServiceUrl,
       @Value("${inkstack.agent.deepseek-key:}") String deepseekKey,
       @Value("${inkstack.agent.deepseek-base:https://api.deepseek.com}") String deepseekBase) {
     this.points = points;
     this.rag = rag;
     this.qa = qa;
+    this.engine = engine;
     this.agentServiceUrl = agentServiceUrl;
     this.deepseekKey = deepseekKey;
     this.deepseekBase = deepseekBase;
@@ -115,6 +118,15 @@ public class AgentAskService {
     }
 
     String agentUrl = trimSlash(agentServiceUrl);
+    if (agentUrl.isEmpty() && engine.available()) {
+      // 第四通道：Java 侧 Spring AI 智能体。它与 live 通道同一种"钱停在哪儿"的规矩——
+      // 先让模型把整段回答生成出来，确认非空，才扣这一次墨。
+      Reply fromEngine = askNative(uid, question, author, about);
+      if (fromEngine != null) {
+        return fromEngine;
+      }
+      // 引擎没给出可用产出（没配 Key、上游炸了、返回空）→ 继续往下落演示通道
+    }
     if (!agentUrl.isEmpty()) {
       if (uid == null) {
         return new Reply.Status(401, Map.of("error", "登录后才能与分身对话"));
@@ -156,6 +168,51 @@ public class AgentAskService {
       return new Reply.Stream(out -> streamLive(out, uid, question, author, about, history));
     }
     return new Reply.Stream(out -> streamDemo(out, question));
+  }
+
+  /* ==================== 通道 ⓪：Spring AI 智能体（顶掉 Python 服务的那一条） ==================== */
+
+  /**
+   * 引擎给得出可用产出时返回一条流式应答，否则返回 {@code null} 让调用方继续往下挑通道。
+   *
+   * <p>鉴权与预检的姿势与 live 通道一致：登录 + 只读探针在前，扣款在模型给出非空回答之后。
+   */
+  private Reply askNative(Long uid, String question, String author, String about) {
+    if (uid == null) {
+      return new Reply.Status(401, Map.of("error", "登录后才能与分身对话"));
+    }
+    long bal = points.peekBalance(uid);
+    if (bal < QA_COST) {
+      return new Reply.Status(402, Map.of("error", "墨水不足（余额 " + bal + "，本次需 " + QA_COST + "）"));
+    }
+    AvatarEngine.AvatarReply reply = engine.ask(question, author, about, uid);
+    if (reply == null) {
+      return null;
+    }
+    PointsService.Spend spend = points.spend(uid, QA_COST, "分身问答");
+    if (!spend.ok()) {
+      return new Reply.Status(402, Map.of("error", nullToEmpty(spend.error())));
+    }
+    try {
+      insertQa(question, reply.text(), reply.citation() == null
+          ? "[]" : json.writeValueAsString(List.of(reply.citation())));
+    } catch (Exception qaFailed) {
+      // 流水失败不阻塞回答
+    }
+    return new Reply.Stream(out -> emitFrames(out, reply));
+  }
+
+  /**
+   * 整段回答切帧下发：切块宽度沿用 Python 的 {@code max(1, len // 40)}，
+   * 末尾一条 cite。读者看到的节奏与原来那台服务一致——换引擎不该换打字机速度。
+   */
+  private void emitFrames(OutputStream out, AvatarEngine.AvatarReply reply) {
+    String text = reply.text();
+    int step = Math.max(1, text.length() / 40);
+    for (int i = 0; i < text.length(); i += step) {
+      send(out, frame("type", "delta", "text", NodeShapes.slice(text, i, i + step)));
+    }
+    send(out, frame("type", "cite", "citation", reply.citation()));
   }
 
   /* ==================== 通道 ②：DeepSeek 流式 ==================== */

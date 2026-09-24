@@ -2,6 +2,7 @@ package com.inkstack.ai;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.inkstack.agent.AvatarEngine;
 import com.inkstack.common.NodeShapes;
 import com.inkstack.points.PointsService;
 import java.net.URI;
@@ -68,15 +69,17 @@ public class AiWriteService {
           + "5. 博客平台的积分经济：为什么免费的 AI 一定被玩死");
 
   private final PointsService points;
+  private final AvatarEngine engine;
   private final String agentServiceUrl;
   private final HttpClient http = HttpClient.newBuilder()
       .connectTimeout(Duration.ofSeconds(8))
       .build();
   private final ObjectMapper json = new ObjectMapper();
 
-  public AiWriteService(PointsService points,
+  public AiWriteService(PointsService points, AvatarEngine engine,
       @Value("${inkstack.agent.service-url:}") String agentServiceUrl) {
     this.points = points;
+    this.engine = engine;
     this.agentServiceUrl = agentServiceUrl;
   }
 
@@ -99,7 +102,11 @@ public class AiWriteService {
       return new Outcome(402, Map.of("error", "积分不足（余额 " + balance + "，本次需 " + cost + "）"));
     }
 
-    String generated = fromAgentService(key, draft, author);
+    // 引擎优先：配了 Spring AI 就用它真生成；没配或它失败，再走 Python 透传，再落模板。
+    String generated = engine.available() ? engine.write(key, writePrompt(key, draft), author) : null;
+    if (generated == null) {
+      generated = fromAgentService(key, draft, author);
+    }
     if (generated != null) {
       PointsService.Spend spend = points.spend(uid, cost, "AI写作·" + LABELS.get(key));
       if (!spend.ok()) {
@@ -138,7 +145,7 @@ public class AiWriteService {
       // 键序必须与 Node 的 JSON.stringify 一致：Map.of 不保证顺序，上游收到的字节会两栈不同
       Map<String, Object> payload = new LinkedHashMap<>();
       payload.put("mode", mode);
-      payload.put("draft", draft.isEmpty() ? "（作者尚未写下草稿，主题：" + author + " 的技术专栏）" : draft);
+      payload.put("draft", effectiveDraft(draft, author));
       payload.put("author", author);
       String body = json.writeValueAsString(payload);
       HttpRequest request = HttpRequest.newBuilder(URI.create(base + "/ai/write"))
@@ -175,5 +182,25 @@ public class AiWriteService {
 
   private static Outcome bad(String error) {
     return new Outcome(400, Map.of("error", error));
+  }
+
+  /** 草稿为空时替它拼一条主题占位：两条生成通道共用同一个"有效草稿"。 */
+  private static String effectiveDraft(String draft, String author) {
+    return draft.isEmpty() ? "（作者尚未写下草稿，主题：" + author + " 的技术专栏）" : draft;
+  }
+
+  /**
+   * 四档提示词，前三档逐字照抄 Python 服务的 WRITE_PROMPTS，topic 是按同一句式补齐的
+   * （Python 版没有 topic，遇到它回 400，Node 就落模板——那是缺档，不是有意的行为）。
+   * 送进模型的草稿裁到 3000 字，与 Python 的 {@code draft[:3000]} 同口径。
+   */
+  private static String writePrompt(String mode, String draft) {
+    String body = NodeShapes.slice(draft, 3000);
+    return switch (mode) {
+      case "continue" -> "续写这段草稿（300 字内），延续作者的论证节奏与口吻，只输出续写内容：\n\n" + body;
+      case "polish" -> "润色这段草稿：保留原意与观点，收紧节奏、删冗余，只输出润色后的文本：\n\n" + body;
+      case "title" -> "为这段草稿起 5 个中文标题，每行一个，风格克制不标题党：\n\n" + body;
+      default -> "推荐 5 个适合这位博主的选题，每行一个，须与其既有文章方向一致：\n\n" + body;
+    };
   }
 }

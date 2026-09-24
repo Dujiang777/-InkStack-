@@ -20,7 +20,21 @@
   <properties>
     <java.version>17</java.version>
     <mybatis-plus.version>3.5.17</mybatis-plus.version>
+    <!-- 与 Spring Boot 3.5.x 同代的 Spring AI 版本线；2.0.x 要 Boot 4，不能升 -->
+    <spring-ai.version>1.1.5</spring-ai.version>
   </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-bom</artifactId>
+        <version>${spring-ai.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 
   <dependencies>
     <dependency>
@@ -55,6 +69,19 @@
       <groupId>org.bouncycastle</groupId>
       <artifactId>bcprov-jdk18on</artifactId>
       <version>1.86</version>
+    </dependency>
+    <!--
+      P6c：博主分身的智能体引擎，从 Python 的 AgentScope ReActAgent 换成 Spring AI。
+      只引 OpenAI 兼容协议的 model starter：它对着现有的 DeepSeek 端点即可工作
+      （DeepSeek 提供 OpenAI 兼容 API），不引入第二个模型厂商与第二把 Key。
+      要接百炼/DashScope 时再加 spring-ai-alibaba 的 starter，引擎侧的实现接口不变。
+      ReAct 循环用非流式 call（与 Python 版同形：先拿完整回答，再切帧下发）。
+      ⚠ spring-ai-openai 会传递带进 spring-webflux + reactor-core（它自己的 stream() 要用），
+      排不掉也不该排：spring-webmvc 同时在类路径上，Boot 仍按 servlet 应用启动，实测一致。
+    -->
+    <dependency>
+      <groupId>org.springframework.ai</groupId>
+      <artifactId>spring-ai-starter-model-openai</artifactId>
     </dependency>
     <dependency>
       <groupId>org.projectlombok</groupId>

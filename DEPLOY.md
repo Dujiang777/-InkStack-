@@ -14,7 +14,7 @@
 | 磁盘 | 20GB | 40GB（文章与上传图） |
 | 软件 | Node.js ≥ 20.9、MySQL ≥ 8.0、Nginx、pm2 | — |
 
-> AI 分身（agent-service，Python 3.10+ + FastAPI）可与主站同机部署；不用分身问答可跳过第 6 节。
+> AI 分身引擎在 Java 后端里（Spring AI），不额外起进程；不开第 6 节的那几个变量就是演示模式。
 
 ## 2. 域名与 HTTPS（必须先做）
 
@@ -94,19 +94,32 @@ server {
 - [ ] `nginx -t && systemctl reload nginx`
 - [ ] **不要**原样转发客户端带来的 X-Forwarded-For（`$proxy_add_x_forwarded_for` 会把伪造链拼进来），用 `$remote_addr` 覆盖
 
-## 6. AI 分身服务（可选）
+## 6. AI 分身引擎（可选，Java 侧内置）
+
+分身不再是独立进程：智能体引擎就在 `server/` 里（Spring AI + 文章检索工具），开不开由三个环境变量决定。
 
 ```bash
-cd agent-service
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # 填 DEEPSEEK_API_KEY
+# .env（或 systemd 的 Environment=）
+AGENT_ENGINE=spring-ai                 # 默认 off：不配 Key 或不开关时走演示档
+AGENT_MODEL_BASE_URL=https://api.deepseek.com/v1   # OpenAI 兼容端点，换百炼只改这行
+AGENT_MODEL_API_KEY=sk-...             # 不给 Key 就别开引擎（开了也只会落兜底）
+AGENT_MODEL_NAME=deepseek-chat
 ```
 
-```bash
-pm2 start venv/bin/uvicorn --name ink-agent -- app.main:app --host 127.0.0.1 --port 8100
-pm2 save
-```
+然后 `node scripts/gen-java-env.mjs` 把这些派生给 Java 进程（Java 不读 `.env`），重启后端即可。
+`AGENT_MODEL_API_KEY` 留空会自动沿用 `DEEPSEEK_API_KEY`，两处填一份就够。
+
+⚠ 开引擎前必须把 `AGENT_SERVICE_URL` 清空：只要它非空，Java 就先走"转发给外部智能体服务"那条
+兼容通道，转发失败才落到 DeepSeek 直连——引擎永远轮不到，徽标也永远不报 `spring-ai`。
+这条优先级是双轨期的取舍（Node 那侧没有引擎，谁配了外部服务谁说话），不是 bug。
+
+引擎关掉时 `/api/agent/status` 报 `demo`，开着报 `spring-ai`——徽标与真实来源必须一致，
+这是闸门 15 的第 0 条前置。写作助手与分身问答都扣墨，**未登录一律 401**，读者侧的
+提问入口已按登录态收口。
+
+> 老的 Python 服务（`agent-service/`，FastAPI + AgentScope）已在 P6c 移除。
+> 它的 SQL 缺"过审"与付费墙两道判定，会把没解锁的付费正文喂给模型复述；Java 引擎按
+> `lib/rag.ts` 的口径重做，这一洞顺带补上（闸门 15 / 1 节逐条钉住）。
 
 ## 7. 上线后安全自查清单（10 分钟）
 
