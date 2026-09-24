@@ -20,8 +20,11 @@
 //         不能是后端端口——Next 的 rewrite 会覆写 Host，所以 Java 必须读 x-forwarded-host。
 // --study 追加书房写侧经代理的证据（P5d）：坏入参三类 + multipart 文件名不被 rewrite 改掉。
 // --import 追加迁移工具经代理的证据（P5e）：SSRF 黑名单与 Content-Type 判定换入口不松一档。
-// --ai 追加 AI 写作面经代理的证据（P6a）：只挑兜底与校验路径——这一档若真接上上游就会扣墨，
-//        所以它同时断言"切流实例没接 Python 上游"，接上就判红，不拿用户的墨水去赌配置。
+// --ai 追加 AI 面经代理的证据（P6a 写作 + P6b 问答）：只挑兜底与校验路径——这一档若真接上上游
+//        就会扣墨，所以它同时断言"切流实例没接上游"，接上就判红，不拿用户的墨水去赌配置。
+//        问答那条还盯一件别处测不到的事：rewrite 之后 NDJSON 必须仍然**逐块**到达，
+//        代理一旦攒成一坨，前端就从打字机变成"等十几秒再整篇砸脸"，功能没坏而体验全毁。
+//        ⚠ 该实例必须以 DEEPSEEK_API_KEY= AGENT_SERVICE_URL= 起，且 JAVA_ROUTES 含 /api/agent/ask。
 import fs from "node:fs";
 import path from "node:path";
 
@@ -45,8 +48,36 @@ const AI = process.argv.includes("--ai");
 
 let pass = 0;
 let fail = 0;
+let skip = 0;
 const ok = (label, detail = "") => { pass++; console.log(`PASS  ${label}${detail ? "  — " + detail : ""}`); };
 const bad = (label, detail) => { fail++; console.log(`FAIL  ${label}  — ${detail}`); };
+/** 环境不满足时如实记 SKIP：把"没测到"报成绿，比报成红更害人——前者会让下一个人以为测过了。 */
+const skipped = (label, detail) => { skip++; console.log(`SKIP  ${label}  — ${detail}`); };
+
+/** 流式读完一条 NDJSON：块数就是"有没有被代理攒成一坨"的证据。 */
+async function streamThrough(url, body) {
+  const res = await fetch(url, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const dec = new TextDecoder();
+  let text = "";
+  let chunks = 0;
+  for await (const part of res.body) {
+    chunks++;
+    text += dec.decode(part, { stream: true });
+  }
+  let badLines = 0;
+  const frames = text.split("\n").filter((l) => l.trim()).map((l) => {
+    try { return JSON.parse(l); } catch { badLines++; return { type: "__坏行__" }; }
+  });
+  return {
+    status: res.status, chunks, text, frames, bad: badLines,
+    backend: res.headers.get("x-backend") ?? "",
+    type: (res.headers.get("content-type") ?? "").replace(/;\s*/g, "; "),
+    answer: frames.filter((f) => f.type === "delta").map((f) => f.text).join(""),
+  };
+}
 
 const tag = (res) => res.headers.get("x-backend") ?? "";
 
@@ -390,7 +421,44 @@ if (AI) {
     { body: { mode: "title" }, cookie: c7, headers: { origin: "https://evil.example" } });
   if (aiCsrf.status === 403 && aiCsrf.backend === "") ok("AI 写作的 CSRF 也在边缘拦住");
   else bad("AI 写作的 CSRF 也在边缘拦住", `${aiCsrf.status} backend=${aiCsrf.backend || "无"}`);
+
+  // 分身问答（P6b）：这条链路的价值全在"一帧一帧到达"。rewrite 只要把响应攒成一坨再吐，
+  // 前端就从"打字机"变成"等十几秒然后整篇砸脸上"——功能没坏、体验全毁，正是切流最容易丢的东西。
+  const askBad = await call("POST", "/api/agent/ask", { body: { question: "   " }, cookie: c7 });
+  if (askBad.status === 400 && askBad.backend === "inkstack-java"
+    && askBad.json?.error === "question 不能为空") {
+    ok("经代理的空提问仍是一条普通 JSON 400（不是带 error 帧的流）", `backend=${askBad.backend}`);
+  } else {
+    bad("经代理的空提问仍是一条普通 JSON 400",
+      `${askBad.status} backend=${askBad.backend || "无"} ${askBad.text.slice(0, 70)}`);
+  }
+  // 真跑一次流式之前必须先确认后端落在 demo 档：另外两条通道一问就扣 5 点墨、还会去问真上游。
+  // 判不过就 SKIP（记成"没测到"），不能红着把真 token 烧掉——这一条是防"配置漂了"的保险。
+  const modeNow = await call("GET", "/api/agent/status", { cookie: c7 });
+  if (modeNow.json?.mode !== "demo") {
+    skipped("经代理的演示流逐帧到达",
+      `后端不在 demo 档（mode=${modeNow.json?.mode}）——这一对实例必须以 `
+      + "DEEPSEEK_API_KEY= AGENT_SERVICE_URL= 起，且 JAVA_BASE 指向同样空配置的 Java");
+  } else {
+    const proxied = await streamThrough(`${base}/api/agent/ask`, { question: "今天天气怎么样" });
+    // 手抄的演示兜底文本：既是"逐字节没被 rewrite 改动"的判据，也是第二道保险——
+    // 后端真接上了大模型的话这里必然对不上，而宁可可疑也不悄悄烧真 token。
+    const DEMO_FALLBACK = "这个问题在我的知识库里没有足够依据，与其瞎猜，不如转达给博主本人——"
+      + "他通常 12 小时内会回复。你也可以换个更具体的问法试试。";
+    if (proxied.status === 200 && proxied.backend === "inkstack-java"
+      && proxied.type === "application/x-ndjson; charset=utf-8"
+      && proxied.chunks > 1 && proxied.bad === 0 && proxied.answer === DEMO_FALLBACK
+      && proxied.frames.filter((f) => f.type === "cite").length === 1
+      && proxied.frames.at(-1)?.citation === null) {
+      ok("经代理的演示流逐帧到达（分块 > 1、拼起来就是那份兜底文本、末尾恰好一条 cite）",
+        `块数=${proxied.chunks} 帧数=${proxied.frames.length}`);
+    } else {
+      bad("经代理的演示流逐帧到达",
+        `${proxied.status} backend=${proxied.backend || "无"} type=${proxied.type || "无"} `
+        + `块数=${proxied.chunks} 杂行=${proxied.bad} 拼回=${JSON.stringify(proxied.answer.slice(0, 24))}`);
+    }
+  }
 }
 
-console.log(`\nbase=${base}  合计 ${pass + fail} 项，失败 ${fail} 项`);
+console.log(`\nbase=${base}  合计 ${pass + fail + skip} 项（SKIP ${skip}），失败 ${fail} 项`);
 process.exit(fail ? 1 : 0);

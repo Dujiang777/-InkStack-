@@ -135,14 +135,16 @@ public class AiWriteService {
       return null;
     }
     try {
-      String payload = json.writeValueAsString(Map.of(
-          "mode", mode,
-          "draft", draft.isEmpty() ? "（作者尚未写下草稿，主题：" + author + " 的技术专栏）" : draft,
-          "author", author));
+      // 键序必须与 Node 的 JSON.stringify 一致：Map.of 不保证顺序，上游收到的字节会两栈不同
+      Map<String, Object> payload = new LinkedHashMap<>();
+      payload.put("mode", mode);
+      payload.put("draft", draft.isEmpty() ? "（作者尚未写下草稿，主题：" + author + " 的技术专栏）" : draft);
+      payload.put("author", author);
+      String body = json.writeValueAsString(payload);
       HttpRequest request = HttpRequest.newBuilder(URI.create(base + "/ai/write"))
           .timeout(Duration.ofSeconds(90))
           .header("Content-Type", "application/json")
-          .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+          .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
           .build();
       HttpResponse<byte[]> res = http.send(request, HttpResponse.BodyHandlers.ofByteArray());
       if (res.statusCode() < 200 || res.statusCode() > 299) {

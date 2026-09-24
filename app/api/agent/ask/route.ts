@@ -19,6 +19,11 @@ import { retrieveSnippets, type Snippet } from "@/lib/rag";
 
 const QA_COST = 5; // 分身问答单价（经济收紧后由 2 上调至 5）
 
+// DeepSeek 的接入点。默认就是官方地址；留一个环境变量口子不是为了部署，
+// 而是为了让闸门能拿一个**本地 SSE 夹具**跑 live 通道——否则这一档只能对着真大模型测，
+// 每验一次"上游坏态不许扣墨"就真花一次 token，而且验不了上游返回半截 SSE 这种形状。
+const DEEPSEEK_BASE = (process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
+
 type QA = { a: string; c: string | null };
 
 const KB: Record<string, QA> = {
@@ -69,9 +74,11 @@ export async function POST(req: Request) {
     about?: string;
     history?: HistoryTurn[];
   };
-  const question = (body.question ?? "").trim().slice(0, 500);
-  const author = (body.author ?? "博主").trim().slice(0, 40);
-  const about = (body.about ?? "").trim().slice(0, 120);
+  // 三个字符串入参都先 String() 过一遍：JSON 允许它们是数字/数组/对象，
+  // 而 `(5).trim()` 是一个未捕获的 TypeError → 500。与 /api/ai/write 同口径（闸门 14 两侧同测）。
+  const question = String(body.question ?? "").trim().slice(0, 500);
+  const author = String(body.author ?? "博主").trim().slice(0, 40);
+  const about = String(body.about ?? "").trim().slice(0, 120);
   // 多轮记忆：只保留最近 6 条有效发言，防 prompt 膨胀与注入长文
   const history = (Array.isArray(body.history) ? body.history : [])
     .filter((t) => t && (t.role === "user" || t.role === "agent") && typeof t.text === "string" && t.text.trim())
@@ -175,7 +182,7 @@ export async function POST(req: Request) {
         try {
           // v17.2：传入提问者，未解锁的付费文不进入检索语料（防分身复述付费正文）
           const snippets = await retrieveSnippets(pool!, question, viewer?.id ?? null);
-          const res = await fetch("https://api.deepseek.com/chat/completions", {
+          const res = await fetch(`${DEEPSEEK_BASE}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",

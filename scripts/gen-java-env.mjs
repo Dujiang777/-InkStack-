@@ -59,6 +59,7 @@ const out = [
   // 就是 shell 里那一份；properties 里写空串等于假装"两边都没配"，换台机器起 Java 就分叉了。
   `AGENT_SERVICE_URL=${process.env.AGENT_SERVICE_URL ?? env.AGENT_SERVICE_URL ?? ''}`,
   `DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY ?? env.DEEPSEEK_API_KEY ?? ''}`,
+  `DEEPSEEK_BASE_URL=${process.env.DEEPSEEK_BASE_URL ?? env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com'}`,
   // 图片上传落盘目录。Java 进程的工作目录是 server/（spring-boot:run 的 basedir），
   // 而双轨期这些文件是 Next 从 public/uploads 直接伺服的——不写同一个目录，
   // 表现就是"上传成功、URL 也回来了、图片却 404"，且两侧各测各的都发现不了。
