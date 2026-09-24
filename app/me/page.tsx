@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
 import { getPool } from "@/lib/db";
-import { followStats, listMyFollowing, listMyFollowers, listMyLikes, listMyComments, listMyBookmarks, listMyHistory, listAchievements, badgeRewardClaimed, ensureAvatarColumns } from "@/lib/data";
+import { followStats, listMyFollowing, listMyFollowers, listMyLikes, listMyComments, listMyBookmarks, listMyHistory, listAchievements, badgeRewardClaimed } from "@/lib/data";
 import MeClient from "@/components/MeClient";
 
 export const metadata = { title: "个人中心 · 墨栈 InkStack" };
@@ -21,7 +21,6 @@ export default async function MePage() {
   let avatarShape = "";
   if (pool) {
     try {
-      await ensureAvatarColumns(pool);
       const [rows] = await pool.query(
         `SELECT IFNULL(bio, '') AS bio, avatar_text AS avatarText,
                 COALESCE(avatar_tone, '') AS avatarTone, COALESCE(avatar_shape, '') AS avatarShape,

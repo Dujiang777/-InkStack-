@@ -2,7 +2,7 @@
 // POST /api/articles — 发布文章（创作台/编辑器用；Markdown 原文入库，渲染层统一消毒）
 // 积分规则：发布 +20，每日上限 1 篇（防灌水；迁移导入不计入该奖励）
 import { NextResponse } from "next/server";
-import { listArticles, ensurePaidColumns, parseDiscount } from "@/lib/data";
+import { listArticles, parseDiscount } from "@/lib/data";
 import { getCurrentUser, isStaff } from "@/lib/auth";
 import { getPool, dbEnabled } from "@/lib/db";
 import { makeSlug } from "@/lib/importer";
@@ -135,7 +135,6 @@ export async function POST(req: Request) {
   if (md.length > 100_000) return NextResponse.json({ error: "正文过长（上限 10 万字）" }, { status: 400 });
 
   try {
-    await ensurePaidColumns(pool);
     // 审核流：普通用户发文 → 待审核（审核通过后公开展示）；管理员发文直接通过
     // 草稿：仅作者可见，不入审核流、不发奖励（status enum 原生含 'draft'）
     const slug = await insertArticleRetrySlug(pool, {

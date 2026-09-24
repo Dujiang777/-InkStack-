@@ -50,44 +50,7 @@ export function cleanNickname(raw: unknown, max = 20): string {
     .slice(0, max);
 }
 
-/* ---------- 懒迁移：sessions / audit_logs 表 + users 2FA 列（老库平滑升级） ---------- */
-const gSec = globalThis as typeof globalThis & { __inkSecReady?: boolean };
-export async function ensureSecurityTables(pool: NonNullable<Awaited<ReturnType<typeof getPool>>>): Promise<void> {
-  if (gSec.__inkSecReady) return;
-  await pool.query(`CREATE TABLE IF NOT EXISTS sessions (
-    id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    user_id      BIGINT UNSIGNED NOT NULL,
-    token_hash   CHAR(64) NOT NULL,
-    ua           VARCHAR(255) NULL,
-    ip           VARCHAR(64)  NULL,
-    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at   DATETIME NOT NULL,
-    revoked      TINYINT(1) NOT NULL DEFAULT 0,
-    UNIQUE KEY uk_session_token (token_hash),
-    INDEX idx_session_user (user_id, revoked)
-  ) ENGINE=InnoDB`);
-  await pool.query(`CREATE TABLE IF NOT EXISTS audit_logs (
-    id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    user_id    BIGINT UNSIGNED NULL,
-    event      VARCHAR(32) NOT NULL,
-    ip         VARCHAR(64)  NULL,
-    ua         VARCHAR(255) NULL,
-    detail     VARCHAR(255) NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_audit_user (user_id, created_at DESC),
-    INDEX idx_audit_event (event, created_at DESC)
-  ) ENGINE=InnoDB`);
-  const [cols] = await pool.query(
-    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME IN ('totp_secret','totp_enabled','totp_backup')`
-  );
-  const have = new Set((cols as { COLUMN_NAME: string }[]).map((r) => r.COLUMN_NAME));
-  if (!have.has("totp_secret")) await pool.query(`ALTER TABLE users ADD COLUMN totp_secret VARCHAR(64) NULL`);
-  if (!have.has("totp_enabled")) await pool.query(`ALTER TABLE users ADD COLUMN totp_enabled TINYINT(1) NOT NULL DEFAULT 0`);
-  if (!have.has("totp_backup")) await pool.query(`ALTER TABLE users ADD COLUMN totp_backup TEXT NULL COMMENT '一次性备份码 sha256 JSON 数组'`);
-  gSec.__inkSecReady = true;
-}
+/* ---------- 会话与审计表：由 db/schema.sql 建（P7c 起 Node 侧不再懒建表） ---------- */
 
 /* ---------- 密码 ---------- */
 export function hashPassword(pw: string): string {
@@ -152,7 +115,6 @@ export async function setSessionCookie(
   const pool = await getPool();
   if (pool && dbEnabled()) {
     try {
-      await ensureSecurityTables(pool);
       await pool.query(
         `INSERT INTO sessions (user_id, token_hash, ua, ip, expires_at)
          VALUES (?, ?, ?, ?, FROM_UNIXTIME(?))`,
@@ -198,7 +160,6 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   const pool = await getPool();
   if (!pool) return null;
   try {
-    await ensureSecurityTables(pool);
     // 双保险：签名 + 库内会话有效（未被吊销/未过期）
     const [rows] = await pool.query(
       `SELECT s.id AS session_id, s.token_hash, u.id, u.nickname, u.email, u.role, u.points_balance, u.banned

@@ -6,7 +6,7 @@ import { getCurrentUser, isStaff } from "@/lib/auth";
 import { getPool, dbEnabled } from "@/lib/db";
 import { notify } from "@/lib/notify";
 import { grantCappedReward } from "@/lib/points";
-import { ensurePaidColumns, getArticle, parseDiscount } from "@/lib/data";
+import { getArticle, parseDiscount } from "@/lib/data";
 
 /**
  * 付费墙判定必须在服务端做完：先按 includeMd:false 取（SQL 层 SUBSTRING_INDEX 只回前 6 行），
@@ -76,7 +76,6 @@ export async function PUT(req: Request, { params }: { params: Promise<{ slug: st
       return NextResponse.json({ error: "只能编辑自己的文章" }, { status: 403 });
     }
     const wasDraft = art.status === "draft";
-    await ensurePaidColumns(pool);
 
     if (asDraft) {
       // 存草稿：仅限本身就是草稿的文章（已发布内容不允许绕过审核悄悄修改）

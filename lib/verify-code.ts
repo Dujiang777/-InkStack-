@@ -1,5 +1,5 @@
 // 注册邮箱验证码：存取 + 校验（sha256 落库，10 分钟有效，5 次尝试上限，
-// 签发冷却 60s / 10 分钟窗口最多 5 次）。表懒建，globalThis 防热重载重复建。
+// 签发冷却 60s / 10 分钟窗口最多 5 次）。表由 db/schema.sql 建，Node 侧不再懒建表。
 import { createHash, randomInt } from "node:crypto";
 import type { Pool } from "mysql2/promise";
 
@@ -9,25 +9,8 @@ const RESEND_COOLDOWN_MS = 60 * 1000;
 const WINDOW_LIMIT_MS = 10 * 60 * 1000;
 const WINDOW_MAX = 5;
 
-const g = globalThis as typeof globalThis & { __inkCodeReady?: boolean };
-
 function codeHash(email: string, code: string): string {
   return createHash("sha256").update(`${email.toLowerCase()}::${code}`).digest("hex");
-}
-
-async function ensureTable(pool: Pool): Promise<void> {
-  if (g.__inkCodeReady) return;
-  await pool.query(`CREATE TABLE IF NOT EXISTS email_codes (
-    id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    email      VARCHAR(190) NOT NULL,
-    code_hash  CHAR(64) NOT NULL,
-    purpose    VARCHAR(20) NOT NULL DEFAULT 'register',
-    attempts   INT UNSIGNED NOT NULL DEFAULT 0,
-    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    expires_at DATETIME(3) NOT NULL,
-    INDEX idx_ec_email (email, created_at DESC)
-  ) ENGINE=InnoDB`);
-  g.__inkCodeReady = true;
 }
 
 export type IssueResult =
@@ -36,7 +19,6 @@ export type IssueResult =
 
 /** 签发验证码（冷却与频控通过则返回明文 code 交给 mailer） */
 export async function issueCode(pool: Pool, email: string, purpose = "register"): Promise<IssueResult> {
-  await ensureTable(pool);
   const mail = email.toLowerCase();
   // v17.8：冷却/窗口判定与 INSERT 收进**同一事务**，窗口查询加 FOR UPDATE。
   //   原实现是「先 SELECT 判冷却 → 再 INSERT」两条自动提交语句，中间无任何锁：
@@ -84,7 +66,6 @@ export type CheckResult = { ok: true } | { ok: false; error: string };
 
 /** 校验并消费验证码（成功后即删；错误累计 5 次作废） */
 export async function checkCode(pool: Pool, email: string, code: string, purpose = "register"): Promise<CheckResult> {
-  await ensureTable(pool);
   const mail = email.toLowerCase();
   try {
     const [rows0] = await pool.query(

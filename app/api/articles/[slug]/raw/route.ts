@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser, isStaff } from "@/lib/auth";
 import { getPool } from "@/lib/db";
-import { ensurePaidColumns } from "@/lib/data";
+
 
 export async function GET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const user = await getCurrentUser();
@@ -12,7 +12,6 @@ export async function GET(_req: Request, { params }: { params: Promise<{ slug: s
   if (!pool) return NextResponse.json({ error: "数据库暂不可用" }, { status: 503 });
 
   try {
-    await ensurePaidColumns(pool);
     const [rows] = await pool.query(
       `SELECT slug, title, md_content AS md, summary, tags, cover_label AS coverLabel,
               review_status AS reviewStatus, review_note AS reviewNote, author_id, status,

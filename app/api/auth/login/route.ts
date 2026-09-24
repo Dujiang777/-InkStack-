@@ -43,8 +43,6 @@ export async function POST(req: Request) {
   const pool = await getPool();
   if (!pool) return NextResponse.json({ error: "数据库不可用" }, { status: 500 });
   try {
-    const { ensureSecurityTables } = await import("@/lib/auth");
-    await ensureSecurityTables(pool);
     const [rows] = await pool.query(
       "SELECT id, nickname, email, password_hash, totp_secret, totp_enabled, totp_backup FROM users WHERE email = ? LIMIT 1",
       [email]

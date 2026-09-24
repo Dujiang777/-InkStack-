@@ -35,12 +35,17 @@ FLUSH PRIVILEGES;
 ```
 
 - [ ] 建库建用户（应用连接只给这个库的权限，不要用 root）
-- [ ] 首次启动会**自动建表**：Java 侧由 `SchemaBootstrap` 在启动时应用 `db/schema.sql` 里的
-      `CREATE TABLE` / `ALTER TABLE`（只执行这两类语句，演示数据的两条 INSERT 归 `scripts/seed.mjs`），
-      无需手动导 schema。**权限收紧到只有 DML 的部署请把 `INKSTACK_SCHEMA_AUTO=false` 设进环境**，
-      否则每次启动都会因为建表被拒刷一遍告警。
-      ⚠ 这个开关是闸门 16 用反例验过的：关掉之后对着空库启动，一张表都不建、接口确实应不上——
-      也就是说"唯一入口"是真的唯一，不是目前没找到第二处。
+- [ ] **导一次表结构**：`mysql -u root -p < db/schema.sql`
+      （文件顶部自带 `CREATE DATABASE IF NOT EXISTS inkstack; USE inkstack;`，所以它会自己把库建出来）
+      ⚠ 这一步在 P7c 之后变成必须：Node 侧以前会在"第一次用到某张表"时把它懒建出来，
+      现在那条路已经删掉，只跑本手册（pm2 只起 Next，不起 Java）的部署不会有人替你建表——
+      表现不是报错，是登录、发文、打赏这些接口一个个 500。
+      跑过 `scripts/gen-java-env.mjs` 并把后端切到 Java 的部署可以跳过这步：
+      Java 进程启动时由 `SchemaBootstrap` 应用同一份 `db/schema.sql`（只执行 `CREATE TABLE` /
+      `ALTER TABLE`，演示数据那两条 INSERT 不在其中，要种子内容请跑 `npm run seed`）。
+- [ ] 权限收紧到只有 DML 的部署，把 `INKSTACK_SCHEMA_AUTO=false` 设进 Java 侧环境，
+      否则每次启动都会因为建表被拒刷一屏告警。这个开关是闸门 16 用反例验过的：
+      关掉之后对着空库启动，一张表都不建、接口确实应不上——也就是说"唯一入口"是真的唯一。
 
 ## 4. 应用部署
 

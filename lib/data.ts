@@ -102,33 +102,7 @@ export function effectiveUnlockPrice(a: { unlockPrice?: number; discountPrice?: 
   return d;
 }
 
-/* ---------- 印章头像列（v17.4 印章工坊）：懒迁移，进程内只查一次 ---------- */
-let avatarColsReady: Promise<boolean> | null = null;
-export function ensureAvatarColumns(pool: NonNullable<Awaited<ReturnType<typeof getPool>>>): Promise<boolean> {
-  if (!avatarColsReady) {
-    avatarColsReady = (async () => {
-      try {
-        const [cols] = await pool.query(
-          `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
-              AND COLUMN_NAME IN ('avatar_tone','avatar_shape')`
-        );
-        const have = new Set((cols as { COLUMN_NAME: string }[]).map((r) => r.COLUMN_NAME));
-        if (!have.has("avatar_tone")) {
-          await pool.query(`ALTER TABLE users ADD COLUMN avatar_tone VARCHAR(16) NOT NULL DEFAULT ''`);
-        }
-        if (!have.has("avatar_shape")) {
-          await pool.query(`ALTER TABLE users ADD COLUMN avatar_shape VARCHAR(16) NOT NULL DEFAULT ''`);
-        }
-        return true;
-      } catch {
-        // 列缺失时读取面会拿到 undefined → 走随缘派色兜底，不阻塞主流程
-        return false;
-      }
-    })();
-  }
-  return avatarColsReady;
-}
+/* ---------- 印章头像列（v17.4 印章工坊）：users.avatar_tone / avatar_shape，建表归 db/schema.sql ---------- */
 
 /** 早鸟价入参校验：返回可落库的 [discountPrice, discountUntil]（无效一律回落 [null, null]） */
 export function parseDiscount(
@@ -304,8 +278,6 @@ export async function getArticle(
   const includeMd = opts?.includeMd !== false;
   if (pool) {
     try {
-      await ensurePaidColumns(pool);
-      await ensureAvatarColumns(pool);
       const [rows] = await pool.query(
         `SELECT a.slug, a.title, u.nickname AS author, u.avatar_text AS authorAvatar,
                 COALESCE(u.avatar_tone,'') AS authorTone, COALESCE(u.avatar_shape,'') AS authorShape,
@@ -536,31 +508,10 @@ export type CommentRow = {
 function demoToCommentRows(slug: string): CommentRow[] {
   return (demoComments[slug] ?? []).map((c) => ({ ...c, likes: 0, viewerLiked: false }));
 }
-
-/* ---------- 评论点赞（comment_likes 懒建表） ---------- */
-
-const gCL = globalThis as unknown as { __inkClReady?: boolean };
-
-async function ensureCommentLikesTable(pool: NonNullable<Awaited<ReturnType<typeof getPool>>>): Promise<void> {
-  if (gCL.__inkClReady) return;
-  await pool.query(`CREATE TABLE IF NOT EXISTS comment_likes (
-    id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    comment_id BIGINT UNSIGNED NOT NULL,
-    user_id    BIGINT UNSIGNED NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_cl (comment_id, user_id),
-    INDEX idx_cl_comment (comment_id),
-    CONSTRAINT fk_cl_comment FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE,
-    CONSTRAINT fk_cl_user FOREIGN KEY (user_id) REFERENCES users(id)
-  ) ENGINE=InnoDB`);
-  gCL.__inkClReady = true;
-}
-
 /** 评论点赞/取消（toggle），返回最新状态 */
 export async function toggleCommentLike(userId: number, commentId: number): Promise<{ liked: boolean; likes: number }> {
   const pool = await getPool();
   if (!pool) return { liked: false, likes: 0 };
-  await ensureCommentLikesTable(pool);
   const [exist] = await pool.query(`SELECT id FROM comment_likes WHERE comment_id = ? AND user_id = ? LIMIT 1`, [
     commentId,
     userId,
@@ -582,8 +533,6 @@ export async function listComments(slug: string, viewerId?: number | null): Prom
   const pool = await getPool();
   if (pool) {
     try {
-      await ensureCommentLikesTable(pool);
-      await ensureAvatarColumns(pool);
       const [rows] = await pool.query(
         `SELECT c.id,
                 COALESCE(u.nickname, c.guest_nickname, '访客') AS nickname,
@@ -1324,7 +1273,6 @@ export async function topAuthors(limit = 5): Promise<AuthorRankRow[]> {
   const pool = await getPool();
   if (!pool) return [];
   try {
-    await ensureAvatarColumns(pool);
     const [rows] = await pool.query(
       `SELECT u.id, u.nickname, u.avatar_text AS avatarText,
               COALESCE(u.avatar_tone,'') AS avatarTone, COALESCE(u.avatar_shape,'') AS avatarShape,
@@ -1546,7 +1494,6 @@ export async function listMyFollowers(userId: number, limit = 50): Promise<Follo
   const pool = await getPool();
   if (!pool) return [];
   try {
-    await ensureAvatarColumns(pool);
     const [rows] = await pool.query(
       `SELECT u.id, u.nickname, u.avatar_text AS avatarText,
               COALESCE(u.avatar_tone,'') AS avatarTone, COALESCE(u.avatar_shape,'') AS avatarShape,
@@ -1579,7 +1526,6 @@ export async function listMyFollowing(userId: number, limit = 50): Promise<Follo
   const pool = await getPool();
   if (!pool) return [];
   try {
-    await ensureAvatarColumns(pool);
     const [rows] = await pool.query(
       `SELECT u.id, u.nickname, u.avatar_text AS avatarText,
               COALESCE(u.avatar_tone,'') AS avatarTone, COALESCE(u.avatar_shape,'') AS avatarShape,
@@ -1660,30 +1606,10 @@ export async function listMyComments(userId: number, limit = 30): Promise<MyComm
     return [];
   }
 }
-
-/* ---------- 书签收藏：懒建表（dev 免手动迁移，进程内只建一次） ---------- */
-
-const gBm = globalThis as unknown as { __inkBmReady?: boolean };
-
-async function ensureBookmarksTable(pool: NonNullable<Awaited<ReturnType<typeof getPool>>>): Promise<void> {
-  if (gBm.__inkBmReady) return;
-  await pool.query(`CREATE TABLE IF NOT EXISTS bookmarks (
-    id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    user_id    BIGINT UNSIGNED NOT NULL,
-    article_id BIGINT UNSIGNED NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_bm (user_id, article_id),
-    INDEX idx_bm_user (user_id, created_at DESC),
-    CONSTRAINT fk_bm_article FOREIGN KEY (article_id) REFERENCES articles(id)
-  ) ENGINE=InnoDB`);
-  gBm.__inkBmReady = true;
-}
-
 /** 收藏/取消收藏（toggle），返回最新状态 */
 export async function toggleBookmark(userId: number, slug: string): Promise<{ bookmarked: boolean }> {
   const pool = await getPool();
   if (!pool) return { bookmarked: false };
-  await ensureBookmarksTable(pool);
   // v17.5：必须限定 status='published'。原实现只按 slug 命中，于是草稿（乃至 removed）
   //   也能被收藏——文章页对它们本就 404，收藏按钮无处可达，但接口可直接打；
   //   更糟的是这会往 bookmarks 里种下外键子行，让作者的草稿硬删被 FK RESTRICT 挡下。
@@ -1740,7 +1666,6 @@ export async function isBookmarked(userId: number | null, slug: string): Promise
   const pool = await getPool();
   if (!pool) return false;
   try {
-    await ensureBookmarksTable(pool);
     const [rows] = await pool.query(
       `SELECT b.id FROM bookmarks b JOIN articles a ON a.id = b.article_id
        WHERE b.user_id = ? AND a.slug = ? LIMIT 1`,
@@ -1758,7 +1683,6 @@ export async function listMyBookmarks(userId: number, limit = 50): Promise<Bookm
   const pool = await getPool();
   if (!pool) return [];
   try {
-    await ensureBookmarksTable(pool);
     const [rows] = await pool.query(
       `SELECT a.slug, a.title, u.nickname AS author, a.read_count AS readCount,
               DATE_FORMAT(b.created_at,'%Y-%m-%d') AS savedAt
@@ -1782,32 +1706,13 @@ export async function listMyBookmarks(userId: number, limit = 50): Promise<Bookm
   }
 }
 
-/* ---------- 阅读历史「最近读过」（read_history 懒建表） ---------- */
-
-type HistoryPool = NonNullable<Awaited<ReturnType<typeof getPool>>>;
-const gHist = globalThis as unknown as { __inkHistReady?: boolean };
-
-async function ensureHistoryTable(pool: HistoryPool): Promise<void> {
-  if (gHist.__inkHistReady) return;
-  await pool.query(`CREATE TABLE IF NOT EXISTS read_history (
-    id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    user_id    BIGINT UNSIGNED NOT NULL,
-    article_id BIGINT UNSIGNED NOT NULL,
-    read_times INT UNSIGNED NOT NULL DEFAULT 1,
-    read_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_rh (user_id, article_id),
-    INDEX idx_rh_user (user_id, read_at DESC),
-    CONSTRAINT fk_rh_article FOREIGN KEY (article_id) REFERENCES articles(id)
-  ) ENGINE=InnoDB`);
-  gHist.__inkHistReady = true;
-}
+/* ---------- 阅读历史「最近读过」（read_history 表由 db/schema.sql 建） ---------- */
 
 /** 记录一次阅读（同人同文去重，累计次数 + 刷新最近时间） */
 export async function recordRead(userId: number, slug: string): Promise<void> {
   const pool = await getPool();
   if (!pool) return;
   try {
-    await ensureHistoryTable(pool);
     await pool.query(
       `INSERT INTO read_history (user_id, article_id, read_times, read_at)
        SELECT ?, id, 1, NOW() FROM articles WHERE slug = ? AND status = 'published'
@@ -1825,7 +1730,6 @@ export async function listMyHistory(userId: number, limit = 30): Promise<History
   const pool = await getPool();
   if (!pool) return [];
   try {
-    await ensureHistoryTable(pool);
     const [rows] = await pool.query(
       `SELECT a.slug, a.title, u.nickname AS author, a.read_count AS readCount,
               DATE_FORMAT(h.read_at,'%Y-%m-%d %H:%i') AS readAt, h.read_times AS times
@@ -1938,7 +1842,6 @@ export async function getAuthor(id: number): Promise<AuthorProfile | null> {
   const pool = await getPool();
   if (!pool) return null;
   try {
-    await ensureAvatarColumns(pool);
     const [rows] = await pool.query(
       `SELECT u.id, u.nickname, u.avatar_text AS avatarText,
               COALESCE(u.avatar_tone,'') AS avatarTone, COALESCE(u.avatar_shape,'') AS avatarShape,
@@ -2338,10 +2241,9 @@ export async function adminInsights(): Promise<AdminInsights> {
       .sort((a, b) => b.count - a.count)
       .slice(0, 8);
 
-    // 全站付费转化漏斗（series_purchases 为运行时懒建表，缺失时降级为单篇口径）
+    // 全站付费转化漏斗（series_purchases 缺表时降级为单篇口径——老库可能还没补上这张表）
     let funnel: AdminInsights["funnel"] = { paidArticles: 0, paywallViews: 0, unlocks: 0, bundles: 0, revenue: 0 };
     try {
-      await ensurePaidColumns(pool);
       const [fRows] = await pool.query(
         `SELECT
            (SELECT COUNT(*) FROM articles WHERE status='published' AND review_status='approved' AND IFNULL(unlock_price,0)>0) AS paidArticles,
@@ -2376,56 +2278,9 @@ export async function adminInsights(): Promise<AdminInsights> {
 }
 
 /* ============================================================
-   专栏合集（series）：懒建表 + 合集架 / 落地页 / 书房管理 / 文章页导航
+   专栏合集（series）：合集架 / 落地页 / 书房管理 / 文章页导航
+   （series / series_items / series_purchases 三张表由 db/schema.sql 建）
    ============================================================ */
-
-type SeriesPool = NonNullable<Awaited<ReturnType<typeof getPool>>>;
-
-const gSeries = globalThis as unknown as { __inkSeriesReady?: boolean };
-
-async function ensureSeriesTables(pool: SeriesPool): Promise<void> {
-  if (gSeries.__inkSeriesReady) return;
-  await pool.query(`CREATE TABLE IF NOT EXISTS series (
-    id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    author_id   BIGINT UNSIGNED NOT NULL,
-    title       VARCHAR(120) NOT NULL,
-    description VARCHAR(500) NOT NULL DEFAULT '',
-    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_series_author (author_id),
-    CONSTRAINT fk_series_author FOREIGN KEY (author_id) REFERENCES users(id)
-  ) ENGINE=InnoDB`);
-  await pool.query(`CREATE TABLE IF NOT EXISTS series_items (
-    series_id  BIGINT UNSIGNED NOT NULL,
-    article_id BIGINT UNSIGNED NOT NULL,
-    position   INT UNSIGNED NOT NULL DEFAULT 0,
-    PRIMARY KEY (series_id, article_id),
-    CONSTRAINT fk_si_series FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE,
-    CONSTRAINT fk_si_article FOREIGN KEY (article_id) REFERENCES articles(id)
-  ) ENGINE=InnoDB`);
-  // 打包价：NULL/0 = 不开放打包；>0 = 一口价解锁全专栏（按购买日篇目快照）
-  const [bcol] = await pool.query(
-    `SELECT COUNT(*) AS c FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'series' AND COLUMN_NAME = 'bundle_price'`
-  );
-  if (Number((bcol as Record<string, unknown>[])[0]?.c ?? 0) === 0) {
-    await pool.query(`ALTER TABLE series ADD COLUMN bundle_price INT NULL`);
-  }
-  await pool.query(`CREATE TABLE IF NOT EXISTS series_purchases (
-    id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    series_id   BIGINT UNSIGNED NOT NULL,
-    user_id     BIGINT UNSIGNED NOT NULL,
-    price       INT NOT NULL,
-    author_gain INT NOT NULL DEFAULT 0,
-    item_count  INT NOT NULL DEFAULT 0,
-    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_series_purchase (series_id, user_id),
-    INDEX idx_sp_user (user_id, created_at DESC),
-    CONSTRAINT fk_sp_series FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE,
-    CONSTRAINT fk_sp_user FOREIGN KEY (user_id) REFERENCES users(id)
-  ) ENGINE=InnoDB`);
-  gSeries.__inkSeriesReady = true;
-}
 
 export type SeriesCard = {
   id: number;
@@ -2449,7 +2304,6 @@ export async function listSeries(limit = 60, authorId?: number): Promise<SeriesC
   const pool = await getPool();
   if (!pool) return [];
   try {
-    await ensureSeriesTables(pool);
     const where = authorId ? `WHERE s.author_id = ?` : "";
     const [rows] = await pool.query(
       `SELECT s.id, s.title, s.description, s.updated_at AS updatedAt, s.bundle_price AS bundlePrice,
@@ -2512,7 +2366,6 @@ export async function getSeriesDetail(id: number, viewer?: { id?: number | null 
   const pool = await getPool();
   if (!pool) return null;
   try {
-    await ensureSeriesTables(pool);
     const [sRows] = await pool.query(
       `SELECT s.id, s.title, s.description, s.bundle_price AS bundlePrice,
               u.nickname AS author, u.avatar_text AS authorAvatar, u.id AS authorId
@@ -2593,7 +2446,6 @@ export async function listMySeries(authorId: number): Promise<MySeries[]> {
   const pool = await getPool();
   if (!pool) return [];
   try {
-    await ensureSeriesTables(pool);
     const [sRows] = await pool.query(
       `SELECT id, title, description FROM series WHERE author_id = ? ORDER BY updated_at DESC`,
       [authorId]
@@ -2658,7 +2510,6 @@ export async function suggestSeriesTitles(authorId: number): Promise<SeriesTitle
 export async function createSeries(authorId: number, title: string, description: string): Promise<number | null> {
   const pool = await getPool();
   if (!pool) return null;
-  await ensureSeriesTables(pool);
   const [res] = await pool.query(`INSERT INTO series (author_id, title, description) VALUES (?, ?, ?)`, [
     authorId,
     title.slice(0, 120),
@@ -2675,7 +2526,6 @@ export async function updateSeriesMeta(
 ): Promise<boolean> {
   const pool = await getPool();
   if (!pool) return false;
-  await ensureSeriesTables(pool);
   const sets: string[] = [];
   const args: unknown[] = [];
   if (patch.title !== undefined) {
@@ -2702,7 +2552,6 @@ export async function updateSeriesMeta(
 export async function deleteSeries(id: number, authorId: number): Promise<boolean> {
   const pool = await getPool();
   if (!pool) return false;
-  await ensureSeriesTables(pool);
   const [res] = await pool.query(`DELETE FROM series WHERE id = ? AND author_id = ?`, [id, authorId]);
   return Number((res as { affectedRows: number }).affectedRows) > 0;
 }
@@ -2711,7 +2560,6 @@ export async function deleteSeries(id: number, authorId: number): Promise<boolea
 export async function setSeriesItems(id: number, authorId: number, slugs: string[]): Promise<boolean> {
   const pool = await getPool();
   if (!pool) return false;
-  await ensureSeriesTables(pool);
   // 重复篇目直接拒绝（原实现靠 `命中行数 !== 入参个数` 间接挡下，语义相同但更隐晦；
   // 且若放任重复进 INSERT，会撞 series_items 主键 (series_id, article_id)）
   if (new Set(slugs).size !== slugs.length) return false;
@@ -2776,7 +2624,6 @@ export async function getArticleSeriesNav(slug: string): Promise<ArticleSeriesNa
   const pool = await getPool();
   if (!pool) return null;
   try {
-    await ensureSeriesTables(pool);
     const [rows] = await pool.query(
       `SELECT si.series_id AS seriesId, si.position, s.title
          FROM articles a
@@ -2912,52 +2759,6 @@ export async function listWeekly(): Promise<WeeklyReport> {
     return base;
   }
 }
-
-/* ============================ 付费解锁（墨水付费墙） ============================ */
-
-const gPaid = globalThis as unknown as { __inkPaidReady?: boolean };
-
-/** 懒建：articles.unlock_price 列 + article_purchases 购买表（进程内只跑一次；写入 API 前置调用） */
-export async function ensurePaidColumns(pool: NonNullable<Awaited<ReturnType<typeof getPool>>>): Promise<void> {
-  if (gPaid.__inkPaidReady) return;
-  const [col] = await pool.query(
-    `SELECT COUNT(*) AS c FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'articles' AND COLUMN_NAME = 'unlock_price'`
-  );
-  if (Number((col as Record<string, unknown>[])[0]?.c ?? 0) === 0) {
-    await pool.query(`ALTER TABLE articles ADD COLUMN unlock_price INT NOT NULL DEFAULT 0`);
-  }
-  // 早鸟价：折扣价 + 截止时间（到点自动回到原价）
-  const [dcol] = await pool.query(
-    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'articles' AND COLUMN_NAME IN ('discount_price','discount_until')`
-  );
-  const have = new Set((dcol as { COLUMN_NAME: string }[]).map((r) => r.COLUMN_NAME));
-  if (!have.has("discount_price")) await pool.query(`ALTER TABLE articles ADD COLUMN discount_price INT NULL`);
-  if (!have.has("discount_until")) await pool.query(`ALTER TABLE articles ADD COLUMN discount_until DATETIME NULL`);
-  // 转化漏斗：付费墙到达计数
-  const [pcol] = await pool.query(
-    `SELECT COUNT(*) AS c FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'articles' AND COLUMN_NAME = 'paywall_views'`
-  );
-  if (Number((pcol as Record<string, unknown>[])[0]?.c ?? 0) === 0) {
-    await pool.query(`ALTER TABLE articles ADD COLUMN paywall_views INT NOT NULL DEFAULT 0`);
-  }
-  await pool.query(`CREATE TABLE IF NOT EXISTS article_purchases (
-    id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    article_id BIGINT UNSIGNED NOT NULL,
-    user_id    BIGINT UNSIGNED NOT NULL,
-    price      INT NOT NULL,
-    author_gain INT NOT NULL DEFAULT 0,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_purchase (article_id, user_id),
-    INDEX idx_pur_user (user_id, created_at DESC),
-    CONSTRAINT fk_pur_article FOREIGN KEY (article_id) REFERENCES articles(id),
-    CONSTRAINT fk_pur_user FOREIGN KEY (user_id) REFERENCES users(id)
-  ) ENGINE=InnoDB`);
-  gPaid.__inkPaidReady = true;
-}
-
 export type UnlockResult =
   | { ok: true; price: number; authorGot: number; balance: number }
   | { ok: false; error: string };
@@ -2969,7 +2770,6 @@ export async function unlockArticle(slug: string, userId: number): Promise<Unloc
   const pool = await getPool();
   if (!pool) return { ok: false, error: "数据库暂不可用" };
   try {
-    await ensurePaidColumns(pool);
     const [rows] = await pool.query(
       `SELECT id, author_id, IFNULL(unlock_price,0) AS price, IFNULL(discount_price,0) AS dprice,
               discount_until AS duntil
@@ -3049,8 +2849,6 @@ export async function bundleUnlock(seriesId: number, userId: number): Promise<Bu
   const pool = await getPool();
   if (!pool) return { ok: false, error: "数据库暂不可用", code: "server" };
   try {
-    await ensureSeriesTables(pool);
-    await ensurePaidColumns(pool);
     const [sRows] = await pool.query(
       `SELECT id, author_id, bundle_price AS bundlePrice FROM series WHERE id = ? LIMIT 1`,
       [seriesId]
@@ -3343,7 +3141,6 @@ export async function recordPaywallView(slug: string): Promise<void> {
   const pool = await getPool();
   if (!pool) return;
   try {
-    await ensurePaidColumns(pool);
     await pool.query(
       `UPDATE articles SET paywall_views = paywall_views + 1
         WHERE slug = ? AND status = 'published' AND IFNULL(unlock_price,0) > 0 LIMIT 1`,
@@ -3360,7 +3157,6 @@ export async function listMyFunnel(authorId: number): Promise<FunnelRow[]> {
   const pool = await getPool();
   if (!pool) return [];
   try {
-    await ensurePaidColumns(pool);
     const [rows] = await pool.query(
       `SELECT a.slug, a.title, a.read_count AS views, IFNULL(a.paywall_views,0) AS paywallViews,
               (SELECT COUNT(*) FROM article_purchases ap WHERE ap.article_id = a.id) AS unlocks,
@@ -3401,7 +3197,6 @@ export async function listMyUnlockIncome(authorId: number): Promise<UnlockIncome
   const pool = await getPool();
   if (!pool || !authorId) return empty;
   try {
-    await ensurePaidColumns(pool);
     const [rows] = await pool.query(
       `SELECT a.slug, a.title, IFNULL(a.unlock_price,0) AS price,
               COUNT(p.id) AS sales, IFNULL(SUM(p.author_gain),0) AS earned

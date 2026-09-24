@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { getCurrentUser, cleanNickname } from "@/lib/auth";
 import { getPool } from "@/lib/db";
 import { cleanAvatarTone, cleanAvatarShape } from "@/lib/avatar";
-import { ensureAvatarColumns } from "@/lib/data";
+
 
 export async function PATCH(req: Request) {
   const user = await getCurrentUser();
@@ -28,7 +28,6 @@ export async function PATCH(req: Request) {
   const pool = await getPool();
   if (!pool) return NextResponse.json({ error: "数据库不可用" }, { status: 500 });
   try {
-    await ensureAvatarColumns(pool);
     await pool.query(
       `UPDATE users SET nickname = ?, avatar_text = ?, avatar_tone = ?, avatar_shape = ?, bio = ? WHERE id = ?`,
       [nickname, avatarText || nickname.slice(0, 1), avatarTone, avatarShape, bio || null, user.id]

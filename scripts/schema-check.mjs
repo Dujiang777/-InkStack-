@@ -156,7 +156,8 @@ const snap = async (db) => {
        FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? GROUP BY TABLE_NAME, INDEX_NAME`, [db])
     .then((r) => r[0]);
   const fks = await conn.query(
-    `SELECT k.TABLE_NAME tbl, k.CONSTRAINT_NAME name, k.COLUMN_NAME c, k.REFERENCED_TABLE_NAME rt
+    `SELECT k.TABLE_NAME tbl, k.CONSTRAINT_NAME name, k.COLUMN_NAME c, k.REFERENCED_TABLE_NAME rt,
+            rc.DELETE_RULE rule
        FROM information_schema.REFERENTIAL_CONSTRAINTS rc
        JOIN information_schema.KEY_COLUMN_USAGE k
          ON k.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA AND k.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
@@ -166,10 +167,50 @@ const snap = async (db) => {
 };
 const colSet = (rows) => new Set(rows.map((r) => `${r.tbl}.${r.col}`));
 const idxSet = (rows) => new Set(rows.map((r) => `${r.tbl}/${r.name}(${r.c})`));
-const fkSet = (rows) => new Set(rows.map((r) => `${r.tbl}/${r.name}(${r.c}->${r.rt})`));
+// DELETE_RULE 进键：级联与 RESTRICT 在 information_schema 里是"同一条外键"的两种不同东西，
+// 只比名字与两端的话，删同一篇文章会一侧成功、一侧 500 而结构比对全绿。
+const fkSet = (rows) => new Set(rows.map((r) => `${r.tbl}/${r.name}(${r.c}->${r.rt} ${r.rule})`));
 const onlyIn = (a, b) => [...a].filter((v) => !b.has(v));
 
 /* ---------- 现场 ---------- */
+/*
+ * ## 0 DDL 的归属（静态扫描，不连库、不启进程）
+ *
+ * 建库这件事的判据不是"跑起来没报错"，而是**只有一个地方写着表结构**。
+ * 双轨期最阴的失效方式是：Java 的建库器与 Node 的懒迁移各建各的表，两边都绿，
+ * 而它们建出来的东西不一样——于是"新库"取决于第一个敲到那个接口的请求走的是哪栈。
+ * 所以这里把话说死：web 层（lib / app / components / middleware）里不许出现一条 DDL，
+ * 出现即红。扫描时把注释与模板串里的 SQL 关键字也算进来：真正的坏味道就是
+ * "某处藏着一段建表 SQL"，藏在注释里同样要被抓出来（注释里的 DDL 会在下一次改代码时复活）。
+ */
+const DDL_WORDS = /\b(CREATE\s+TABLE|CREATE\s+INDEX|ALTER\s+TABLE|DROP\s+TABLE|DROP\s+INDEX|ADD\s+COLUMN|DROP\s+COLUMN|MODIFY\s+COLUMN|RENAME\s+COLUMN|information_schema\.COLUMNS|information_schema\.STATISTICS)\b/i;
+const scanRoots = ["lib", "app", "components"];
+const offenders = [];
+const walk = (dir) => {
+  for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) { walk(p); continue; }
+    if (!/\.(ts|tsx)$/.test(entry.name)) continue;
+    const text = fs.readFileSync(path.join(root, p), "utf8");
+    text.split(/\r?\n/).forEach((line, i) => {
+      if (!DDL_WORDS.test(line)) return;
+      // 只放过"说明这段 DDL 归谁"的注释行：必须整行是注释、且不含反引号模板串
+      const asComment = /^\s*(\/\/|\*|\/\*)/.test(line) && !line.includes("`");
+      if (!asComment) offenders.push(`${p}:${i + 1}: ${line.trim().slice(0, 72)}`);
+    });
+  }
+};
+for (const d of scanRoots) walk(d);
+if (fs.existsSync(path.join(root, "middleware.ts"))) {
+  const text = fs.readFileSync(path.join(root, "middleware.ts"), "utf8");
+  text.split(/\r?\n/).forEach((line, i) => {
+    if (DDL_WORDS.test(line) && !/^\s*(\/\/|\*|\/\*)/.test(line)) offenders.push(`middleware.ts:${i + 1}`);
+  });
+}
+check(offenders.length === 0,
+  "## 0 web 层一条 DDL 都没有：表结构只由 db/schema.sql + Java 的 SchemaBootstrap 负责",
+  () => offenders.length ? `${offenders.length} 处：\n      ${offenders.slice(0, 8).join("\n      ")}` : "干净");
+
 let ready = true;
 if (!jdk.home) {
   skipped("整道闸门", `找不到 JDK 17+（${jdk.why ?? "无候选"}）—— 构建工具起不来不该报成建库失败`);
@@ -248,6 +289,22 @@ try {
     check(onlyIn(fkSet(hand.fks), fkSet(built.fks)).length === 0,
       "外键一条不少（级联姿势不一致的话，删同一篇文章两栈会一个成功一个 500）",
       () => onlyIn(fkSet(hand.fks), fkSet(built.fks)).slice(0, 4).join(",") || "齐");
+
+    /*
+     * 下面两行是「P7c 可以删 Node 懒迁移」的正面依据。
+     * 前面那些行比的是 Java 与 schema.sql——同一个定义的两个执行者，对不出"定义本身漏了什么"。
+     * 而运行库是被 Node 那批 ensure* 一路改出来的：它身上有、schema.sql 给不出的东西
+     * （一条索引、一个级联规则），就是"删掉懒迁移之后新库永远缺的那一块"。
+     * 方向必须是 运行库 ⊆ Java 建的库，反过来不要求（库可以比脚本新）。
+     */
+    const missingIdx = onlyIn(idxSet(clone.idx), ia);
+    check(missingIdx.length === 0,
+      "运行库的每一条索引都在 Java 建的库里（P7c 删 Node 懒迁移的前提：懒迁移建过的索引已在 schema.sql）",
+      () => `缺 ${missingIdx.length}：${missingIdx.slice(0, 5).join(" ") || "无"}`);
+    const missingFks = onlyIn(fkSet(clone.fks), fkSet(built.fks));
+    check(missingFks.length === 0,
+      "运行库的每一条外键连级联规则都在 Java 建的库里（少了不报错，只会在删父行时静默留孤儿子行）",
+      () => `缺 ${missingFks.length}：${missingFks.slice(0, 5).join(" ") || "无"}`);
 
     console.log("\n## 3 建库不越界：不许顺手造演示数据");
     // 表可能在上一节就已经暴露出没建出来；这里不能因为 SELECT 抛异常把整个闸门带崩，
