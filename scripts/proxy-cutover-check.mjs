@@ -18,6 +18,10 @@
 // --admin 追加运营台与两个全文出口经代理的证据（P5c）。导出这条额外断言一件事：
 //         经 rewrite 转发后，Markdown 里的绝对链接必须是**浏览器看到的地址**，
 //         不能是后端端口——Next 的 rewrite 会覆写 Host，所以 Java 必须读 x-forwarded-host。
+// --study 追加书房写侧经代理的证据（P5d）：坏入参三类 + multipart 文件名不被 rewrite 改掉。
+// --import 追加迁移工具经代理的证据（P5e）：SSRF 黑名单与 Content-Type 判定换入口不松一档。
+// --ai 追加 AI 写作面经代理的证据（P6a）：只挑兜底与校验路径——这一档若真接上上游就会扣墨，
+//        所以它同时断言"切流实例没接 Python 上游"，接上就判红，不拿用户的墨水去赌配置。
 import fs from "node:fs";
 import path from "node:path";
 
@@ -37,6 +41,7 @@ const COMMUNITY = process.argv.includes("--community");
 const ADMIN = process.argv.includes("--admin");
 const STUDY = process.argv.includes("--study");
 const IMPORT = process.argv.includes("--import");
+const AI = process.argv.includes("--ai");
 
 let pass = 0;
 let fail = 0;
@@ -344,6 +349,47 @@ if (IMPORT) {
   if (importCsrf.status === 403 && importCsrf.backend === "") ok("迁移工具的写请求 CSRF 也在边缘拦住");
   else bad("迁移工具的写请求 CSRF 也在边缘拦住",
     `${importCsrf.status} backend=${importCsrf.backend || "无"}`);
+}
+
+// 10) P6a AI 写作面经代理。这一档只挑**不动钱**的路径：切流实例不配 AGENT_SERVICE_URL，
+//     所以四条模板兜底都不会扣墨，也不会拿真大模型的 token 去赌网络。
+//     万一这个实例被配上了上游，闸门直接判红——宁可停下，也不要顺手烧掉用户的墨水。
+if (AI) {
+  const login7 = await call("POST", "/api/auth/login", { body: { email: creds[0], password: creds[1] } });
+  const c7 = setCookie(login7.res);
+  const status7 = await call("GET", "/api/agent/status");
+  if (status7.status === 200 && status7.backend === "inkstack-java"
+    && status7.json?.ok === true && status7.json?.mode !== "agentscope") {
+    ok("经代理的 /api/agent/status 落在 Java，且没接 Python 上游", `mode=${status7.json?.mode}`);
+  } else {
+    bad("经代理的 /api/agent/status 落在 Java，且没接 Python 上游",
+      `${status7.status} backend=${status7.backend || "无"} ${status7.text.slice(0, 70)}`);
+  }
+  for (const [label, body, cookie, want, text] of [
+    ["未登录用 AI 写作 → 401", { mode: "title" }, undefined, 401, "登录后才能使用 AI 写作助手"],
+    ["mode 不在四档内 → 400", { mode: "summarize" }, c7, 400, "mode 须为 continue | polish | title | topic"],
+    ["坏 JSON → 同一条 400（rewrite 之后仍按同一套退化规则解析）", "{not json", c7, 400,
+      "mode 须为 continue | polish | title | topic"],
+  ]) {
+    const r = await call("POST", "/api/ai/write", { body, cookie });
+    if (r.status === want && r.backend === "inkstack-java" && r.json?.error === text) {
+      ok(`经代理的${label}`, `backend=${r.backend}`);
+    } else {
+      bad(`经代理的${label}`, `${r.status}/${want} backend=${r.backend || "无"} ${r.text.slice(0, 70)}`);
+    }
+  }
+  const fb = await call("POST", "/api/ai/write", { body: { mode: "title", draft: "切流兜底轮" }, cookie: c7 });
+  if (fb.status === 200 && fb.backend === "inkstack-java" && fb.json?.fallback === true
+    && fb.json?.pointsNote === "模板兜底 · 本次不扣墨水") {
+    ok("经代理的模板兜底照样零扣墨（这条判据不因为换了入口而失守）", `mode 上游=${fb.json?.pointsNote}`);
+  } else {
+    bad("经代理的模板兜底照样零扣墨",
+      `${fb.status} backend=${fb.backend || "无"} ${fb.text.slice(0, 90)}`);
+  }
+  const aiCsrf = await call("POST", "/api/ai/write",
+    { body: { mode: "title" }, cookie: c7, headers: { origin: "https://evil.example" } });
+  if (aiCsrf.status === 403 && aiCsrf.backend === "") ok("AI 写作的 CSRF 也在边缘拦住");
+  else bad("AI 写作的 CSRF 也在边缘拦住", `${aiCsrf.status} backend=${aiCsrf.backend || "无"}`);
 }
 
 console.log(`\nbase=${base}  合计 ${pass + fail} 项，失败 ${fail} 项`);

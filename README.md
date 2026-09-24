@@ -30,7 +30,9 @@
 | P5c | 运营台（内容审核 / 评论删除 / 举报处理 / 用户管理）+ 两个全文出口 `{slug}/raw`、`{slug}/export` | ✅ | 运营台闸门 **65/65**：四条接口逐个 401/403、下架连带清置顶、扣回按真实余额记账、导出正文两侧逐字一致且不泄漏后端端口；切流代理含运营台路径 **31/31** |
 | P5d | 书房写侧（草稿箱 / 阅读足迹 / 外链审核 / 资料 / 改密 / 图片上传 / 专栏增删改） | ✅ | 书房闸门 **97/97**：门禁姿势逐个钉住（友链游客是 403 不是 401、足迹游客是 200 skipped）、昵称按 JS 空白判据折叠、上传两栈共用同一磁盘目录、12 路跨栈并发重设篇目零 500 且条目守恒；切流代理含书房路径 **41/41**（含 multipart 穿过 rewrite） |
 | P5e | 博主迁移工具 `POST /api/import`（RSS 抓取 + Markdown 批量导入） | ✅ | 迁移闸门 **100/100**：SSRF 私网黑名单的十几种写法（十进制 / 十六进制 / 八进制 / 短写 / 全角句号 / userinfo 掩护 / IPv4 映射）两侧同码同文案、重定向逐跳复校、消毒七条正则的产物逐字比库、RFC 1123 各家日期落进同一个本地墙钟；切流代理含迁移工具 **48/48** |
-| P6 | AI 分身：Spring AI Alibaba 替换 Python AgentScope 服务 | ⏳ | 需保持 NDJSON 契约 |
+| P6a | AI 写作助手 `POST /api/ai/write` + 分身状态 `GET /api/agent/status` | ✅ | AI 闸门 **41/41**：四段兜底模板逐字节相同、"上游真产出才扣墨"两侧同式（探针拦住 → 上游 0 次、上游坏态 → 零扣墨且落同一份模板）、数字/数组/对象入参转发给上游的字符串两边同式、六路并发 40→10 只有两路成功、`流水条数 == 扣费次数`；切流代理含 AI 路径 **54/54** |
+| P6b | 分身问答 `POST /api/agent/ask`（NDJSON 流式，三条通道） | ⏳ | 必须保住 `delta`/`cite`/`error` 三种帧的契约 |
+| P6c | Spring AI Alibaba 替换 Python AgentScope 服务并移除 `agent-service/` | ⏳ | RAG 口径以 `lib/rag.ts` 为准 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -60,6 +62,8 @@
   整前缀才敢切，见闸门 8）
 - 迁移工具：`POST /api/import`（RSS 用 JSON、Markdown 用 multipart，同一个 URL 两种体）
   —— 全平台唯一一处"由用户给地址、服务端替他联网"的入口，SSRF 防护见闸门 13
+- AI 面：`POST /api/ai/write` · `GET /api/agent/status`（后者只能按这条 URL 切：
+  同前缀的 `POST /api/agent/ask` 还是 Node 应答，写 `/api/agent` 整前缀会把问答打成 405，见闸门 8）
 - 只读聚合（为 RSC 分流新增，Node 侧无对位路由）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/series*`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
   `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项
@@ -125,6 +129,16 @@
 - Windows 上 `.properties` 里的反斜杠是转义符：`INKSTACK_UPLOAD_DIR=D:\Desktop\...\uploads`
   会让 `\u` 成为一个畸形的统一码转义，**JVM 在解析配置阶段就起不来**（`ConfigDataException`），
   报的还不是路径问题。生成脚本现在统一 `replace(/\\/g, "/")`。
+- **`body.author ?? "博主"` 的默认值，在 JSON 解析层就没了**：Java 侧把缺字段先映射成 `""` 再进业务，
+  于是 `(author == null ? "博主" : author)` 永不成立，转发给上游的 `author` 成了空串——
+  Node 给的是"博主"。这种差异两侧都不报错，只有生成的文风不一样，而且它藏在"没传 author"这条
+  平时没人测的路径上（AI 闸门第一轮 4 红里就有它）。规则：**可选字段的默认值必须在"键不存在"这个
+  层面上判**，所以 `AiWriteController.authorOf()` 缺键返回 `null` 而不是 `""`。
+- **同一处默认值修完之后，另一半是 Node 会 500 而 Java 不会**：`draft`/`author` 在 JSON 里可以是
+  数字、数组、对象，Node 的 `(body.draft ?? "").trim()` 对 `{draft: 5}` 就是一个未捕获的
+  `TypeError` → 500，而 Java 按 `String()` 口径安静地收成 `"5"`。真实用户不会发这种 body，
+  但**切流的那一刻状态码会变**，这属于闸门 8 说的"切过去会静默改变行为"。所以两边一起改向不崩的那一侧
+  （Node 补 `String(...)`），并让闸门 14 拿"上游收到的字符串"来断言——那是这个口径唯一可见的地方。
 
 双轨期的一个已知缺口（不是 bug，是还没并到一起的状态）：**登录 / 改密的失败计数是各进程自己记的**
 ——Node 的 `lib/rate-limit.ts` 用一个 `Map`，Java 的 `LoginGuard` 另用一个 `Map`，同一账号在
@@ -181,7 +195,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十三道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十四道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -340,6 +354,29 @@ node scripts/import-check.mjs
 #     四件事凑一起，"两侧读回同一个瞬间"必须逐条钉，否则早鸟到点那种口径错会原样复现。
 #   · ⚠ 需要一对 `IMPORT_ALLOW_PRIVATE=1` 的临时实例（夹具订阅源必然在 127.0.0.1 上）：
 #     常规那一对照旧拒绝所有本机地址，抓取成功类用例一条都跑不到。会真建真删文章，跑完自动清场。
+
+# 14) AI 面闸门：这一道测的不是"文字好不好"，而是**钱只在真实产出那一刻动一次**。
+node scripts/ai-check.mjs
+#   · 计费口径是"只读探针预检 → 上游确认可用之后才扣"。原实现是"先扣后生成、失败再退分"，
+#     退分一失败就永久丢墨，模板兜底也照扣（文案还谎报"已退回"）。所以顺序本身是断言：
+#     探针拦住 → 上游必须收到 **0** 次请求（否则用户白等、平台白烧 token）；
+#     上游空白/500/非 JSON → 落模板、Δ余额=0、Δ流水=0，三种坏态 × 两栈逐个钉。
+#   · 四段演示模板是 Node 的字符串常量，Java 重抄一遍：前导 `\n` 少一个肉眼看不出来，
+#     而这段文字直接给读者看，所以按逐字节比。Java 侧刻意不用 text block——它会做缩进剥离，
+#     正好会把"少一个换行"这件事藏起来。
+#   · 六路并发只给两次成功：探针**不是**防线（六路同时通过预检），FOR UPDATE 才是。
+#     余额 40 → 10，四路 402、零路 500。
+#   · 类型收口看的是**上游收到的字符串**：`{draft: 5}`、`{author: ["甲","乙"]}` 这类 body 合法存在，
+#     两栈必须各自 `String()` 成 "5" / "甲,乙" 再转发（数组按 join(",")、对象成 [object Object]）。
+#     这些用例一律挂在 garbage 档上跑：断言的是请求体，不该真扣墨，也就不会打扰收尾的账实核对。
+#   · 收尾一律按快照复原，且闸门自己垫本：上一批被杀在"把余额强设成 3"那一步之后，
+#     账号就永久停在 3、下一批直接跑不动（真踩过）。垫的钱不落流水，否则账实核对那条
+#     "本次没有别的 reason 偷偷记账"会被自己的垫本打红。
+#   · ⚠ 需要一对接了上游夹具的实例（`AGENT_SERVICE_URL` 指向闸门自己的 127.0.0.1:4601），
+#     否则"上游真产出 → 真扣墨"这一档跑不到，而那正是唯一会动钱的地方。
+#   · ⚠ 绝不允许拿真大模型跑这道闸门：本机的 `DEEPSEEK_API_KEY` 在 shell 环境里而不是 `.env`，
+#     闸门用的两栈实例都不带它，模式判据因此写成"两栈一致 + 上游不在场就绝不报 agentscope"，
+#     而不是硬编码 `demo`——硬编码在有 Key 的机器上会假红。
 ```
 
 切流与回滚：
@@ -366,15 +403,19 @@ JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,
 /api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/articles/*/comments,\
 /api/articles/*/like,/api/articles/*/bookmark,/api/articles/*/report,/api/articles/*/paywall-view,\
 /api/articles/*/raw,/api/articles/*/export,/api/series/*/bundle,\
-/api/drafts,/api/history,/api/links,/api/uploads,/api/me/profile,/api/me/password,/api/import \
+/api/drafts,/api/history,/api/links,/api/uploads,/api/me/profile,/api/me/password,/api/import,\
+/api/ai/write,/api/agent/status \
   node node_modules/next/dist/bin/next dev -p 3400
-node scripts/proxy-cutover-check.mjs --money --community --admin --study --import --base=http://localhost:3400
+node scripts/proxy-cutover-check.mjs --money --community --admin --study --import --ai --base=http://localhost:3400
 node scripts/admin-check.mjs          # 其中的"经代理导出可比对"一节会打这个实例
 ```
 
 书房那六条是**整前缀**切的（`/api/drafts` 等下面没有未迁分支），而 `/api/series` 只能继续按段通配
 留一条 `/api/series/*/bundle`：`--study` 里专门有一句反向断言，拿非法标题打 `POST /api/series`，
 要求它**没有** `x-backend` 头（仍在 Node 应答）——语义冲突登记表若不配这条断言，就只是一段注释。
+`/api/agent/status` 同理写死成一条 URL 而不是 `/api/agent`：同前缀的 `POST /api/agent/ask`
+还是 Node 应答（P6b 才迁），整前缀切过去会把问答打成 405，而这种"切完不报错、功能全废"的口子
+正是闸门 8 现算清单要拦的那一类。
 
 临时实例会把 `next-env.d.ts` / `tsconfig.json` 里的构建目录指针改写成 `.next-cutover`，**提交前 revert 这两个文件**；
 跑完顺手把 `.next-cutover` 和这个进程一起清掉。
@@ -440,15 +481,17 @@ mvn spring-boot:run                  # http://localhost:3101
 │       ├── article/ auth/ points/ session/   # 按领域分包
 │       ├── money/ community/ admin/          # 资金链路 / 社区互动 / 运营台
 │       ├── series/ user/ study/              # 专栏读写 / 资料与改密 / 书房（草稿·足迹·友链·上传）
+│       ├── importer/ ai/                     # 迁移工具（RSS+Markdown）/ AI 写作与分身状态
 │       ├── entity/ mapper/                   # MyBatis-Plus：实体与手写 SQL 映射
 │       ├── common/                           # NodeShapes / Nicknames / Links / Slugs / Pricing：
 │       │                                     #   Node 的取值语义与口径，逐条对齐的落点
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── agent-service/          # Python AgentScope 分身服务（P6 替换）
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 十三道闸门（parity / interop / paywall / page-parity / auth-flow /
+├── scripts/                # 十四道闸门（parity / interop / paywall / page-parity / auth-flow /
 │                           #   proxy-cutover / money-check / route-inventory / community-check /
-│                           #   studio-check / admin-check / study-check / import-check）+ 种子与运维脚本
+│                           #   studio-check / admin-check / study-check / import-check / ai-check）
+│                           #   + 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
 
@@ -463,7 +506,8 @@ mvn spring-boot:run                  # http://localhost:3101
 | `JAVA_BASE` / `JAVA_ROUTES` | 双轨切流开关（见上） |
 | `NEXT_PUBLIC_SITE_URL` | 站点地址；决定会话 Cookie 是否带 `Secure` |
 | `TRUST_PROXY` | 反代后设 `1`，限流与审计才取真实 IP |
-| `AGENT_SERVICE_URL` | Python 分身服务地址；未配置时走 Node 内置模式 |
+| `AGENT_SERVICE_URL` | Python 分身服务地址；未配置时走 Node 内置模式。Java 侧由脚本派生成 `inkstack.agent.service-url`，**两栈必须同值**，否则 `/api/agent/status` 的徽标一边亮一边灭 |
+| `DEEPSEEK_API_KEY` | 没有分身服务时的降档判据（有 Key → `live`，无 → `demo`）；同样派生给 Java。**跑闸门时不要把真 Key 写进 `.env`**：`/api/ai/write` 的计费链路会照着它去问真上游，烧的是账号里的墨水 |
 
 后端（`server/config/application-local.properties`，由 `scripts/gen-java-env.mjs` 生成、已 gitignore）：
 `INKSTACK_DB_URL` / `INKSTACK_DB_USER` / `INKSTACK_DB_PASSWORD` / `SESSION_SECRET` 等。

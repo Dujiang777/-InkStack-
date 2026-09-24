@@ -52,6 +52,13 @@ const out = [
   `GITEE_CLIENT_SECRET=${env.GITEE_CLIENT_SECRET ?? ''}`,
   `QQ_CLIENT_ID=${env.QQ_CLIENT_ID ?? ''}`,
   `QQ_CLIENT_SECRET=${env.QQ_CLIENT_SECRET ?? ''}`,
+  // AI 分身的两个开关：GET /api/agent/status 的 mode 是"三档里当前是哪一档"，
+  // 判据完全来自这两个值——一侧派生、另一侧不派生，徽标就会一边亮一边灭，
+  // 而且"没配 Key 就不该真调大模型"这条计费/隐私前提会变成只有一边成立。
+  // 取 process.env 优先：Next 读 .env 时**不会覆盖**已存在的环境变量，所以 Node 看到的
+  // 就是 shell 里那一份；properties 里写空串等于假装"两边都没配"，换台机器起 Java 就分叉了。
+  `AGENT_SERVICE_URL=${process.env.AGENT_SERVICE_URL ?? env.AGENT_SERVICE_URL ?? ''}`,
+  `DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY ?? env.DEEPSEEK_API_KEY ?? ''}`,
   // 图片上传落盘目录。Java 进程的工作目录是 server/（spring-boot:run 的 basedir），
   // 而双轨期这些文件是 Next 从 public/uploads 直接伺服的——不写同一个目录，
   // 表现就是"上传成功、URL 也回来了、图片却 404"，且两侧各测各的都发现不了。

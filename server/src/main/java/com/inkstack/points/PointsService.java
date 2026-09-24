@@ -76,6 +76,56 @@ public class PointsService {
     return outcome == null ? Reward.notGranted() : outcome;
   }
 
+  /**
+   * 只读余额探针，对应 Node 的 {@code peekBalance}：给"先生成后扣费"的链路做前置拦截，
+   * 不加锁、不落流水。读失败按"足够"放行——探针坏了不该把正常链路挡死，
+   * 真正的钱由 {@link #spend} 在锁上判。
+   */
+  public long peekBalance(long uid) {
+    try {
+      Long balance = users.balanceOf(uid);
+      return balance == null ? 0L : balance;
+    } catch (RuntimeException unreadable) {
+      return Long.MAX_VALUE;
+    }
+  }
+
+  /**
+   * 扣墨：锁行 → 判余额 → 扣款 + 同事务流水。对应 Node 的 {@code spendPoints}。
+   *
+   * <p>扣款必须与流水成对且同事务，否则出现"余额掉了、账上没有"这种账实不符。
+   * 余额不足的文案是用户可见的（402 分支），与资金链路同一句口径。
+   */
+  public Spend spend(long uid, long cost, String reason) {
+    Spend outcome = tx.execute(status -> {
+      Long locked = users.lockBalance(uid);
+      long balance = locked == null ? 0L : locked;
+      if (balance < cost) {
+        status.setRollbackOnly();
+        return Spend.refused("积分不足（余额 " + balance + "，本次需 " + cost + "）");
+      }
+      if (users.spend(uid, cost) != 1) {
+        status.setRollbackOnly();
+        return Spend.refused("积分服务异常，请稍后再试");
+      }
+      ledger.insert(uid, -cost, reason);
+      return Spend.taken(balance - cost);
+    });
+    return outcome == null ? Spend.refused("积分服务异常，请稍后再试") : outcome;
+  }
+
+  /** ok=false 时 error 是给用户看的文案；ok=true 时 balance 是扣完的余额。 */
+  public record Spend(boolean ok, String error, long balance) {
+
+    static Spend refused(String error) {
+      return new Spend(false, error, 0L);
+    }
+
+    static Spend taken(long balance) {
+      return new Spend(true, null, balance);
+    }
+  }
+
   /** granted=false 且 capped=true 表示"今天领满了"；两者皆 false 是发墨本身没落上。 */
   public record Reward(boolean granted, boolean capped, long balance) {
 

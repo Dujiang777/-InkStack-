@@ -58,12 +58,16 @@ export async function POST(req: Request) {
   //   （middleware 的限流只管请求**条数**，不管单条 body 大小）。
   //   /api/agent/ask 早已对 question(500)/历史(600) 逐项截断，此处补齐同一口径：
   //   上限取与文章正文一致的 10 万字（创作台保存草稿本身也是这个上限，正常流程不会触发）。
-  const rawDraft = body.draft ?? "";
+  const rawDraft = String(body.draft ?? "");
   if (rawDraft.length > MAX_DRAFT) {
     return NextResponse.json({ error: "草稿过长（上限 10 万字）" }, { status: 400 });
   }
+  // 三个入参都要 String() 过一遍再用手：JSON 允许 draft/author 是数字、数组、对象，
+  // 而 `(5).trim()` 是一个未捕获的 TypeError → 客户端拿到 500。Java 侧按 String() 口径取值，
+  // 于是同一个请求在切流前后会得到两种状态码——先把它收成两侧同一个字符串。
+  // 注意 draft 的 null 与"没传"都是空串，author 却是 `?? "博主"`：显式传空串仍是空串。
   const draft = rawDraft.trim();
-  const author = (body.author ?? "博主").trim().slice(0, 40);
+  const author = String(body.author ?? "博主").trim().slice(0, 40);
   const cost = PRICES[mode];
 
   // DB 模式：登录 + 只读余额预检（真正扣款延后到「上游确认可用」之后）
