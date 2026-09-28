@@ -150,7 +150,13 @@ AGENT_MODEL_NAME=deepseek-chat
 
 ## 8. 已知边界（个人开发者版取舍）
 
-- **限流桶在单实例内存**（120 req/min/IP）：pm2 多实例或横向扩容需换 Redis，单实例无碍
+- **失败计数在 MySQL（`rate_hits`），边缘闸在进程内存**：登录 / 改密 / 2FA / 发码的爆破计数是共享的，
+  pm2 多实例、双轨两栈、进程重启都看的同一本账，窗口时钟也是 MySQL 的 `NOW(3)`；
+  而 120 req/min/IP 的全站刹车**故意**留在内存——它每个请求都要过一次，进库等于给每个请求加一次写。
+  所以多实例部署时爆破防护是准的，而"每 IP 每分钟 120 次"实际会变成 `120 × 实例数`，
+  真要收紧那一道得换 Redis，不是换这张表
+- **`rate_hits` 会长期留行**：命中时顺手扫掉本桶过期行，另有全表清扫保留 1 天（排障用）。
+  要立刻解锁某个账号：`DELETE FROM rate_hits WHERE bucket LIKE 'login:某邮箱:%'`
 - **上传存本地磁盘** `public/uploads/`：换机器记得迁移该目录；上对象存储是后续升级点
 - **模拟支付通道**生产环境已硬关闭；接入微信支付后由回调验签触发到账
 - **导出的文章中原文链接**取请求 origin，反代配好 `X-Forwarded-Proto` 即为正式域名
@@ -162,6 +168,7 @@ AGENT_MODEL_NAME=deepseek-chat
 |---|---|
 | 502 | `pm2 logs inkstack`；应用没起或端口不对 |
 | 全站 429 | TRUST_PROXY 没设 1，所有用户被并成一个限流桶 |
+| 某个账号 15 分钟内一直 429 | 爆破计数在 `rate_hits`，重启进程不会清掉它（这是设计）：`DELETE FROM rate_hits WHERE bucket LIKE 'login:该邮箱:%'` |
 | OAuth 回调 403/域名错 | NEXT_PUBLIC_SITE_URL 与 OAuth 应用回调地址是否都是正式 https 域名 |
 | 邮件收不到 | pm2 日志看 SMTP 报错；QQ 邮箱用授权码不是登录密码 |
 | 登录后刷新掉线 | SESSION_SECRET 改过（旧 cookie 全失效）或 sessions 表没建出来 |

@@ -190,8 +190,11 @@ if (!secret) {
   // 注意是 PUT：POST 那一支是"重新生成密钥"，用错方法会把整段测试变成假通过
   const on = await send("PUT", JAVA, "/api/security/2fa", { code }, login1.cookie);
   backup = on.json?.backupCodes ?? null;
+  // 段宽不是恒 4：两栈都按 base64url(6) 去掉 '-'/'_' 再截 8 位，所以后半段可能是 0~4 位。
+  // 上一版把格式钉成 ^\w{4}-\w{4}$，于是大约五次里就有一次因为随机数长不满 8 位而整段红
+  // （而且会级联：2FA 其实已经开启，后面的登录用例全部变成 401 请先登录）。
   enabled = on.status === 200 && Array.isArray(backup) && backup.length === 10
-    && /^\w{4}-\w{4}$/.test(backup[0] ?? "");
+    && backup.every((c) => /^[A-Z0-9]{1,4}-[A-Z0-9]{0,4}$/.test(c));
   if (enabled) ok("Java 校验 Node 生成的密钥并开启", `备份码 ${backup[0]}…共 10 枚`);
   else bad("Java 校验 Node 生成的密钥并开启", `${on.status} ${on.text.slice(0, 120)}`);
 }

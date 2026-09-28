@@ -13,7 +13,7 @@ export async function POST(req: Request) {
   }
   // IP 维度限流：单 IP 15 分钟内最多 10 次（防换邮箱轰炸发信额度）
   const ipKey = `sendcode-ip:${clientIp(req)}`;
-  const v = rl.verdict(ipKey, { max: 10 });
+  const v = await rl.verdict(ipKey, { max: 10 });
   if (v.locked) {
     return NextResponse.json(
       { error: `操作过于频繁，请约 ${Math.ceil(v.retryAfterSec / 60)} 分钟后再试` },
@@ -27,7 +27,7 @@ export async function POST(req: Request) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return NextResponse.json({ error: "邮箱格式不正确" }, { status: 400 });
   }
-  rl.hit(ipKey, { max: 10 });
+  await rl.hit(ipKey, { max: 10 });
 
   const { getPool } = await import("@/lib/db");
   const pool = await getPool();

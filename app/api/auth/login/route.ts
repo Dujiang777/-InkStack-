@@ -30,7 +30,7 @@ export async function POST(req: Request) {
   const key = `login:${email}:${ip}`;
 
   // 先查锁：锁定中直接拒绝（不透露账号是否存在）
-  const v = rl.verdict(key);
+  const v = await rl.verdict(key);
   if (v.locked) {
     const min = Math.ceil(v.retryAfterSec / 60);
     return NextResponse.json(
@@ -49,8 +49,8 @@ export async function POST(req: Request) {
     );
     const u = (rows as Record<string, unknown>[])[0];
     if (!u || !verifyPassword(password, String(u.password_hash))) {
-      const after = rl.hit(key);
-      const hint = after.locked ? `，账号已临时锁定 15 分钟` : `（还可尝试 ${5 - after.fails} 次）`;
+      const after = await rl.hit(key);
+      const hint = after.locked ? `，账号已临时锁定 15 分钟` : `（还可尝试 ${after.max - after.fails} 次）`;
       await logAudit(pool, "login_fail", u ? Number(u.id) : null, { ip, ua, detail: `密码错误: ${email}` });
       return NextResponse.json({ error: `邮箱或密码不正确${hint}` }, { status: 401 });
     }
@@ -89,14 +89,14 @@ export async function POST(req: Request) {
         }
       }
       if (!ok) {
-        const after = rl.hit(key);
-        const hint = after.locked ? `，账号已临时锁定 15 分钟` : `（还可尝试 ${5 - after.fails} 次）`;
+        const after = await rl.hit(key);
+        const hint = after.locked ? `，账号已临时锁定 15 分钟` : `（还可尝试 ${after.max - after.fails} 次）`;
         await logAudit(pool, "login_2fa", uid, { ip, ua, detail: "验证码错误" });
         return NextResponse.json({ error: `两步验证码不正确${hint}`, need2fa: true }, { status: 401 });
       }
     }
 
-    rl.clear(key);
+    await rl.clear(key);
 
     // —— 设备识别：是否「新设备」登录（此前无同 UA 的有效会话） ——
     const [prior] = await pool.query(

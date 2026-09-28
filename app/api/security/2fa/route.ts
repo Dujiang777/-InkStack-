@@ -37,7 +37,7 @@ export async function PUT(req: Request) {
   if (!me) return NextResponse.json({ error: "请先登录" }, { status: 401 });
   const ip = clientIp(req);
   const key = `2fa-setup:${me.id}:${ip}`;
-  if (rl.verdict(key).locked) {
+  if ((await rl.verdict(key)).locked) {
     return NextResponse.json({ error: "尝试过于频繁，请 15 分钟后再试" }, { status: 429 });
   }
   const body = (await req.json().catch(() => ({}))) as { code?: string };
@@ -49,10 +49,10 @@ export async function PUT(req: Request) {
   if (!u || !u.totp_secret) return NextResponse.json({ error: "请先生成密钥（第一步）" }, { status: 400 });
   if (Number(u.totp_enabled) === 1) return NextResponse.json({ error: "两步验证已开启" }, { status: 400 });
   if (!verifyTotp(String(u.totp_secret), code)) {
-    const after = rl.hit(key);
-    return NextResponse.json({ error: `验证码不正确（还可尝试 ${5 - after.fails} 次）` }, { status: 401 });
+    const after = await rl.hit(key);
+    return NextResponse.json({ error: `验证码不正确（还可尝试 ${after.max - after.fails} 次）` }, { status: 401 });
   }
-  rl.clear(key);
+  await rl.clear(key);
   const { plain, hashed } = generateBackupCodes();
   await pool.query(`UPDATE users SET totp_enabled = 1, totp_backup = ? WHERE id = ?`, [JSON.stringify(hashed), me.id]);
   await logAudit(pool, "totp_enable", me.id, { ip, ua: clientUa(req) });
@@ -69,7 +69,7 @@ export async function DELETE(req: Request) {
   if (!me) return NextResponse.json({ error: "请先登录" }, { status: 401 });
   const ip = clientIp(req);
   const key = `2fa-off:${me.id}:${ip}`;
-  if (rl.verdict(key).locked) {
+  if ((await rl.verdict(key)).locked) {
     return NextResponse.json({ error: "尝试过于频繁，请 15 分钟后再试" }, { status: 429 });
   }
   const body = (await req.json().catch(() => ({}))) as { password?: string; code?: string };
@@ -80,14 +80,14 @@ export async function DELETE(req: Request) {
   if (!u) return NextResponse.json({ error: "用户不存在" }, { status: 404 });
   if (Number(u.totp_enabled) !== 1) return NextResponse.json({ error: "两步验证未开启" }, { status: 400 });
   if (!verifyPassword(body.password ?? "", String(u.password_hash))) {
-    const after = rl.hit(key);
-    return NextResponse.json({ error: `密码不正确（还可尝试 ${5 - after.fails} 次）` }, { status: 401 });
+    const after = await rl.hit(key);
+    return NextResponse.json({ error: `密码不正确（还可尝试 ${after.max - after.fails} 次）` }, { status: 401 });
   }
   if (!verifyTotp(String(u.totp_secret), body.code ?? "")) {
-    const after = rl.hit(key);
-    return NextResponse.json({ error: `验证码不正确（还可尝试 ${5 - after.fails} 次）` }, { status: 401 });
+    const after = await rl.hit(key);
+    return NextResponse.json({ error: `验证码不正确（还可尝试 ${after.max - after.fails} 次）` }, { status: 401 });
   }
-  rl.clear(key);
+  await rl.clear(key);
   await pool.query(`UPDATE users SET totp_secret = NULL, totp_enabled = 0, totp_backup = NULL WHERE id = ?`, [me.id]);
   await logAudit(pool, "totp_disable", me.id, { ip, ua: clientUa(req) });
   return NextResponse.json({ ok: true, hint: "两步验证已关闭" });

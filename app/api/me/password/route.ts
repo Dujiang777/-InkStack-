@@ -15,7 +15,7 @@ export async function PATCH(req: Request) {
   // 防爆破：会话被盗后不能靠这个接口无限试旧密码（与安全中心改密同一限流键）
   const ip = clientIp(req);
   const key = `pwdchg:${user.id}:${ip}`;
-  if (rl.verdict(key).locked) {
+  if ((await rl.verdict(key)).locked) {
     return NextResponse.json({ error: "尝试过于频繁，请 15 分钟后再试" }, { status: 429 });
   }
 
@@ -36,11 +36,11 @@ export async function PATCH(req: Request) {
     const [rows] = await pool.query(`SELECT password_hash FROM users WHERE id = ? LIMIT 1`, [user.id]);
     const r = (rows as { password_hash?: string }[])[0];
     if (!r || !verifyPassword(oldPw, String(r.password_hash ?? ""))) {
-      const after = rl.hit(key);
+      const after = await rl.hit(key);
       await logAudit(pool, "password_change", user.id, { ip, ua: clientUa(req), detail: "旧密码错误" });
-      return NextResponse.json({ error: `旧密码不正确（还可尝试 ${5 - after.fails} 次）` }, { status: 401 });
+      return NextResponse.json({ error: `旧密码不正确（还可尝试 ${after.max - after.fails} 次）` }, { status: 401 });
     }
-    rl.clear(key);
+    await rl.clear(key);
 
     // 泄露密码检查（网络异常 fail-open，不阻塞改密主流程）
     const leaked = await pwnedCount(newPw);

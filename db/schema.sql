@@ -451,3 +451,21 @@ CREATE TABLE IF NOT EXISTS comment_likes (
 
 -- 站内信的 unlock 档（lib/notify.ts ensureUnlockEnum）：早于它的库这里补宽
 ALTER TABLE notifications MODIFY type ENUM('comment','tip','review','like','unlock','system') NOT NULL DEFAULT 'system';
+
+-- ============================================================
+-- P7e：共享限流计数（双轨期两栈必须看到同一份失败次数）
+--
+-- 登录爆破、验证码频率这类计数原先在两栈各有一份进程内存，同一 IP 的实际容忍度接近两者之和，
+-- 切流量的那几秒计数还会被清零。这张表把它变成两边共用的账本：一行一次命中，窗口判定按
+-- bucket 聚合。
+--
+-- 窗口的时钟是 MySQL 的 NOW(3)，不是任何一个进程的 Date.now()：两栈的机器钟可以差，
+-- 只有把"现在是几点"也交给同一个源，计数才对得上。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS rate_hits (
+  id  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  bucket VARCHAR(190) NOT NULL COMMENT '限流键：login:{email}:{ip} / sendcode-ip:{ip} / pwdchg:{id}:{ip} / 2fa-*:{id}:{ip}',
+  ts   DATETIME(3) NOT NULL COMMENT '命中时刻，由 MySQL 的 NOW(3) 写入',
+  INDEX idx_rh_bucket (bucket, ts),
+  INDEX idx_rh_ts (ts)
+) ENGINE=InnoDB;

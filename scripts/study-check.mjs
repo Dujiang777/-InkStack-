@@ -68,9 +68,12 @@ const num = async (sql, params = []) => {
   return v === null || v === undefined ? 0 : Number(v);
 };
 
-async function call(base, method, url, body, cookie, raw = false) {
+async function call(base, method, url, body, cookie, raw = false, xff = "") {
   const h = {};
   if (cookie) h.cookie = cookie;
+  // 限流键里带 ip，而两栈对"没有转发头"的兜底不一样（Next 注入自己的 socket 对端、Tomcat 落 local），
+  // 所以要验共享计数的用例必须显式钉住同一个 ip。
+  if (xff) h["x-forwarded-for"] = xff;
   let payload;
   if (body instanceof FormData) {
     payload = body; // 边界由 fetch 生成，这里绝不能自己写 content-type
@@ -662,18 +665,21 @@ async function suit() {
   check(!(secSame.status === 400 && secSame.json?.error === "新密码不能与旧密码相同"),
     "安全中心入口没有「不能与旧密码相同」这一条：两入口的差别被钉住，不是一处改了另一处悄悄跟上",
     `${secSame.status} ${secSame.json?.error}`);
+  // 限流键是 pwdchg:{uid}:{ip}，先清一次本用例的桶，重跑才不会读到上一轮的残留。
+  const RL_IP = "203.0.113.123";
+  await conn.query("DELETE FROM rate_hits WHERE bucket = ?", [`pwdchg:${writerId}:${RL_IP}`]);
   const wrong1 = await call(NODE, "PATCH", "/api/me/password",
-    { oldPassword: "完全不对的旧密码abc12", newPassword: NEW_PW }, writer);
+    { oldPassword: "完全不对的旧密码abc12", newPassword: NEW_PW }, writer, false, RL_IP);
   const wrong2 = await call(JAVA, "PATCH", "/api/me/password",
-    { oldPassword: "完全不对的旧密码abc12", newPassword: NEW_PW }, writer);
-  // 两侧都回"还可尝试 4 次"——听起来一样，其实说明计数器**没有跨栈共享**：
-  // lib/rate-limit 与 Java 的 LoginGuard 都是进程内的 Map，双轨期同一个 uid+ip 各有一份，
-  // 5+5 也不会锁。这条不是"通过"，是把已知的口子中门亮出来（收口方案见 README 与 P7）。
+    { oldPassword: "完全不对的旧密码abc12", newPassword: NEW_PW }, writer, false, RL_IP);
+  // P7e 之前这里两侧都回"还可尝试 4 次"——那正是"计数器各算各的"的现场（5+5 也不会锁）。
+  // 现在计数落在共享的 rate_hits 表里，Java 必须看得见 Node 刚记的那一次。
   check(wrong1.status === 401 && wrong2.status === 401
     && wrong1.json?.error === "旧密码不正确（还可尝试 4 次）"
-    && wrong2.json?.error === wrong1.json?.error,
-    "【已知口子】失败计数是进程内的：两栈各记各的，同一个 uid+ip 各有 5 次额度",
+    && wrong2.json?.error === "旧密码不正确（还可尝试 3 次）",
+    "失败计数跨栈共享：Node 记一次之后，Java 侧的剩余次数就少一次",
     `${wrong1.json?.error} / ${wrong2.json?.error}`);
+  await conn.query("DELETE FROM rate_hits WHERE bucket = ?", [`pwdchg:${writerId}:${RL_IP}`]);
   const changed = await call(JAVA, "PATCH", "/api/me/password",
     { oldPassword: env.INK_WRITER_PASSWORD, newPassword: NEW_PW }, writer);
   const hashAfter = await only("SELECT password_hash FROM users WHERE id = ?", [writerId]);

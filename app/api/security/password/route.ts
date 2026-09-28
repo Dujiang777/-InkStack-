@@ -15,7 +15,7 @@ export async function POST(req: Request) {
   // 改密也防爆破（防会话被盗后暴力试旧密码）
   const ip = clientIp(req);
   const key = `pwdchg:${me.id}:${ip}`;
-  if (rl.verdict(key).locked) {
+  if ((await rl.verdict(key)).locked) {
     return NextResponse.json({ error: "尝试过于频繁，请 15 分钟后再试" }, { status: 429 });
   }
 
@@ -32,14 +32,14 @@ export async function POST(req: Request) {
     const [rows] = await pool.query("SELECT password_hash FROM users WHERE id = ? LIMIT 1", [me.id]);
     const r = (rows as Record<string, unknown>[])[0];
     if (!r || !verifyPassword(oldPw, String(r.password_hash))) {
-      const after = rl.hit(key);
+      const after = await rl.hit(key);
       await logAudit(pool, "password_change", me.id, { ip, ua: clientUa(req), detail: "旧密码错误" });
       return NextResponse.json(
-        { error: `旧密码不正确（还可尝试 ${5 - after.fails} 次）` },
+        { error: `旧密码不正确（还可尝试 ${after.max - after.fails} 次）` },
         { status: 401 }
       );
     }
-    rl.clear(key);
+    await rl.clear(key);
     const leaked = await pwnedCount(newPw);
     if (leaked > 0) {
       return NextResponse.json({ error: `新密码已出现在 ${leaked} 次已知泄露中，请换一个` }, { status: 400 });
