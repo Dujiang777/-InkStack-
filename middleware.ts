@@ -1,7 +1,8 @@
 // 全站安全中间件（v13.5 加强版）：
 // 1) 安全响应头（CSP / HSTS / X-Frame-Options / nosniff / Referrer-Policy / Permissions-Policy / COOP / CORP）
 // 2) CSRF 防线：写操作（POST/PUT/PATCH/DELETE）校验 Origin 与 Host 同源
-// 3) 全站 API 限流：每 IP 120 次/分钟（防爬/防滥用第一道闸；登录等敏感接口另有更严的专项限流）
+// 3) 全站 API 限流：每 IP 120 次/分钟（档位见 EDGE_API_LIMIT；登录等敏感接口另有更严的专项限流，
+//    那一套落在 MySQL 的 rate_hits 里，两栈共用一本账）
 import { NextResponse, type NextRequest } from "next/server";
 
 function securityHeaders(): Record<string, string> {
@@ -67,10 +68,17 @@ function routedToJava(pathname: string): boolean {
   return javaMatchers.some((m) => m === null || m.test(pathname));
 }
 
-// —— 全站 API 滑窗限流（middleware edge 内存桶；多实例部署换 Redis） ——
+// —— 全站 API 滑窗限流（middleware edge 内存桶；故意不进 MySQL，理由见 README 闸门 17 一节） ——
 const g = globalThis as typeof globalThis & { __inkApiBuckets?: Map<string, number[]> };
 const apiBuckets = (g.__inkApiBuckets ??= new Map<string, number[]>());
-const API_LIMIT = 120; // 次
+const API_LIMIT = (() => {
+  // 120 次/分钟是给真实读者定的。抬档位的两种场景都在仓库自己身上：批量闸门一次跑上百条请求
+  // 且全部来自同一个回环 IP（刷爆之后闸门看到的是 429，读起来和"两栈不一致"一模一样），
+  // 以及出口共用一个公网 IP 的用户群。做成环境变量而不是改常量，是为了让"这台的档位"
+  // 和"这台的行为"能分开验——对照实例照旧 120，抬档本身才不会变成免检。非法值回落默认。
+  const raw = Number(process.env.EDGE_API_LIMIT ?? "");
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 120;
+})();
 const API_WINDOW_MS = 60 * 1000; // 每分钟
 
 function apiRateLimit(ip: string): { locked: boolean; retryAfterSec: number } {

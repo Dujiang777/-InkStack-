@@ -39,6 +39,7 @@
 | P7d | 页面取数默认走 Java（`DATA_VIA_JAVA` 留空即跟着 `JAVA_BASE` 启用） | ✅ | 20 页 × 4 身份 **80/80 逐字一致**（游客 20/20 + test/writer/probe 各 20/20），付费墙 4/4、检索防泄漏 4/4、跨栈互通 8/8、切流代理 56/56、接口对拍全绿；`x-data-source` 头报出真实取数路径，闸门开跑先钉"两侧确实是两条路"，否则直接停（这一道的开关与这个头都在 P7e′ 退役） |
 | P7e | 失败计数搬进共享存储：登录 / 改密 / 2FA / 发码共用 MySQL 里的 `rate_hits` | ✅ | 限流闸门 **18/18**（新的一道）：五连失败按 node·java 交替累计且每次剩余次数精确、Java 记满后 Node 侧 429、两栈同一个 `Retry-After`、把行推出窗口才解锁（推 3 分钟仍 429，反证过）、成功登录跨栈清零、`send-code` 的 10 次上限同样共用而这一段一封邮件都没发、`api:*` 桶绝不在账本里（边缘闸故意留在进程内存）。Java 侧另有 5 条单测钉住"先记再判 / 库挂了放行而不是锁死"。回归：书房 **117/117**（其中那条"已知口子：两栈各记各的"翻成了正向证明）、建库 **18/18** |
 | P7e′ | 页面取数只剩 Java：27 个读函数改成一句 remote 调用，Node 读 SQL 整体搬进 `lib/data-legacy.ts` | ✅ | 搬移用 AST 逐字证明：26 个函数与 `HEAD` 版本**一字不差**（只少了分流语句与分流注释），手写的那一个（`listWeekly` 一半是 JS 组装）也只差 `listHot → rankHot` 一处替换。闸门 4 重做成**页面渲染不变量 + 来源证明**（34/34），并反证过：`JAVA_BASE=""` 的实例第一项就红——页面会安静地渲染演示数据，200、有卡片、有正文。回归：对拍 7/7、互通 8/8、付费墙 4/4、检索防泄漏 4/4、路由盘点无缺口、社区 108/108、书房 117/117、限流 18/18、`tsc` 零错。`DATA_VIA_JAVA` / `lib/data-mode.ts` / `x-data-source` 同时退役 |
+| P7f-1 | `/api` 整前缀切流**演练**（还没删路由）：把"只跑 Java 也能自证"这件事先补上 | ✅ | 一台 `JAVA_ROUTES=/api` 的实例上：切流代理 **60/60**（`--keep-render` 档：五个页面/出口仍由 Next 渲染、`/apiXYZ` 没被顺走）＋ AI 面 21/22（1 项如实 SKIP）、创作台 **51/51**、运营台 **65/65**、书房 **117/117**、页面 **34/34**、互通 **8/8**、限流 **18/18**。<br>资金 **94/100** 与社区 **103/108** 那 11 项不是回归：它们断的是"并发真的来自两个进程"，NODE 侧切成 Java 之后这个宾语没了，于是从**假红**改成 **SKIP**（并发照打、只一路成交/败者分支/零 500/关系行数守恒照验），并反证过——同一对判据打真 Node 侧时 100/100、108/108 零 SKIP。对拍/付费墙/检索防泄漏三道则按设计**拒绝起跑**（两侧同一个执行者时"全绿"不说明任何事）。附带把边缘闸的档位做成环境变量 `EDGE_API_LIMIT`（默认仍 120，另一台实例实测照旧 120 后 429），闸门一次上百发不再把自己刷成 429 冒充两栈不一致 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -234,6 +235,18 @@
   于是它比的是 Java 与 Java，满屏绿字替一次没验过的改动背书。所以这一步是**收拢不是删除**：
   Node 读 SQL 整体搬进 `lib/data-legacy.ts`（AST 逐字比对证明搬移没改逻辑，只少了分流语句），
   只有 `app/api/**` 引它，P7f 删路由时它跟着一起走，那时"没有消费者"是 grep 一句话的事。
+- **切流范围一变，"必须仍在 Node"那类负断言就会自己打自己**（P7f-1 演练抓到的）：闸门 6 原本
+  硬编码 `--keep=/api/articles`，切到 `JAVA_ROUTES=/api` 之后它报两条红——而这两条红是**它对**，
+  配置也**对**，只是判据的宾语换成了不存在的东西。同一件事在资金/社区闸门里是另外一副样子：
+  「并发：确实两栈各答了一半」测的从来不是账务，是**出处**——六路并发必须来自两个进程，
+  否则"只一路成交"完全可能是同一进程里一把锁的功劳，MySQL 的行锁写没写对根本没人验过。
+  NODE 侧变成 Java 之后这条既不该判红（不是实现回归）也不该继续判绿（那是给没验过的姿势盖章），
+  所以判据前先问一次 `isCrossStack()`，问不出两个执行者就如实 SKIP，其余判据一条不少地照跑。
+  反证做过：同一对闸门打真 Node 侧时 100/100、108/108，零 SKIP——降级不是一句永久免检。
+- **闸门把自己刷爆的 429，读起来和"两栈不一致"一模一样**（P7f-1 顺带收掉的）：边缘闸每 IP
+  120 次/分，而一次资金闸门就有一百多发、全来自同一个回环地址。之前只能靠"连跑隔一分钟"这种
+  口头纪律躲，踩过两次才知道红不是代码的问题。现在档位是 `EDGE_API_LIMIT`，只给演练实例抬档，
+  对照实例照旧 120——抬档这件事本身也要能被反证，否则下一次红你会先怀疑实现。
 - **随机页不能拿"逐字一致"当判据，但也不能因此跳过**：`/random`（漫游记）每次抽不同文章，
   第一次全量跑就因为它红了。跳过等于把这一页从闸门里删掉。现在改成抽 10 次验三件事——
   必须 307 落到一篇文章；抽到的每一篇都要在该栈自己的公开列表里（随机池漏进草稿或未过审
@@ -411,6 +424,13 @@ node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
 #   X-Backend: inkstack-java 由 Java 过滤器打上，是"这条请求确实落在 Java"的唯一硬证据；
 #   同时反向断言 /api/articles 与 /api/articlesXYZ 仍由 Node 应答（切流不能过宽），
 #   并断言跨站 Origin 的写请求在边缘就 403（安全闸口不随切流下沉）。
+#   --keep=/api/xxx  切流范围变了要跟着改：负断言的宾语是"名单外的前缀"，硬编码会让它自己打自己。
+#   --keep-render    整前缀切流（JAVA_ROUTES=/api）时用这个替 --keep：此时已经没有"名单外的
+#                    /api 前缀"，负断言改指两处——① / 、/hot、/archive、/feed.xml、/sitemap.xml
+#                    必须仍由 Next 渲染（rewrite 只挂 /api/，不能把渲染层一起顺走）；
+#                    ② /apiXYZ/* 必须没被转发（抓的是 startsWith("/api/") 退化成 startsWith("/api")，
+#                    那种写法下 Java 会回一个带 x-backend 的 404，正落在这条上）。
+#                    演练命令：JAVA_ROUTES=/api EDGE_API_LIMIT=100000 next dev -p 3400
 
 # 7) 资金闸门：对拍只能比"读到的东西"，钱要的三件它表达不了——
 #    ① 同一笔写一侧执行、另一侧看得懂（已购/已打包/已签/已付 的幂等分支跨栈一致）；
@@ -424,6 +444,10 @@ node scripts/money-check.mjs
 #   这一道闸门抓到的真 bug：六路并发签到 Java 返回 500——同主键并发插入 InnoDB 未必给
 #   DuplicateKey，也可能给死锁回滚，Spring 翻译出的就不是 DataIntegrityViolationException。
 #   Node 侧同样有这个洞（dev 模式编译串行化掩盖了它），两侧一并补了"锁冲突重试三次"。
+#   ⚠ NODE 侧整前缀切走之后（PARITY_NODE 指向 JAVA_ROUTES=/api 的实例）：六处
+#     「并发：确实两栈各答了一半」记 SKIP 而非 PASS——它断的是并发**来自两个进程**，
+#     单栈时这个前提没了（"只一路成交"可能只是一把进程内锁的功劳，也可能真是行锁，
+#     这一跑不再能区分）。其余判据一条不少。反证过：PARITY_NODE 打真 Node 时 100/100 零 SKIP。
 
 # 8) 路由清单：切流是**前缀级**的，而两栈在同一 URL 上的方法集合并不天然相同——
 #    Node 的 GET /api/series 是"我的专栏"（要登录），Java 的是公开合集架。
@@ -441,6 +465,8 @@ node scripts/community-check.mjs
 #   六路并发两栈零 500 且关系行至多一行、like_count = COUNT(article_likes)、
 #   游客也能发的评论其昵称裁剪与全角空格判空两侧同口径。
 #   ⚠ 一次约 150 个请求，贴着边缘限流（每 IP 120 次/分）的上沿：连跑要隔一分钟，否则红一片 429。
+#     （抬档位用 EDGE_API_LIMIT，见 .env.example；NODE 侧整前缀切走时五处"两栈各答了一半"记 SKIP，
+#      同闸门 7 的理由。）
 
 # 10) 创作台闸门：发布/编辑/撤回这条链路的三个洞，读侧对拍一个都盖不住。
 node scripts/studio-check.mjs
@@ -644,24 +670,42 @@ JAVA_ROUTES=/api/articles            # 逗号分隔前缀；* 为全切；留空
 前缀太粗时可用**段通配**逐条切：条目里的 `*` 只匹配一个路径段，其余字符按字面转义，
 命中判断仍是 `^前缀(?:/|$)`。所以 `/api/articles/*/unlock` 只把解锁这一个动作交给 Java，
 同前缀下尚未迁完的分支继续留在 Node——P4 的资金端点就是这样切走的。
-P5c 之后 `/api/articles` 与 `/api/admin` 两个前缀已经**整前缀安全**（闸门 8 现算），
-下面的实例仍写成段通配是有意的：这样 `--keep=/api/articles` 那条"没在名单里的前缀不得被带走"
-的负断言才有落点。真要整体切，把这两条换成 `/api/articles,/api/admin` 并把 `--keep` 指到一个还没迁的前缀。
 
-闸门 6/7/11 用的那个"已切流"实例就是这么起的（第二个 dev 实例必须给独立 distDir）：
+**P7f-1 之后这一段已经可以整前缀切：`JAVA_ROUTES=/api`。** 闸门 8 现算的结论是
+58 个 URL 模式全部被 Java 覆盖、方法集合零差异、语义冲突登记表为空。
+上一版这里罗列的二十来条段通配是有意的历史形态——那时 `--keep=/api/articles` 那条
+"没在名单里的前缀不得被带走"的负断言需要一个落点；整前缀切走之后那个落点不存在了，
+所以闸门 6 改用 `--keep-render` 把负断言改指渲染层（见上面闸门 6 的说明）。
+
+演练用的"已切流"实例（第二个 dev 实例必须给独立 distDir；`EDGE_API_LIMIT` 见闸门 7/9 那段）：
 
 ```bash
 MSYS_NO_PATHCONV=1 NEXT_DIST_DIR=.next-cutover \
-JAVA_ROUTES=/api/auth,/api/security,/api/checkin,/api/me/badge-claim,/api/topup,/api/notifications,\
-/api/admin,/api/users/*/follow,/api/comments/*/like,/api/comments/*/report,\
-/api/articles/*/unlock,/api/articles/*/tip,/api/articles/*/boost,/api/articles/*/comments,\
-/api/articles/*/like,/api/articles/*/bookmark,/api/articles/*/report,/api/articles/*/paywall-view,\
-/api/articles/*/raw,/api/articles/*/export,/api/series,\
-/api/drafts,/api/history,/api/links,/api/uploads,/api/me/profile,/api/me/password,/api/import,/api/ai,/api/agent \
+JAVA_ROUTES=/api EDGE_API_LIMIT=100000 \
   node node_modules/next/dist/bin/next dev -p 3400
-node scripts/proxy-cutover-check.mjs --money --community --admin --study --import --base=http://localhost:3400
-node scripts/admin-check.mjs          # 其中的"经代理导出可比对"一节会打这个实例
+
+# 经代理的写链路逐道重跑：把 PARITY_NODE 指过去即可，其余不变
+node scripts/proxy-cutover-check.mjs --base=http://localhost:3400 --keep-render \
+     --money --community --admin --study --import
+PARITY_NODE=http://localhost:3400 node scripts/studio-check.mjs      # 51/51
+PARITY_NODE=http://localhost:3400 node scripts/study-check.mjs       # 117/117
+PARITY_NODE=http://localhost:3400 node scripts/admin-check.mjs       # 65/65
+PARITY_NODE=http://localhost:3400 node scripts/page-check.mjs        # 34/34
+PARITY_NODE=http://localhost:3400 node scripts/money-check.mjs       # 94 项 + 6 SKIP
+PARITY_NODE=http://localhost:3400 node scripts/community-check.mjs   # 103 项 + 5 SKIP
 ```
+
+对拍（1）、付费墙埋点（3）、检索防泄漏（3′）这三道在 3400 上会**直接拒绝起跑**：
+
+```
+站点 http://localhost:3400 的接口由 "java" 应答，不是 node。
+```
+
+这不是切流切坏了，是它们比的是"同一份数据、两套实现"——两侧同一个执行者时满屏绿字
+不说明任何事。判据在 `scripts/gate-executor.mjs`：拿 Java 自己盖的 `x-backend` 反推
+"这一发到底谁答的"，探不出 Node 就停下。**这一层是 P7f 删路由之前的前置作业**：
+删掉 58 个 `route.ts` 之后差分闸门从此没有对岸，所以"Node 时代的契约"必须先固化成
+可重放的基线（任务 P7f-1b），删除才不是裸奔。
 
 `--ai` 那一段要**换一对配置**再跑：AI 面只要落在 live/透传档，一问就扣 5 点墨、就去问真上游，
 所以那个实例必须两侧都在 demo 档（闸门自己会先查 `/api/agent/status`，不是 demo 就记 SKIP 而不是发问）：
@@ -770,7 +814,8 @@ mvn spring-boot:run                  # http://localhost:3101
 |---|---|
 | `DATABASE_URL` | MySQL 连接串；Java 侧由脚本派生成 JDBC |
 | `SESSION_SECRET` | **两栈必须同值**，否则会话互不认 |
-| `JAVA_BASE` / `JAVA_ROUTES` | 双轨切流开关（见上）。`JAVA_BASE` 现在同时决定**页面取数问谁**：非空 → 页面只问 Java（Java 挂了页面就 500，不静默回落）；留空 → 页面渲染 `lib/demo-data.ts` 的演示数据。`JAVA_ROUTES` 只管 HTTP 接口 |
+| `JAVA_BASE` / `JAVA_ROUTES` | 双轨切流开关（见上）。`JAVA_BASE` 现在同时决定**页面取数问谁**：非空 → 页面只问 Java（Java 挂了页面就 500，不静默回落）；留空 → 页面渲染 `lib/demo-data.ts` 的演示数据。`JAVA_ROUTES` 只管 HTTP 接口，**P7f-1 之后可以直接写 `/api`**（整前缀切，闸门 8 现算无缺口）；切到这一档时跨栈差分的三道闸门会拒绝起跑，这是设计 |
+| `EDGE_API_LIMIT` | Next 边缘那道全站 API 滑窗的档位，留空 = 每 IP 每 60 秒 120 次。留这个口子有两个理由：出口共用一个公网 IP 的用户群会被 120 误伤；以及跑批量闸门时只给演练实例抬档——闸门一次上百发、全来自同一个回环地址，刷爆之后的 429 读起来和"两栈不一致"一模一样 |
 | ~~`DATA_VIA_JAVA`~~ | **已退役（P7e′）**：页面只剩一条取数路，逐函数开关没有东西可切了。`x-data-source` 应答头同时删除——一个含义会变掉的信号比没有信号更坏 |
 | `NEXT_PUBLIC_SITE_URL` | 站点地址；决定会话 Cookie 是否带 `Secure` |
 | `TRUST_PROXY` | 反代后设 `1`，限流与审计才取真实 IP |

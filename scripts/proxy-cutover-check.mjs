@@ -8,10 +8,12 @@
 // 的唯一硬证据。
 //
 //   node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
-//                     [--keep=/api/articles] [--money] [--community] [--admin] [--study] [--import]
+//                     [--keep=/api/articles] [--keep-render] [--money] [--community] [--admin] [--study] [--import]
 //
 // --keep  声明"这一次必须仍由 Node 应答"的前缀：切流范围变了，这个负断言也要跟着换，
 //         否则"未切流"的断言会在切到 /api/articles 那一档时自己打自己。
+// --keep-render  JAVA_ROUTES=/api（整前缀全切）时用这个代替 --keep：改断页面与 /feed.xml、
+//         /sitemap.xml 仍由 Next 渲染，不被 rewrite 顺走。
 // --money 追加资金写链路经代理的证据（P4）。只挑不改账的用例：
 //         已签到用户的 POST /api/checkin → already；非法档位的 POST tip → 400。
 // --community 追加社区互动经代理的证据（P5）：未登录/参数非法/只读三类，同样一笔数据都不改。
@@ -39,6 +41,8 @@ const arg = (name, dflt) => {
 };
 const base = arg("base", process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200");
 const KEEP_PREFIX = arg("keep", "/api/articles");
+/** 切到整前缀 /api 时用这个：已经没有"未切流的 /api 前缀"可指，负断言改指渲染层本身。 */
+const KEEP_RENDER = process.argv.includes("--keep-render");
 const MONEY = process.argv.includes("--money");
 const COMMUNITY = process.argv.includes("--community");
 const ADMIN = process.argv.includes("--admin");
@@ -107,13 +111,26 @@ const routed = await call("GET", "/api/auth/providers");
 if (routed.status === 200 && routed.backend === "inkstack-java") ok("/api/auth/providers 经 Next 转给 Java");
 else bad("/api/auth/providers 经 Next 转给 Java", `${routed.status} backend=${routed.backend || "无"}`);
 
-// 2) 没在 JAVA_ROUTES 里的前缀不得被带走（段匹配，且不能误伤）
-const kept = await call("GET", KEEP_PREFIX);
-if (kept.backend === "") ok(`${KEEP_PREFIX} 仍在 Node 应答`);
-else bad(`${KEEP_PREFIX} 仍在 Node 应答`, `backend=${kept.backend}`);
-const sneaky = await call("GET", `${KEEP_PREFIX}XYZ`);
-if (sneaky.backend === "") ok(`前缀相似路径未被错开（${KEEP_PREFIX}XYZ）`);
-else bad("前缀相似路径未被错开", `backend=${sneaky.backend}`);
+// 2) 负断言必须跟着切流范围走，否则它会自己打自己：
+//    段通配那一档还有"名单外的 /api 前缀"可指，整前缀切到 /api 时已经没有了——
+//    那一档该验的换成"名单上的确实全切"+"不属于 /api/ 的没被顺走"。
+//    后一条抓的是 matcher 从 startsWith("/api/") 退化成 startsWith("/api")：
+//    那样 /apiXYZ 会被转给 Java，Java 回 404 但带 x-backend，正好落在这条判据上。
+if (KEEP_RENDER) {
+  const cut = await call("GET", "/api/articles");
+  if (cut.backend === "inkstack-java") ok("整前缀切流：/api/articles 已落在 Java");
+  else bad("整前缀切流：/api/articles 已落在 Java", `backend=${cut.backend || "无"}`);
+  const outside = await call("GET", "/apiXYZ/articles");
+  if (outside.backend === "") ok("/api 之外的前缀未被整前缀切流顺走（/apiXYZ/*）", `status=${outside.status}`);
+  else bad("/api 之外的前缀未被整前缀切流顺走", `backend=${outside.backend}`);
+} else {
+  const kept = await call("GET", KEEP_PREFIX);
+  if (kept.backend === "") ok(`${KEEP_PREFIX} 仍在 Node 应答`);
+  else bad(`${KEEP_PREFIX} 仍在 Node 应答`, `backend=${kept.backend}`);
+  const sneaky = await call("GET", `${KEEP_PREFIX}XYZ`);
+  if (sneaky.backend === "") ok(`前缀相似路径未被错开（${KEEP_PREFIX}XYZ）`);
+  else bad("前缀相似路径未被错开", `backend=${sneaky.backend}`);
+}
 
 // 3) POST 体要穿过 rewrite，Set-Cookie 要能被浏览器收下
 const creds = [env.INK_TEST_EMAIL, env.INK_TEST_PASSWORD];
@@ -131,10 +148,21 @@ if (!cookie) {
   if (me.json?.user?.email === creds[0]) ok("/api/auth/me 认得这枚 Cookie", `uid=${me.json.user.id}`);
   else bad("/api/auth/me 认得这枚 Cookie", `${me.status} ${me.text.slice(0, 90)}`);
 
-  // 4) 未切流前缀上的写不得被段通配顺走：/api/articles/*/unlock 只该带走 unlock 那一支
-  const keepWrite = await call("PUT", `${KEEP_PREFIX}/__cutover_probe__`, { body: {}, cookie });
-  if (keepWrite.backend === "") ok(`未切流前缀的写仍由 Node 应答（${KEEP_PREFIX}/*）`, `status=${keepWrite.status}`);
-  else bad("未切流前缀的写归属", `backend=${keepWrite.backend}`);
+  // 4) 未切流的东西不得被顺走：段通配那一档查的是"/api/articles/* 里没在名单上的分支仍在 Node"，
+  //    整前缀切到 /api 时已经没有这样的前缀，这条负断言就改指渲染层——页面与两个非 /api 出口
+  //    必须仍由 Next 自己出（应答里绝不可能出现 x-backend）。P7f 删掉 Node 路由后，
+  //    "web 只剩渲染"这句成不成立，看的就是这一条。
+  if (KEEP_RENDER) {
+    for (const p of ["/", "/hot", "/archive", "/feed.xml", "/sitemap.xml"]) {
+      const r = await call("GET", p, { cookie });
+      if (r.backend === "" && r.status === 200) ok(`${p} 仍由 Next 渲染（没被 rewrite 顺走）`, `status=${r.status}`);
+      else bad(`${p} 仍由 Next 渲染（没被 rewrite 顺走）`, `backend=${r.backend || "无"} status=${r.status}`);
+    }
+  } else {
+    const keepWrite = await call("PUT", `${KEEP_PREFIX}/__cutover_probe__`, { body: {}, cookie });
+    if (keepWrite.backend === "") ok(`未切流前缀的写仍由 Node 应答（${KEEP_PREFIX}/*）`, `status=${keepWrite.status}`);
+    else bad("未切流前缀的写归属", `backend=${keepWrite.backend}`);
+  }
 
   const out = await call("POST", "/api/auth/logout", { body: {}, cookie });
   const cleared = setCookie(out.res);

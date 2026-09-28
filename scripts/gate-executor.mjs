@@ -53,3 +53,19 @@ export async function requireExecutor(base, expected) {
 export const requireNodeExecutor = (base) => requireExecutor(base, "node");
 /** 反向：要求这一侧由 Java 应答（切流验证用）。 */
 export const requireJavaExecutor = (base) => requireExecutor(base, "java");
+
+/**
+ * 这一对端点背后是不是**两个不同的执行者**——给"不能判死、但也不能装绿"的判据用。
+ *
+ * 整前缀切流（`JAVA_ROUTES=/api`）之后 PARITY_NODE 其实也是 Java（经 rewrite 转发），
+ * 此时"两栈各答了一半"这类**断言出处**的判据宾语已经不存在了。它不该判红——
+ * 不是实现回归，是这一跑的范围变了；更不该继续判绿——那等于给一个没被验证过的
+ * 并发姿势盖章。所以调用方拿它把这类判据显式降成 SKIP，其余判据照跑。
+ *
+ * 反过来讲：这一对探针也正是"跨栈差分到底还成不成立"的机器证据。P7f 删掉
+ * Node 侧实现之后，全仓库只剩这里还会如实说"跨实现的那一半已经没法比了"。
+ */
+export async function isCrossStack(nodeBase, javaBase) {
+  const [a, b] = [await executorOf(nodeBase), await executorOf(javaBase)];
+  return a !== b && !a.startsWith(UNREACHABLE) && !b.startsWith(UNREACHABLE);
+}

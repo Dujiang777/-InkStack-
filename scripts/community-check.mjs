@@ -16,9 +16,13 @@
 // 前提：两栈都已启动（Node 3200 / Java 3101），且 DATABASE_URL 指向**克隆库** inkstack_j。
 // 一次约 150 个请求，贴着边缘限流（每 IP 120 次/分）的上沿跑：**连跑要隔一分钟**，
 // 否则第二轮起会被 429 打挂一片，那种红不是代码的问题。
+//   整前缀切流演练（PARITY_NODE 指向 JAVA_ROUTES=/api 的实例）时，五处
+//   「并发：确实两栈各答了一半」会记 SKIP 而不是 PASS——那一跑的 NODE 端点其实也是 Java，
+//   并发出处这个前提已经不成立了。判据本身见 gate-executor.mjs 的 isCrossStack。
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { isCrossStack } from "./gate-executor.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const env = Object.fromEntries(
@@ -39,6 +43,12 @@ const REP = `p5-community-report-${RUN}`;
 
 let pass = 0;
 let fail = 0;
+let skip = 0;
+/** 前提不成立的判据：如实记 SKIP。把"没测到"报成 PASS 是闸门最坏的一种错。 */
+function skipped(label, why) {
+  skip++;
+  console.log(`SKIP  ${label}  — ${why}`);
+}
 function check(cond, label, detail) {
   const text = typeof detail === "function" ? detail()
     : typeof detail === "string" ? detail : (detail === undefined ? "" : JSON.stringify(detail));
@@ -100,10 +110,22 @@ const hist = (rs) => {
 const race = (method, urlPath, body, cookie, n = 6) => Promise.all(
   Array.from({ length: n }, (_, i) => call(i % 2 ? JAVA : NODE, method, urlPath, body, cookie))
 );
+/** 起跑前问一次：这一对端点背后是不是两个执行者。探一次就够，raceAlive 要复用。 */
+const CROSS_STACK = await isCrossStack(NODE, JAVA);
+console.log(`并发出处判据：${NODE} / ${JAVA} → ${CROSS_STACK ? "两套实现（跨栈并发证据成立）" : "同一个执行者（该判据将记 SKIP）"}`);
+
 function raceAlive(label, rs) {
   check(rs.every((x) => x.status !== 0), `${label}：两栈都活着`, hist(rs));
-  check(rs.filter((x) => x.java).length >= 2 && rs.filter((x) => !x.java).length >= 1,
-    `${label}：确实两栈各答了一半`, `Java ${rs.filter((x) => x.java).length}/${rs.length}`);
+  // "各答了一半"验的是**出处**：并发必须来自两个进程，才排除了"同一进程一把锁顺手兜住"
+  // 这种假绿。NODE 侧整前缀切走后这条没有宾语了，如实 SKIP（详见 gate-executor.mjs）。
+  if (CROSS_STACK) {
+    check(rs.filter((x) => x.java).length >= 2 && rs.filter((x) => !x.java).length >= 1,
+      `${label}：确实两栈各答了一半`, `Java ${rs.filter((x) => x.java).length}/${rs.length}`);
+  } else {
+    skipped(`${label}：确实两栈各答了一半`,
+      `本轮两端点 ${NODE} / ${JAVA} 是同一个执行者（NODE 侧已被整前缀切走），`
+      + "跨实现并发的出处证据不存在；零 500 与关系行数守恒照验");
+  }
   check(!rs.some((x) => x.status >= 500), `${label}：没有一路 500（无死锁、无静默失败）`, hist(rs));
 }
 
@@ -137,7 +159,7 @@ try {
   }
   await conn.end().catch(() => {});
 }
-console.log(`\n合计 ${pass + fail} 项，失败 ${fail} 项`);
+console.log(`\n合计 ${pass + fail} 项，失败 ${fail} 项${skip ? `，跳过 ${skip} 项` : ""}`);
 process.exit(fail ? 1 : 0);
 
 /* ==================== 用例主体 ==================== */

@@ -62,13 +62,14 @@ cp .env.example .env
 | **DATABASE_URL** | `mysql://inkstack:密码@localhost:3306/inkstack` |
 | **NEXT_PUBLIC_SITE_URL** | `https://你的域名`（不填 sitemap/RSS/邮件链接会落 localhost） |
 | **TRUST_PROXY** | **必须设 `1`**（Nginx 反代后限流/审计才能取真实 IP，否则限流可被伪造头绕过） |
+| EDGE_API_LIMIT | Next 边缘那道全站 API 滑窗限流的档位，留空 = 每 IP 每 60 秒 120 次。只有一种情况需要动它：出口共用一个公网 IP 的用户群（公司 NAT / 校园网）被 120 误伤——在这里调高，别去中间件里改常量。跑批量闸门时也可以只对演练实例抬档（`EDGE_API_LIMIT=100000 next dev -p 3400`），对照实例照旧 120，闸门才能同时验"档位生效"与"默认没被拆" |
 | **SESSION_SECRET** | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | SMTP_* | 生产强烈建议配（注册/重置/2FA 邮箱恢复依赖；漏配时生产不会回显验证码，但用户收不到信） |
 | GITEE/GITHUB_CLIENT_* | OAuth 回调统一填 `https://你的域名/api/auth/<厂商>/callback` |
 | AGENT_SERVICE_URL | 外部智能体服务的兼容转发地址，P6c 起仓库里已无对应实现，**自己没另起服务就留空**（空 + `AGENT_ENGINE=spring-ai` 才用内置引擎；开引擎前这里必须是空串，转发通道优先级会压住它） |
 | AGENT_ENGINE / AGENT_MODEL_* | 内置智能体引擎开关与 OpenAI 兼容端点（`AGENT_MODEL_BASE_URL/API_KEY/NAME`，默认回落 `DEEPSEEK_*`）。只有 Java 侧有引擎，开了就要把 `/api/ai`、`/api/agent` 整前缀切给 Java |
 | INKSTACK_SCHEMA_AUTO | 默认 `true`：Java 启动时自动建表/加列。DB 用户没有 DDL 权限时设 `false`，改为手工导 schema |
-| JAVA_BASE / JAVA_ROUTES | 本手册（只跑 Next）**两个都留空**。留空 = 页面渲染 `lib/demo-data.ts` 的演示数据：界面完整、能跑通，但读不到你库里的真文章。`JAVA_ROUTES` 切的是 HTTP 接口，`JAVA_BASE` 决定页面取数——非空就等于页面只问 Java，填了地址却不起 Java 进程会让每个页面 500（P7e′ 起页面没有第二条取数路，也不会静默回落）。要上 Java 后端见 README 的切流一节 |
+| JAVA_BASE / JAVA_ROUTES | 本手册（只跑 Next）**两个都留空**。留空 = 页面渲染 `lib/demo-data.ts` 的演示数据：界面完整、能跑通，但读不到你库里的真文章。`JAVA_ROUTES` 切的是 HTTP 接口，`JAVA_BASE` 决定页面取数——非空就等于页面只问 Java，填了地址却不起 Java 进程会让每个页面 500（P7e′ 起页面没有第二条取数路，也不会静默回落）。已经全部移植完，所以生产要上 Java 就直接写 `JAVA_ROUTES=/api`（58 个 URL 模式整前缀切，机器算的：`node scripts/route-inventory.mjs`）；留一份 Node 兜底才用逗号列前缀。注意切到 `/api` 之后跨栈差分的闸门（1/2/3/3′/17）会拒绝起跑——两侧是同一个执行者时"对拍全绿"不说明任何事，这是设计不是故障 |
 
 ```bash
 npm run build

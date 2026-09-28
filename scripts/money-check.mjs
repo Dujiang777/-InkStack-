@@ -9,12 +9,16 @@
 //
 // 前提：两栈都已启动（Node 3200 / Java 3101），且 DATABASE_URL 指向**克隆库** inkstack_j。
 // 本脚本会真扣真加真删，绝不在生产库上跑；中途抛错也会走 finally 清场。
+//   整前缀切流演练（PARITY_NODE 指向 JAVA_ROUTES=/api 的实例）时，六处
+//   「并发：确实两栈各答了一半」会记 SKIP——两端点是同一个执行者，出处前提没了。
+//   同一身份的六路并发照样打，所以"只一路成交、败者落进既定分支、零 500"全部照跑。
 //
 // 探针账号取 INK_PROBE_EMAIL：它不持有任何文章/专栏，解锁·打赏·打包的"作者本人"负分支
 // 因此不会误命中，清场时按水位删净即可，不碰别人（writer/联调员）的对拍基线。
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { isCrossStack } from "./gate-executor.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const env = Object.fromEntries(
@@ -38,6 +42,7 @@ const UNLOCK_SHARE = 0.7;
 
 let pass = 0;
 let fail = 0;
+let skip = 0;
 function check(cond, label, detail) {
   const text = typeof detail === "function" ? detail()
     : typeof detail === "string" ? detail : (detail === undefined ? "" : JSON.stringify(detail));
@@ -49,6 +54,11 @@ function check(cond, label, detail) {
     console.log(`FAIL  ${label}  — ${text || "（无细节）"}`);
   }
   return !!cond;
+}
+/** 前提不成立的判据：如实记 SKIP。把"没测到"报成 PASS 是闸门最坏的一种错。 */
+function skipped(label, why) {
+  skip++;
+  console.log(`SKIP  ${label}  — ${why}`);
 }
 
 const mysql = createRequire(import.meta.url)("mysql2/promise");
@@ -99,11 +109,28 @@ const won = (rs) => rs.filter((x) => x.status === 200 && x.json?.ok === true && 
 const idempotent = (rs) => rs.filter((x) => x.status === 200 && x.json?.already === true);
 const withStatus = (rs, s) => rs.filter((x) => x.status === s);
 
-/** 并发链路的通用断言：只一路成交，其余全部落进既定分支，一路 500 都不该有。 */
+/** 起跑前问一次：这一对端点背后是不是两个执行者。探一次就够，raceShape 要复用。 */
+const CROSS_STACK = await isCrossStack(NODE, JAVA);
+console.log(`并发出处判据：${NODE} / ${JAVA} → ${CROSS_STACK ? "两套实现（跨栈并发证据成立）" : "同一个执行者（该判据将记 SKIP）"}`);
+
+/**
+ * 并发链路的通用断言：只一路成交，其余全部落进既定分支，一路 500 都不该有。
+ *
+ * 其中"确实两栈各答了一半"断的不是账务而是**出处**：六路并发必须真的来自两个进程、
+ * 两条连接池，否则"只一路成交"可能只是同一进程里一把锁的功劳——那样 MySQL 的行锁
+ * 有没有写对根本没人验过。整前缀切流之后 PARITY_NODE 也是 Java，这条判据的对象随之
+ * 消失，所以降成 SKIP 而不是硬凑一个绿。
+ */
 function raceShape(label, rs, losers) {
   check(rs.every((x) => x.status !== 0), `${label}：两栈都活着`, hist(rs));
-  check(rs.filter((x) => x.java).length >= 2 && rs.filter((x) => !x.java).length >= 1,
-    `${label}：确实两栈各答了一半`, `Java ${rs.filter((x) => x.java).length}/${rs.length}`);
+  if (CROSS_STACK) {
+    check(rs.filter((x) => x.java).length >= 2 && rs.filter((x) => !x.java).length >= 1,
+      `${label}：确实两栈各答了一半`, `Java ${rs.filter((x) => x.java).length}/${rs.length}`);
+  } else {
+    skipped(`${label}：确实两栈各答了一半`,
+      `本轮两端点 ${NODE} / ${JAVA} 是同一个执行者（NODE 侧已被整前缀切走），`
+      + "跨实现并发的出处证据不存在；其余判据照跑，单栈仍验「只一路成交、败者落进既定分支」");
+  }
   check(!rs.some((x) => x.status >= 500), `${label}：没有一路 500（无死锁、无静默失败）`, hist(rs));
   check(won(rs).length === 1, `${label}：只有一路真成交`, `${won(rs).length} 路成交 / ${hist(rs)}`);
   check(losers(rs).length === rs.length - 1, `${label}：败者全落进既定分支`, hist(rs));
@@ -152,7 +179,7 @@ try {
   }
   await conn.end().catch(() => {});
 }
-console.log(`\n合计 ${pass + fail} 项，失败 ${fail} 项`);
+console.log(`\n合计 ${pass + fail} 项，失败 ${fail} 项${skip ? `，跳过 ${skip} 项` : ""}`);
 process.exit(fail ? 1 : 0);
 
 /* ==================== 用例主体 ==================== */
