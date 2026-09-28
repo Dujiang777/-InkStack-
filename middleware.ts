@@ -3,6 +3,7 @@
 // 2) CSRF 防线：写操作（POST/PUT/PATCH/DELETE）校验 Origin 与 Host 同源
 // 3) 全站 API 限流：每 IP 120 次/分钟（防爬/防滥用第一道闸；登录等敏感接口另有更严的专项限流）
 import { NextResponse, type NextRequest } from "next/server";
+import { javaDataSource } from "./lib/data-mode";
 
 function securityHeaders(): Record<string, string> {
   const isDev = process.env.NODE_ENV !== "production";
@@ -133,6 +134,10 @@ export function middleware(req: NextRequest) {
   }
 
   const res = NextResponse.next();
+  // 页面取数走哪一路，得能从外面看见。P7d 把 DATA_VIA_JAVA 的默认从"关"翻成"配了 JAVA_BASE 就开"，
+  // 于是"这一台实例到底走哪条路"变成一个会随环境悄悄改掉的事实——双轨对拍最怕的就是
+  // 自以为在比两条路、实际在比同一条。这里与 lib/java-source 读同一个判据，报的就是页面真会走的路。
+  res.headers.set("x-data-source", javaDataSource() ? "java" : "node");
   if (routedToJava(pathname)) {
     const target = new URL(pathname + req.nextUrl.search, javaBase);
     // 把浏览器看到的 host/proto 显式传给 Java：Next 的 rewrite 会把请求的 Host 换成后端地址，
@@ -144,6 +149,10 @@ export function middleware(req: NextRequest) {
     forwarded.set("x-forwarded-proto", req.nextUrl.protocol.replace(/:$/, ""));
     const proxied = NextResponse.rewrite(target, { request: { headers: forwarded } });
     for (const [k, v] of Object.entries(securityHeaders())) proxied.headers.set(k, v);
+    // 切到 Java 的应答也要带这个头：它报的是**本 Next 进程**的页面取数模式，与 x-backend
+    // （这一发接口由谁应答）是两件事。只在不切的那条分支上设，会让"没头"同时意味着
+    // "走了 Java 接口"和"这台实例没这个信息"，读的人分不清。
+    proxied.headers.set("x-data-source", javaDataSource() ? "java" : "node");
     return proxied;
   }
   for (const [k, v] of Object.entries(securityHeaders())) {

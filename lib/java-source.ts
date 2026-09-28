@@ -13,6 +13,7 @@
 //    伪装成"站点正常"，而 listArticles 原有的 catch-降级-to-demo 正是这个坑。
 import { cache } from "react";
 import { cookies } from "next/headers";
+import { javaDataSource } from "./data-mode";
 import type {
   ArticleRow, ArticleSeriesNav, ArticleTipRow, AuthorArticleStat, AuthorProfile, BookmarkRow, CommentRow,
   FollowPeer, FollowStats, FootprintArticle, FunnelRow, HistoryRow, MyArticleRow, MyCommentRow, MySeries,
@@ -28,13 +29,8 @@ function javaBase(): string {
   return base;
 }
 
-/** 已分流到 Java 的函数名；`*` 表示全部已移植的都走 Java，空值表示一律走 Node。 */
-export function viaJava(fn: string): boolean {
-  const raw = (process.env.DATA_VIA_JAVA ?? "").trim();
-  if (!raw) return false;
-  if (raw === "*") return true;
-  return raw.split(",").map((s) => s.trim()).filter(Boolean).includes(fn);
-}
+/** 判据本体在 lib/data-mode.ts（中间件与这里必须读同一份实现，否则报出来的数据来源会与实际不符）。 */
+export const viaJava = (fn: string): boolean => javaDataSource(fn);
 
 /**
  * 返回可直接用作 Cookie 请求头的字符串（`ink_session=<value>`），游客为空串。

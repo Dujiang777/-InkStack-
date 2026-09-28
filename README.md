@@ -36,6 +36,7 @@
 | P7a | 解除 `/api/series` 的跨栈语义冲突，整前缀切流 | ✅ | 书房闸门 **117/117**（新增 17 项：三条 URL 逐个逐字节对拍，含 `limit`/`author` 的 11 种取值与 6 种 id 形态）、切流代理 **56/56**（原来那条"必须仍在 Node"的反向断言翻成正向：前缀下每个 URL 每个方法都要带 `x-backend`）；闸门 8 现算出的最长可切前缀已经是 **`/api`**（Node 58 个 URL 模式全部被 Java 覆盖、方法集合零差异、语义冲突登记表已空） |
 | P7b | 建库收进 Java 进程（`SchemaBootstrap`），Node 侧懒建表/加列从此有了对等物 | ✅ | 建库闸门 **15/15**（P7c 之后这道涨到 18 项）：对着三个空临时库真起 `spring-boot:run`，建出来的表/列/类型/可空性/默认值/索引/外键与「手工应用 `db/schema.sql`」逐条一致，并覆盖运行库每一张表；0 用户 0 文章（建库不越界造演示数据）；同库再起一次表数列数一条不变（幂等）；`INKSTACK_SCHEMA_AUTO=false` 时一张表都不建、接口确实应不上 |
 | P7c | 删掉 Node 侧全部懒建表/加列，DDL 归属收进一处 | ✅ | web 层（`lib` / `app` / `components` / `middleware`）现在**一条 DDL 都没有**，9 个 `ensure*` 与 41 处调用点清零；这条归属由闸门 16 §0 静态钉住（连注释里藏着建表 SQL 都算红）。行为回归：认证 25/25、书房 117/117、社区 108/108、资金 100/100 |
+| P7d | 页面取数默认走 Java（`DATA_VIA_JAVA` 留空即跟着 `JAVA_BASE` 启用） | ✅ | 20 页 × 4 身份 **80/80 逐字一致**（游客 20/20 + test/writer/probe 各 20/20），付费墙 4/4、检索防泄漏 4/4、跨栈互通 8/8、切流代理 56/56、接口对拍全绿；`x-data-source` 头报出真实取数路径，闸门开跑先钉"两侧确实是两条路"，否则直接停 |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -211,6 +212,19 @@
   （§0：web 层不许出现 DDL，藏在注释里也算红）。代价写进 DEPLOY.md 并说清楚：
   **只跑 Next、不起 Java 的部署从此必须先手工导一次 schema**，否则表现不是报错，
   是登录、发文、打赏这些接口一个个 500——比缺表更糟的是它看起来像"应用挂了"。
+- **改默认值等于改所有没写下来的配置，所以"怎么发现改坏了"要一起交付**（P7d）：
+  `DATA_VIA_JAVA` 以前留空就是"页面仍走 Node SQL"，于是"配了 `JAVA_BASE` 却忘了设开关"会
+  静默留在旧路上——站点看起来完全正常，而 Java 的读路径一行没走过，真切上去那天才第一次见光。
+  翻成"配了就开"之后冒出一个新问题，而且更阴：**两台对拍实例会自己变成同一条路**，
+  页面双轨能比出满屏全绿，比的却是 Java 和 Java。所以这个阶段的产物不是那个默认值，
+  而是让闸门能自证在比两条路——middleware 每个应答都报 `x-data-source: node|java`
+  （与页面取数读同一个 `lib/data-mode.ts`，避免"报的路"和"走的路"不是一回事），
+  对拍类闸门开跑先读它，不是一边 node、一边 java 就直接停。
+- **随机页不能拿"逐字一致"当判据，但也不能因此跳过**：`/random`（漫游记）每次抽不同文章，
+  第一次全量跑就因为它红了。跳过等于把这一页从闸门里删掉。现在改成抽 10 次验三件事——
+  必须 307 落到一篇文章；抽到的每一篇都要在该栈自己的公开列表里（随机池漏进草稿或未过审
+  文章时，页面照样是一篇像样的文章，只有回查列表看得见）；10 次里必须出现过不止一篇
+  （`ORDER BY RAND()` 要是写丢了，每次都是同一篇，前两条照样全绿，只有这条抓得住）。
 
 双轨期的一个已知缺口（不是 bug，是还没并到一起的状态）：**登录 / 改密的失败计数是各进程自己记的**
 ——Node 的 `lib/rate-limit.ts` 用一个 `Map`，Java 的 `LoginGuard` 另用一个 `Map`，同一账号在
@@ -231,7 +245,9 @@ P7 把它连同边缘限流一起搬到共享存储（Redis 或库表）。
 页面侧（Server Component 进程内取数，不经 HTTP）：`lib/data.ts` 的**只读内容面已全部可分流**
 ——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
 作者主页 / 专栏架 / 专栏落地页 / 周报计数 / 漫游记 / 个人中心六类足迹 / 创作台四组看板，
-由 `DATA_VIA_JAVA` 逐函数控制，默认关闭。
+由 `DATA_VIA_JAVA` 逐函数控制；P7d 之后**留空即"配了 `JAVA_BASE` 就走 Java"**，`DATA_VIA_JAVA=0`
+才是"一律走 Node"（只跑 Next 的人要的就是这个）。当前走哪条路不用猜：每个应答都带
+`x-data-source: node|java`。
 `listHot` / `listRelated` / RSS / sitemap 不单独分流：它们是 `listArticles` 下游的纯 JS 组装，
 上游一切就跟着切，在 Java 里重算只会多出两套排序口径。
 
@@ -310,17 +326,36 @@ node scripts/search-leak-probe.mjs bo-20260911-1
 # 4) 页面级双轨：接口对拍管不到 Server Component 的进程内取数，
 #    所以再起一个 dev 实例（须独立 distDir，否则两者互冲 manifest），
 #    比较两种取数下读者真正看到的可见文本 / 链接序列 / 结构计数。
-#    两条铁律：
+#    四条铁律：
 #    · 两侧都 500 会被显式判负——共同失败不是"一致"。
 #    · **必须带 --login 逐个身份跑**。游客态下"Cookie 转发出错"和"Java 正常应答"
 #      渲染结果完全相同，闸门会替 bug 背书：本项目真实踩过一次把
 #      cookies().get().value（只有值）当 Cookie 头发给 Java，Java 认不出会话就把
 #      作者本人和已购买者一律降级成游客付费墙，24 个页面里只有带身份的 18 个能看出来。
-NEXT_DIST_DIR=.next-java DATA_VIA_JAVA='*' \
-  node node_modules/next/dist/bin/next dev -p 3300 &
-PAGES="/ /article/bo-20260911-1 /article/nei-rong-chuang-zuo-ai-shi-yong-shou-ce /author/9 /me /study"
+#    · P7d 之后参照实例要**显式** DATA_VIA_JAVA=0：留空就等于跟着 JAVA_BASE 走 Java，
+#      那样两台实例是同一条路，闸门会比出满屏全绿而什么都没验证。它现在自己会查——
+#      开跑先读两侧应答里的 x-data-source，不是"一边 node、一边 java"就直接停。
+#    · `/random`（漫游记）每次抽不同文章，逐字与条数都不是判据；改成抽 10 次验三件事：
+#      必须 307 到一篇文章、抽到的每篇都要在该栈自己的公开列表里（随机池漏进草稿/未过审
+#      只有回查列表看得见）、且 10 次里必须出现过不止一篇（ORDER BY RAND() 写丢每次同一篇）。
+NEXT_DIST_DIR=.next-ref  DATA_VIA_JAVA=0 node node_modules/next/dist/bin/next dev -p 3200 &
+NEXT_DIST_DIR=.next-java DATA_VIA_JAVA='*' node node_modules/next/dist/bin/next dev -p 3300 &
+PAGES="/ /hot /archive /article/bo-20260911-1 /article/shou-xie-promise /author/9 /author/5 \
+/tag/%E5%88%9B%E4%BD%9C /series/1 /series/8 /me /study /studio /points /notifications /weekly \
+/random /search?q=AI"                                  # 20 页：27 个分流函数全部命中（函数→页面映射见附录）
 node scripts/page-parity.mjs $PAGES                    # 游客
 for ID in test writer probe; do node scripts/page-parity.mjs --login=$ID $PAGES; done
+#    这 20 页为什么够：lib/data.ts 里 27 个 viaJava 分流点逐一对得上——
+#      /            listArticles
+#      /article/*   getArticle · listComments · listArticleTips · getArticleSeriesNav · isBookmarked
+#      /author/*    getAuthor · listAuthorArticles · authorArticleStats · isFollowing · followStats
+#      /tag/*       listByTag          /series  listSeries       /series/*  getSeriesDetail
+#      /search      searchArticles     /random  randomArticleSlug /weekly   listWeekly
+#      /me /study   listMyArticles · listMyBookmarks · listMyComments · listMyFollowers ·
+#                   listMyFollowing · listMyHistory · listMyLikes · listMySeries
+#      /studio      listMyFunnel · listMyUnlockIncome
+#    加一条规矩：**新写一个 viaJava 分流点，就要在这里给它补一个能命中它的页面**，
+#    否则页面双轨会漏掉那条路，而接口对拍管不到进程内取数。
 
 # 5) 跨栈认证流程：验证码与会话必须"一侧签发、另一侧消费"才算互通。
 #    同栈自测永远发现不了哈希口径或时效写岔——只有交叉使用会暴露。
@@ -675,7 +710,8 @@ mvn spring-boot:run                  # http://localhost:3101
 |---|---|
 | `DATABASE_URL` | MySQL 连接串；Java 侧由脚本派生成 JDBC |
 | `SESSION_SECRET` | **两栈必须同值**，否则会话互不认 |
-| `JAVA_BASE` / `JAVA_ROUTES` | 双轨切流开关（见上） |
+| `JAVA_BASE` / `JAVA_ROUTES` | 双轨切流开关（见上）。注意 `JAVA_BASE` 是**两个开关的总闸**：它非空时 HTTP 按 `JAVA_ROUTES` 切，页面取数也默认跟着走 Java |
+| `DATA_VIA_JAVA` | 页面取数（不经 HTTP 的那条路）：`*` 全走 Java、逗号列表逐函数灰度、`0` 一律走 Node；**留空 = 配了 `JAVA_BASE` 就走 Java**（P7d 的默认值翻转）。实际生效值看应答头 `x-data-source: node\|java` |
 | `NEXT_PUBLIC_SITE_URL` | 站点地址；决定会话 Cookie 是否带 `Secure` |
 | `TRUST_PROXY` | 反代后设 `1`，限流与审计才取真实 IP |
 | `AGENT_SERVICE_URL` | 旧的 Python 分身服务地址（P6c 起仓库里已无该服务）。配了它，Java/Node 仍会把问答透传过去——留着是为了兼容既有部署，新部署请用下面的引擎 |
