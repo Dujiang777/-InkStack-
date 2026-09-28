@@ -1,0 +1,63 @@
+{
+  "id": "links-queue",
+  "method": "GET",
+  "path": "/api/links?status=pending",
+  "as": "test",
+  "frozenAt": "2026-09-28T07:47:07.238Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "links": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 3,
+          "item": {
+            "t": "object",
+            "props": {
+              "id": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "domain": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "url": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "note": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "status": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "createdAt": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

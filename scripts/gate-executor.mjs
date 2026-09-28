@@ -34,8 +34,8 @@ export async function executorOf(base) {
   return value;
 }
 
-/** 要求某一站点由 expected 那个执行者应答，否则判死退出。 */
-export async function requireExecutor(base, expected) {
+/** 要求某一站点由 expected 那个执行者应答，否则判死退出。hint 是给"这一跑改用什么"留的指路牌。 */
+export async function requireExecutor(base, expected, hint = "") {
   const actual = await executorOf(base);
   if (actual === expected) return;
   const how = expected === "node"
@@ -44,7 +44,7 @@ export async function requireExecutor(base, expected) {
   console.error(
     `\n站点 ${base} 的接口由 "${actual}" 应答，不是 ${expected}。\n` +
     "  跨栈闸门比的是「同一份数据、两套实现」——两侧一旦是同一个执行者，\n" +
-    "  这一跑全绿也不说明任何事。" + `\n${how}`
+    "  这一跑全绿也不说明任何事。" + `\n${how}` + (hint ? `\n${hint}\n` : "")
   );
   process.exit(1);
 }

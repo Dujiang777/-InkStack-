@@ -1,0 +1,21 @@
+{
+  "id": "article-missing",
+  "method": "GET",
+  "path": "/api/articles/bu-cun-zai-de-slug",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:03.363Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 404,
+  "shape": {
+    "t": "object",
+    "props": {
+      "error": {
+        "req": true,
+        "s": {
+          "t": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "id": "sessions",
+  "method": "GET",
+  "path": "/api/security/sessions",
+  "as": "test",
+  "frozenAt": "2026-09-28T07:47:07.320Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "ok": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "sessions": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 30,
+          "item": {
+            "t": "object",
+            "props": {
+              "id": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "ua": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "ip": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "created_at": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "last_seen_at": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "current": {
+                "req": true,
+                "s": {
+                  "t": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

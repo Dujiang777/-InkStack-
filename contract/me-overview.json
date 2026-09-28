@@ -1,0 +1,99 @@
+{
+  "id": "me-overview",
+  "method": "GET",
+  "path": "/api/me/overview",
+  "as": "writer",
+  "frozenAt": "2026-09-28T07:47:06.054Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "ok": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "following": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 0,
+          "item": null
+        }
+      },
+      "likes": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 0,
+          "item": null
+        }
+      },
+      "comments": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 1,
+          "item": {
+            "t": "object",
+            "props": {
+              "id": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "content": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "createdAt": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "articleSlug": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "articleTitle": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "stats": {
+        "req": true,
+        "s": {
+          "t": "object",
+          "props": {
+            "followers": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "following": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

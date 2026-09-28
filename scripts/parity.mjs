@@ -115,7 +115,10 @@ function walk(a, b, trail) {
 
 // 对拍的前提是"两套实现在比"。Node 那一侧一旦被代理到 Java，这一跑就退化成
 // 拿 Java 比 Java——全绿也不说明任何事，所以先问一次这一发接口到底由谁应答。
-await requireExecutor(opts.node, "node");
+// P7f 删掉 app/api/** 之后这里会**永久**判死，那是正确的：契约的守夜人换班，
+// 接班的是 scripts/contract.mjs check（把形状与恒定值冻结在 contract/ 里，不需要对岸）。
+await requireExecutor(opts.node, "node",
+  "  Node 路由已删除的话，这一道本来就不该跑：改用 node scripts/contract.mjs check");
 
 let nodeCookie; let javaCookie;
 if (opts.login) {

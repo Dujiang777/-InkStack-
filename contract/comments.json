@@ -1,0 +1,99 @@
+{
+  "id": "comments",
+  "method": "GET",
+  "path": "/api/articles/shou-xie-promise/comments",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:03.650Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "comments": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 2,
+          "item": {
+            "t": "object",
+            "props": {
+              "id": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "nickname": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "content": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "createdAt": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "parentId": {
+                "req": true,
+                "s": {
+                  "t": "null"
+                }
+              },
+              "parentAuthor": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "likes": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "viewerLiked": {
+                "req": true,
+                "s": {
+                  "t": "boolean"
+                }
+              },
+              "userId": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "avatarText": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "avatarTone": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "avatarShape": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -8,10 +8,14 @@
 //   · 两栈结果必须逐字段一致。
 //
 //   node scripts/search-leak-probe.mjs <付费文 slug>
+//
+// 前三条判据是**绝对**的（未解锁必须 0 命中、摘录必须 ≤120 字、探针词必须至少被一个身份搜到），
+// 第四条"两栈一致"是**差分**的。P7f 删掉 Node 路由之后第四条没有宾语，所以它记 — 而不是绿；
+// 前三条照跑。用 isCrossStack 现探，而不是硬要求 NODE 侧真是 Node——一道永远拒绝起跑的闸门
+// 等于被删掉，绝对判据会跟着一起失效。
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { requireExecutor } from "./gate-executor.mjs";
+import { isCrossStack } from "./gate-executor.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const env = Object.fromEntries(
@@ -21,8 +25,8 @@ const env = Object.fromEntries(
 // 地址优先级：shell 环境变量 > .env > 默认（与 paywall-probe 同一条规则）。
 const NODE = process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200";
 const JAVA = process.env.PARITY_JAVA || env.PARITY_JAVA || "http://localhost:3101";
-// Node 那侧必须真的还是 Node 在答，否则"两栈一致"是拿 Java 比 Java。
-await requireExecutor(NODE, "node");
+// 两侧执行者不同时才有差分可跑；相同时只剩绝对判据。
+const CROSS = await isCrossStack(NODE, JAVA);
 
 const slug = (process.argv[2] ?? "").replace(/^\/+/, "");
 if (!slug) {
@@ -91,22 +95,23 @@ const CASES = [
 
 let bad = 0;
 let anyMatch = false;
-console.log(`slug=${slug}  探针词=「${word}」  （取自已隐藏的第 7 行之后）\n`);
+// 单栈跑时以 JAVA 为准（Node 路由删掉之后它是活下来的那一侧）。
+const SIDE = CROSS ? NODE : JAVA;
+console.log(`slug=${slug}  探针词=「${word}」  （取自已隐藏的第 7 行之后）`
+  + (CROSS ? "" : "\n对岸不是另一套实现：只跑绝对判据，\"两栈一致\"记 —") + "\n");
 for (const [label, email, password] of CASES) {
-  const ckNode = email ? await cookieOf(NODE, email, password) : null;
-  const ckJava = email ? await cookieOf(JAVA, email, password) : null;
-  const n = await hit(NODE, ckNode, word);
-  const j = await hit(JAVA, ckJava, word);
+  const ckSide = email ? await cookieOf(SIDE, email, password) : null;
+  const n = await hit(SIDE, ckSide, word);
+  const j = CROSS ? await hit(JAVA, email ? await cookieOf(JAVA, email, password) : null, word) : null;
   anyMatch ||= n.matched;
   const problems = [];
-  if (JSON.stringify(n) !== JSON.stringify(j)) problems.push("两栈不一致");
+  if (j !== null && JSON.stringify(n) !== JSON.stringify(j)) problems.push("两栈不一致");
   // 游客对付费文必然无权（无购买记录可言），命中即说明隐藏正文仍被当成检索语料。
   if (label === "游客" && n.matched) problems.push("游客命中了隐藏正文里的词（正文成了可探测的 oracle）");
   if (n.hitChars > 120) problems.push(`摘录超出 120 字窗口：${n.hitChars}`);
   if (problems.length) bad++;
-  console.log(
-    `${problems.length ? "FAIL" : "PASS"}  ${label.padEnd(10)} node=${JSON.stringify(n)} java=${JSON.stringify(j)}`
-  );
+  console.log(`${problems.length ? "FAIL" : "PASS"}  ${label.padEnd(10)} ${CROSS
+    ? `node=${JSON.stringify(n)} java=${JSON.stringify(j)}` : `${SIDE === NODE ? "node" : "java"}=${JSON.stringify(n)}`}`);
   for (const p of problems) console.log(`        · ${p}`);
 }
 // 没有任何身份命中 = 这个词压根搜不到，四条"不命中"全是空话，探针本身失效。

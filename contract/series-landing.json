@@ -1,0 +1,21 @@
+{
+  "id": "series-landing",
+  "method": "GET",
+  "path": "/api/series/999999",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:07.030Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "detail": {
+        "req": true,
+        "s": {
+          "t": "null"
+        }
+      }
+    }
+  }
+}

@@ -40,6 +40,7 @@
 | P7e | 失败计数搬进共享存储：登录 / 改密 / 2FA / 发码共用 MySQL 里的 `rate_hits` | ✅ | 限流闸门 **18/18**（新的一道）：五连失败按 node·java 交替累计且每次剩余次数精确、Java 记满后 Node 侧 429、两栈同一个 `Retry-After`、把行推出窗口才解锁（推 3 分钟仍 429，反证过）、成功登录跨栈清零、`send-code` 的 10 次上限同样共用而这一段一封邮件都没发、`api:*` 桶绝不在账本里（边缘闸故意留在进程内存）。Java 侧另有 5 条单测钉住"先记再判 / 库挂了放行而不是锁死"。回归：书房 **117/117**（其中那条"已知口子：两栈各记各的"翻成了正向证明）、建库 **18/18** |
 | P7e′ | 页面取数只剩 Java：27 个读函数改成一句 remote 调用，Node 读 SQL 整体搬进 `lib/data-legacy.ts` | ✅ | 搬移用 AST 逐字证明：26 个函数与 `HEAD` 版本**一字不差**（只少了分流语句与分流注释），手写的那一个（`listWeekly` 一半是 JS 组装）也只差 `listHot → rankHot` 一处替换。闸门 4 重做成**页面渲染不变量 + 来源证明**（34/34），并反证过：`JAVA_BASE=""` 的实例第一项就红——页面会安静地渲染演示数据，200、有卡片、有正文。回归：对拍 7/7、互通 8/8、付费墙 4/4、检索防泄漏 4/4、路由盘点无缺口、社区 108/108、书房 117/117、限流 18/18、`tsc` 零错。`DATA_VIA_JAVA` / `lib/data-mode.ts` / `x-data-source` 同时退役 |
 | P7f-1 | `/api` 整前缀切流**演练**（还没删路由）：把"只跑 Java 也能自证"这件事先补上 | ✅ | 一台 `JAVA_ROUTES=/api` 的实例上：切流代理 **60/60**（`--keep-render` 档：五个页面/出口仍由 Next 渲染、`/apiXYZ` 没被顺走）＋ AI 面 21/22（1 项如实 SKIP）、创作台 **51/51**、运营台 **65/65**、书房 **117/117**、页面 **34/34**、互通 **8/8**、限流 **18/18**。<br>资金 **94/100** 与社区 **103/108** 那 11 项不是回归：它们断的是"并发真的来自两个进程"，NODE 侧切成 Java 之后这个宾语没了，于是从**假红**改成 **SKIP**（并发照打、只一路成交/败者分支/零 500/关系行数守恒照验），并反证过——同一对判据打真 Node 侧时 100/100、108/108 零 SKIP。对拍/付费墙/检索防泄漏三道则按设计**拒绝起跑**（两侧同一个执行者时"全绿"不说明任何事）。附带把边缘闸的档位做成环境变量 `EDGE_API_LIMIT`（默认仍 120，另一台实例实测照旧 120 后 429），闸门一次上百发不再把自己刷成 429 冒充两栈不一致 |
+| P7f-1b | 契约基线：把"旧实现应答长什么样"冻结进 `contract/`，闸门 1 从此有不依赖对岸的接班人 | ✅ | 30 条基线（Node 冻结 → Java 重放）**30/30**；Node 对自己的基线也 30/30（基线自洽）。反证三条：① 拿作者身份重放游客的付费墙基线 → 红在 `viewerUnlocked`/`md#lines`/`md#chars` 三条钉住的值上；② 手改基线（删一个键、把一个 `string` 改成 `number`）→ 精确报出 `comments.[*].id 现在多出这个键` 与 `comments.[*].nickname 类型 基线=number 现在=string`，复原即绿；③ 付费墙探针打一个不存在的 slug → 四个身份全部"取不到文章!!"、退出码 1（**改版前它打印"截断防线=不适用"然后报"全部通过"**）。同场把闸门 3/3′ 从"对岸不是 Node 就拒绝起跑"改成"绝对判据照跑、差分项记 —" |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -243,6 +244,21 @@
   NODE 侧变成 Java 之后这条既不该判红（不是实现回归）也不该继续判绿（那是给没验过的姿势盖章），
   所以判据前先问一次 `isCrossStack()`，问不出两个执行者就如实 SKIP，其余判据一条不少地照跑。
   反证做过：同一对闸门打真 Node 侧时 100/100、108/108，零 SKIP——降级不是一句永久免检。
+- **"拒绝起跑"看着严谨，用错地方就是亲手删掉一道闸门**（P7f-1b 改的正是这个）：闸门 3/3′
+  原先硬要求 NODE 侧真是 Node，对岸被切走就停。双轨期这是对的——那时差分本该成立。但 P7f 之后
+  Node 永久不在，这道闸门就变成每次运行都拒绝起跑的那一个，而它身上挂着**唯一能判"两侧都错"**
+  的绝对判据（未解锁者正文必须被 SQL 切到 6 行以内）。所以判据要按寿命拆开：绝对的那半一台实例
+  就能判，照跑；差分的那一列没有宾语就记 `—`，别让它把整道闸门带走。
+  反证的时候才发现改版前有个更难看的洞：拿不存在的 slug 跑，四个身份全部 `取不到文章!!`
+  却打印"截断防线=不适用"并报"全部通过"——**共同失败必须显式判负**，这条在闸门 6 早就钉过，
+  漏在了另一道上。
+- **基线要比形状而不是比字节，但"只比形状"守不住付费墙**（P7f-1b 撞出来的）：把应答整段录下来
+  逐字节比，第三天就会红给空气——重力排序的先后、views、相对时间、加热有没有过期，全都随时间变。
+  所以基线收的是键集 / 类型 / 可空性 / 数组元素形状。可这么一来 `viewerUnlocked: false → true`
+  是 bool→bool、正文从 6 行变 11 行是 string→string，**一次裸奔的解密在纯形状比对里恰好是 PASS**。
+  于是那一组字段必须钉值（外加 `#lines` / `#chars` 两个派生取值器，因为"截断到第几行"既不是类型
+  也不是键）。教训：**每加一层放宽，都要回头问一遍"这层放宽会不会正好盖住最贵的那个 bug"**——
+  答案不是一句"值由别的闸门管"，而是把管的闸门跑一次反证给它看。
 - **闸门把自己刷爆的 429，读起来和"两栈不一致"一模一样**（P7f-1 顺带收掉的）：边缘闸每 IP
   120 次/分，而一次资金闸门就有一百多发、全来自同一个回环地址。之前只能靠"连跑隔一分钟"这种
   口头纪律躲，踩过两次才知道红不是代码的问题。现在档位是 `EDGE_API_LIMIT`，只给演练实例抬档，
@@ -344,7 +360,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十七道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十八道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -356,6 +372,25 @@ node scripts/parity.mjs --login /api/auth/me          # 带登录态
 node scripts/parity.mjs "/api/search?q=then" /api/checkin /api/topup/orders
 #   目标必须挑"两栈都挂了同方法"的 URL：打一个 Node 没有 GET 的路径（如 /api/series/{id}）
 #   会得到 node=405 java=200 的假失败——那是切流缺口，该由闸门 8 报，不该由对拍报。
+
+# 1′) 契约基线：闸门 1 的接班人，Node 路由删掉之后仍然在的那道。
+#     contract/ 里每条是一个接口"应答长什么样"的冻结形状，check 拿活应答逐条重放。
+node scripts/contract.mjs freeze            # 从 PARITY_NODE 取样（Node 还在的时候做一次）
+node scripts/contract.mjs check             # 打 PARITY_JAVA 重放
+node scripts/contract.mjs check --as=writer --only=article-paid-guest   # 反证跑法：必须红
+#   为什么不是"把应答录下来逐字节比"：值会随时间变（重力排序的先后、views、相对时间、
+#   加热还在不在有效期），录值的基线会在第三天红给空气。所以基线守的是**形状**——
+#   键集 / 类型 / 可空性 / 数组元素形状 / 嵌套层级，这些才是会被一次重构改坏的东西。
+#   值的正确性归闸门 3/4/7/9/12，那些是回库重算再比对的，本来就比"跟上周的快照自己比"强。
+#   两个例外是刻意钉住的值：套餐表四档（两栈各自硬编码的常量），以及付费墙那一组
+#   viewerUnlocked + md 行数/字数——因为**付费墙失效在形状上完全看不出来**
+#   （bool→bool、string→string），纯形状比对会对一次裸奔的解密说 PASS。
+#   反证跑过三条：拿作者身份重放游客的基线 → 红在三条钉住的值上；把基线里一个键删掉 /
+#   把一个类型改成 number → 红并精确指到 comments.[*].id 与 .nickname；复原即绿。
+#   ⚠ 基线的**出处**记在文件里（frozenFromExecutor）。Node 还在时冻结，它的意思是
+#     "Java 必须符合旧实现的形状"；Node 删了之后再 freeze，意思退化成"Java 必须符合 Java
+#     上次的样子"——仍然有用（防自我回归），但不再是换栈正确的证据，所以 freeze 探到
+#     应答方不是 node 时会先警告。
 
 # 2) 会话互通：两侧各自登录，要求对方后端用自己的完整校验链认下这枚 Cookie
 node scripts/interop-check.mjs
@@ -371,6 +406,11 @@ node scripts/search-leak-probe.mjs bo-20260911-1
 #   检索侧的纵深：拿**只出现在第 7 行之后**的词去搜，未解锁身份必须 0 命中
 #   （否则隐藏正文就是一个可无限探测的 oracle），有权身份必须命中且摘录 ≤120 字。
 #   若所有身份都不命中，探针自己判负——四条"不命中"可能只是空话。
+#   两道都拆成"绝对判据 + 差分之一列"（P7f-1b）：对岸被切走/删除后差分项记 —，绝对判据照跑。
+#   早先它们用 requireExecutor 硬要求 NODE 侧真是 Node，整前缀切流后直接拒绝起跑——那看着
+#   严谨，实则会把唯一能判"两侧都错"的那半也一起废掉：**一道永远拒绝起跑的闸门等于被删掉**。
+#   反证跑过：拿一个不存在的 slug 打付费墙那道，四个身份全部"取不到文章!!"并退出码 1
+#   （改版前它会打印"截断防线=不适用"然后报"全部通过"——文章根本不在，闸门却满意）。
 
 # 4) 页面渲染不变量（P7e′ 改版）：接口对拍管不到 Server Component 的进程内取数，
 #    而页面取数只剩 Java 一条路之后，"两条路互相比对"这个办法本身就失效了。
@@ -693,19 +733,24 @@ PARITY_NODE=http://localhost:3400 node scripts/admin-check.mjs       # 65/65
 PARITY_NODE=http://localhost:3400 node scripts/page-check.mjs        # 34/34
 PARITY_NODE=http://localhost:3400 node scripts/money-check.mjs       # 94 项 + 6 SKIP
 PARITY_NODE=http://localhost:3400 node scripts/community-check.mjs   # 103 项 + 5 SKIP
+PARITY_NODE=http://localhost:3400 node scripts/paywall-probe.mjs bo-20260911-1   # 差分项记 —
+PARITY_NODE=http://localhost:3400 node scripts/search-leak-probe.mjs bo-20260911-1
+node scripts/contract.mjs check --base=http://localhost:3400         # 30/30，与对岸无关
 ```
 
-对拍（1）、付费墙埋点（3）、检索防泄漏（3′）这三道在 3400 上会**直接拒绝起跑**：
+`contract.mjs check` 打谁都是同一句判据——它比的是一条活应答有没有长成基线那个形状，
+所以整前缀切流之后它是唯一还在守读侧契约的一道。
+
+对拍（闸门 1）在 3400 上会**直接拒绝起跑**：
 
 ```
 站点 http://localhost:3400 的接口由 "java" 应答，不是 node。
+  Node 路由已删除的话，这一道本来就不该跑：改用 node scripts/contract.mjs check
 ```
 
-这不是切流切坏了，是它们比的是"同一份数据、两套实现"——两侧同一个执行者时满屏绿字
-不说明任何事。判据在 `scripts/gate-executor.mjs`：拿 Java 自己盖的 `x-backend` 反推
-"这一发到底谁答的"，探不出 Node 就停下。**这一层是 P7f 删路由之前的前置作业**：
-删掉 58 个 `route.ts` 之后差分闸门从此没有对岸，所以"Node 时代的契约"必须先固化成
-可重放的基线（任务 P7f-1b），删除才不是裸奔。
+这不是切流切坏了，是它比的是"同一份数据、两套实现"——两侧同一个执行者时满屏绿字不说明任何事。
+判据在 `scripts/gate-executor.mjs`：拿 Java 自己盖的 `x-backend` 反推"这一发到底谁答的"，
+探不出 Node 就停下。**接班的是闸门 1′**（`contract.mjs check`），见上一节。
 
 `--ai` 那一段要**换一对配置**再跑：AI 面只要落在 live/透传档，一问就扣 5 点墨、就去问真上游，
 所以那个实例必须两侧都在 demo 档（闸门自己会先查 `/api/agent/status`，不是 demo 就记 SKIP 而不是发问）：
@@ -798,10 +843,12 @@ mvn spring-boot:run                  # http://localhost:3101
 │       │                                     #   Node 的取值语义与口径，逐条对齐的落点
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── scripts/                # 十七道闸门（parity / interop / paywall / page-check / auth-flow /
-│                           #   proxy-cutover / money-check / route-inventory / community-check /
-│                           #   studio-check / admin-check / study-check / import-check / ai-check
-│                           #   / agent-engine-check / schema-check / rate-limit-check）
+├── contract/               # 闸门 1′ 的冻结基线：每个接口一份"应答该长成这样"（30 条）
+├── scripts/                # 十八道闸门（parity / contract-check / interop / paywall / page-check
+│                           #   / auth-flow / proxy-cutover / money-check / route-inventory
+│                           #   / community-check / studio-check / admin-check / study-check
+│                           #   / import-check / ai-check / agent-engine-check / schema-check
+│                           #   / rate-limit-check）
 │                           #   + 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```

@@ -1,0 +1,21 @@
+{
+  "id": "drafts-anon",
+  "method": "GET",
+  "path": "/api/drafts?title=x",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:07.107Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 401,
+  "shape": {
+    "t": "object",
+    "props": {
+      "error": {
+        "req": true,
+        "s": {
+          "t": "string"
+        }
+      }
+    }
+  }
+}

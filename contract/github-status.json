@@ -1,0 +1,27 @@
+{
+  "id": "github-status",
+  "method": "GET",
+  "path": "/api/auth/github/status",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:06.596Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "ok": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "enabled": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      }
+    }
+  }
+}

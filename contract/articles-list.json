@@ -1,0 +1,152 @@
+{
+  "id": "articles-list",
+  "method": "GET",
+  "path": "/api/articles",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:02.116Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "articles": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 24,
+          "item": {
+            "t": "object",
+            "props": {
+              "slug": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "title": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "author": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "authorAvatar": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "authorId": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "summary": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "coverLabel": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "tags": {
+                "req": false,
+                "s": {
+                  "t": "array",
+                  "n": 2,
+                  "item": {
+                    "t": "string"
+                  }
+                }
+              },
+              "readCount": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "commentCount": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "agentQaCount": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "publishedAt": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "md": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "likeCount": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "boostUntil": {
+                "req": false,
+                "s": {
+                  "t": "null"
+                }
+              },
+              "tipTotal": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "unlockPrice": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "discountPrice": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "discountUntil": {
+                "req": false,
+                "s": {
+                  "t": "any",
+                  "of": [
+                    "null",
+                    "string"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "optional": [
+    "articles.[*].boostUntil"
+  ]
+}

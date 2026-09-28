@@ -1,0 +1,189 @@
+{
+  "id": "article-paid-guest",
+  "method": "GET",
+  "path": "/api/articles/bo-20260911-1",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:02.572Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "article": {
+        "req": true,
+        "s": {
+          "t": "object",
+          "props": {
+            "slug": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "title": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "author": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "authorAvatar": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "authorTone": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "authorShape": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "summary": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "coverLabel": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "tags": {
+              "req": true,
+              "s": {
+                "t": "array",
+                "n": 2,
+                "item": {
+                  "t": "string"
+                }
+              }
+            },
+            "readCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "commentCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "agentQaCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "publishedAt": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "md": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "authorId": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "likeCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "reviewStatus": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "reviewNote": {
+              "req": true,
+              "s": {
+                "t": "null"
+              }
+            },
+            "viewerLiked": {
+              "req": true,
+              "s": {
+                "t": "boolean"
+              }
+            },
+            "viewerUnlocked": {
+              "req": true,
+              "s": {
+                "t": "boolean"
+              }
+            },
+            "unlockPrice": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "discountPrice": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "discountUntil": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "unlockCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "boostUntil": {
+              "req": true,
+              "s": {
+                "t": "null"
+              }
+            },
+            "tipTotal": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "expect": {
+    "article.unlockPrice": 40,
+    "article.viewerUnlocked": false,
+    "article.md#lines": 6,
+    "article.md#chars": 119
+  }
+}

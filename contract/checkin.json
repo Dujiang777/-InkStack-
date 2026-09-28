@@ -1,0 +1,65 @@
+{
+  "id": "checkin",
+  "method": "GET",
+  "path": "/api/checkin",
+  "as": "writer",
+  "frozenAt": "2026-09-28T07:47:05.334Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "checkedInToday": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "streak": {
+        "req": true,
+        "s": {
+          "t": "number"
+        }
+      },
+      "cycleDay": {
+        "req": true,
+        "s": {
+          "t": "number"
+        }
+      },
+      "reward": {
+        "req": true,
+        "s": {
+          "t": "number"
+        }
+      },
+      "next": {
+        "req": true,
+        "s": {
+          "t": "object",
+          "props": {
+            "days": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "reward": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            }
+          }
+        }
+      },
+      "balance": {
+        "req": true,
+        "s": {
+          "t": "number"
+        }
+      }
+    }
+  }
+}

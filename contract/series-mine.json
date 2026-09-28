@@ -1,0 +1,75 @@
+{
+  "id": "series-mine",
+  "method": "GET",
+  "path": "/api/series/mine",
+  "as": "writer",
+  "frozenAt": "2026-09-28T07:47:06.851Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "ok": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "series": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 2,
+          "item": {
+            "t": "object",
+            "props": {
+              "id": {
+                "req": false,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "title": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "description": {
+                "req": false,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "items": {
+                "req": false,
+                "s": {
+                  "t": "array",
+                  "n": 2,
+                  "item": {
+                    "t": "object",
+                    "props": {
+                      "slug": {
+                        "req": true,
+                        "s": {
+                          "t": "string"
+                        }
+                      },
+                      "title": {
+                        "req": true,
+                        "s": {
+                          "t": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

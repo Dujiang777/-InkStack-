@@ -1,0 +1,131 @@
+{
+  "id": "search-guest",
+  "method": "GET",
+  "path": "/api/search?q=promise",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:03.424Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "ok": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "keyword": {
+        "req": true,
+        "s": {
+          "t": "string"
+        }
+      },
+      "count": {
+        "req": true,
+        "s": {
+          "t": "number"
+        }
+      },
+      "results": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 1,
+          "item": {
+            "t": "object",
+            "props": {
+              "slug": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "title": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "summary": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "author": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "authorId": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "readCount": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "likeCount": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "commentCount": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "publishedAt": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "hit": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "tags": {
+                "req": true,
+                "s": {
+                  "t": "array",
+                  "n": 0,
+                  "item": null
+                }
+              },
+              "unlockPrice": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "discountPrice": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "discountUntil": {
+                "req": true,
+                "s": {
+                  "t": "null"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

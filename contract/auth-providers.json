@@ -1,0 +1,45 @@
+{
+  "id": "auth-providers",
+  "method": "GET",
+  "path": "/api/auth/providers",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:06.496Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "ok": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "github": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "gitee": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      },
+      "qq": {
+        "req": true,
+        "s": {
+          "t": "boolean"
+        }
+      }
+    }
+  },
+  "expect": {
+    "ok": true,
+    "github": false,
+    "gitee": true,
+    "qq": false
+  }
+}

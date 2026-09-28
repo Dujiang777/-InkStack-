@@ -1,0 +1,72 @@
+{
+  "id": "topup-packs",
+  "method": "GET",
+  "path": "/api/topup/orders",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:06.660Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "packs": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 4,
+          "item": {
+            "t": "object",
+            "props": {
+              "key": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "name": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "cents": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "points": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "tag": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "note": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "expect": {
+    "packs.length": 4,
+    "packs[0].key": "starter",
+    "packs[1].key": "standard",
+    "packs[2].key": "pro",
+    "packs[3].key": "studio",
+    "packs[2].points": 6500,
+    "packs[2].cents": 5000
+  }
+}

@@ -1,0 +1,184 @@
+{
+  "id": "article-free",
+  "method": "GET",
+  "path": "/api/articles/shou-xie-promise",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:29.725Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "article": {
+        "req": true,
+        "s": {
+          "t": "object",
+          "props": {
+            "slug": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "title": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "author": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "authorAvatar": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "authorTone": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "authorShape": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "summary": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "coverLabel": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "tags": {
+              "req": true,
+              "s": {
+                "t": "array",
+                "n": 0,
+                "item": null
+              }
+            },
+            "readCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "commentCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "agentQaCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "publishedAt": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "md": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "authorId": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "likeCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "reviewStatus": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "reviewNote": {
+              "req": true,
+              "s": {
+                "t": "null"
+              }
+            },
+            "viewerLiked": {
+              "req": true,
+              "s": {
+                "t": "boolean"
+              }
+            },
+            "viewerUnlocked": {
+              "req": true,
+              "s": {
+                "t": "boolean"
+              }
+            },
+            "unlockPrice": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "discountPrice": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "discountUntil": {
+              "req": true,
+              "s": {
+                "t": "null"
+              }
+            },
+            "unlockCount": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "boostUntil": {
+              "req": true,
+              "s": {
+                "t": "null"
+              }
+            },
+            "tipTotal": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "expect": {
+    "article.unlockPrice": 0
+  }
+}

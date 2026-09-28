@@ -1,0 +1,14 @@
+{
+  "id": "export-md",
+  "method": "GET",
+  "path": "/api/articles/shou-xie-promise/export",
+  "as": "writer",
+  "frozenAt": "2026-09-28T07:47:07.934Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "text",
+    "sample": "---\ntitle: \"手写 Promise：从零实现，到理解事件循环的边界条件\"\nauthor: \"陈屿\"\ndate: \"2026-09-06\"\ntags: []\nsource: \"墨栈 InkStack\"\nurl: \"http://localhost:3200/article/shou-xie-promise\"\nw"
+  }
+}

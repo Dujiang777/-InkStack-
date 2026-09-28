@@ -1,0 +1,75 @@
+{
+  "id": "notifications",
+  "method": "GET",
+  "path": "/api/notifications",
+  "as": "test",
+  "frozenAt": "2026-09-28T07:47:03.927Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "notifications": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 4,
+          "item": {
+            "t": "object",
+            "props": {
+              "id": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "type": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "title": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "body": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "link": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "isRead": {
+                "req": true,
+                "s": {
+                  "t": "boolean"
+                }
+              },
+              "createdAt": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "unread": {
+        "req": true,
+        "s": {
+          "t": "number"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "id": "series-shelf",
+  "method": "GET",
+  "path": "/api/series?limit=6",
+  "as": "guest",
+  "frozenAt": "2026-09-28T07:47:06.727Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "series": {
+        "req": true,
+        "s": {
+          "t": "array",
+          "n": 5,
+          "item": {
+            "t": "object",
+            "props": {
+              "id": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "title": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "description": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "author": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "authorAvatar": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              },
+              "authorId": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "articleCount": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "totalReads": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "soldCount": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "bundlePrice": {
+                "req": true,
+                "s": {
+                  "t": "number"
+                }
+              },
+              "updatedAt": {
+                "req": true,
+                "s": {
+                  "t": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

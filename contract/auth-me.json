@@ -1,0 +1,53 @@
+{
+  "id": "auth-me",
+  "method": "GET",
+  "path": "/api/auth/me",
+  "as": "test",
+  "frozenAt": "2026-09-28T07:47:06.422Z",
+  "frozenFrom": "http://localhost:3200",
+  "frozenFromExecutor": "node",
+  "status": 200,
+  "shape": {
+    "t": "object",
+    "props": {
+      "user": {
+        "req": true,
+        "s": {
+          "t": "object",
+          "props": {
+            "id": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            },
+            "nickname": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "email": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "role": {
+              "req": true,
+              "s": {
+                "t": "string"
+              }
+            },
+            "points": {
+              "req": true,
+              "s": {
+                "t": "number"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
