@@ -2,7 +2,8 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { getPool } from "@/lib/db";
-import { toggleFollow, followStats } from "@/lib/data";
+import { toggleFollow } from "@/lib/data";
+import { followStats } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 import { notify } from "@/lib/notify";
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {

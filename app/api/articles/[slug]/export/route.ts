@@ -2,7 +2,7 @@
 // 版式：规范 YAML frontmatter（值加引号防冒号破坏解析）+ 正文标题/署名行 + 出处页脚
 // 可见性复用 getArticle：pending/rejected 仅作者与管理员可下载；
 // 付费文（unlock_price>0）必须已解锁/作者/管理员，否则 402 防全文泄露（v15.0）
-import { getArticle } from "@/lib/data";
+import { getArticle } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 import { getCurrentUser, isStaff } from "@/lib/auth";
 
 /** JSON 字符串是合法 YAML 标量：防标题里的冒号/引号破坏 frontmatter 解析 */

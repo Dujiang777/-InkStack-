@@ -9,7 +9,7 @@
 //   METHOD:path:'{"json":"body"}' 形式可发写请求（慎用：会真的写库）
 import fs from 'node:fs';
 import path from 'node:path';
-import { dataSourceOf, requireNodeDataSource } from './gate-datasource.mjs';
+import { requireExecutor } from './gate-executor.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const argv = process.argv.slice(2);
@@ -113,9 +113,9 @@ function walk(a, b, trail) {
   diffs.push(`${trail}: node=${JSON.stringify(a)} java=${JSON.stringify(b)}`);
 }
 
-// 对拍的前提是"两套实现在比"。Node 那侧一旦跟着 JAVA_BASE 走 Java 取数，这一跑就退化成
-// 拿 Java 比 Java——全绿也不说明任何事，所以先问一次它自己报的取数路径（见 gate-datasource.mjs）。
-requireNodeDataSource(opts.node, await dataSourceOf(opts.node));
+// 对拍的前提是"两套实现在比"。Node 那一侧一旦被代理到 Java，这一跑就退化成
+// 拿 Java 比 Java——全绿也不说明任何事，所以先问一次这一发接口到底由谁应答。
+await requireExecutor(opts.node, "node");
 
 let nodeCookie; let javaCookie;
 if (opts.login) {

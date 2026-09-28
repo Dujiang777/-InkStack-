@@ -6,7 +6,8 @@ import { getCurrentUser, isStaff } from "@/lib/auth";
 import { getPool, dbEnabled } from "@/lib/db";
 import { notify } from "@/lib/notify";
 import { grantCappedReward } from "@/lib/points";
-import { getArticle, parseDiscount } from "@/lib/data";
+import { parseDiscount } from "@/lib/data";
+import { getArticle } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 
 /**
  * 付费墙判定必须在服务端做完：先按 includeMd:false 取（SQL 层 SUBSTRING_INDEX 只回前 6 行），

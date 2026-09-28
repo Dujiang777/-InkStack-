@@ -2,7 +2,7 @@
 // v17.2：传入当前用户，付费墙在 searchArticles 内生效——
 //        未解锁的付费文不参与正文检索、也不回传正文摘录（防匿名拖取付费内容）
 import { NextResponse } from "next/server";
-import { searchArticles } from "@/lib/data";
+import { searchArticles } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 import { getCurrentUser } from "@/lib/auth";
 
 export async function GET(req: Request) {

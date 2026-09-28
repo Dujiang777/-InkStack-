@@ -1,14 +1,25 @@
-// 统一数据访问层：优先读 MySQL，连接失败或未配置时自动降级为演示数据
-// 这样个人开发者可以先把界面跑起来，再接数据库
+// 页面取数层：配了 JAVA_BASE 就只有一条路——问 Java；没配就只用内置演示数据。
+//
+// P7e′ 之前这里每个读函数开头都有一句 `if (viaJava("x"))` 的分流，Node 侧还留着一份 SQL 实现。
+// 那份实现现在整体住在 lib/data-legacy.ts，**只有 app/api/** 的遗留路由在用**，页面不再读它。
+// 于是"同一个页面在两栈各算一遍"这件事从可选变成不可能：页面级只剩"渲染必须长成什么样"的
+// 断言可写（scripts/page-check.mjs，闸门 4），README 的闸门 4 一节写了为什么这不是退步。
+//
+// 分流删掉之后剩下的这个二选一必须钉死方向：
+//   · JAVA_BASE 没配 → 演示数据。这是"clone 下来先跑起来看界面"的产品承诺，不是故障。
+//   · JAVA_BASE 配了但调用失败 → **抛出**，页面 500。绝不静默回落。
+// 回落会把"Java 挂了"伪装成"站点正常"，而 listArticles 的 SQL 路径当年 catch 降级成 demo
+// 正是这个坑（页面 200、数据是假的、日志里什么都没有）。
 import { getPool } from "./db";
 import { demoArticles, demoComments, type DemoArticle, type DemoComment } from "./demo-data";
 import {
+  javaReady,
   remoteAuthorArticleStats, remoteFollowStats, remoteGetArticle, remoteGetAuthor, remoteIsBookmarked,
   remoteIsFollowing, remoteListArticleTips, remoteListArticles, remoteListAuthorArticles, remoteListByTag,
   remoteListComments, remoteListSeries, remoteMyArticles, remoteMyBookmarks, remoteMyComments,
   remoteMyFollowers, remoteMyFollowing, remoteMyFunnel, remoteMyHistory, remoteMyLikes, remoteMySeries,
   remoteMyUnlockIncome, remoteRandomSlug, remoteSearchArticles, remoteSeriesDetail, remoteSeriesNav,
-  remoteWeeklyStats, viaJava,
+  remoteWeeklyStats,
 } from "./java-source";
 
 /* ---------- 数据库可重试错误（v18.0） ----------
@@ -72,7 +83,7 @@ export type ArticleRow = {
  *  v17.1 修复：老库存在 published_at 为 NULL 的已发布文章（迁移导入时源站无日期），
  *  原先 String(null) 会得到字符串 "null"，下游 new Date("null").toISOString() 直接抛
  *  RangeError: Invalid time value —— /sitemap.xml 曾因此整站 500。 */
-function dateOnly(v: unknown): string {
+export function dateOnly(v: unknown): string {
   if (v == null) return "";
   const s = v instanceof Date ? v.toISOString() : String(v);
   return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : "";
@@ -120,139 +131,31 @@ export function parseDiscount(
   return [d, t.toISOString().slice(0, 19).replace("T", " ")];
 }
 
-function demoToRow(a: DemoArticle): ArticleRow {
+export function demoToRow(a: DemoArticle): ArticleRow {
   return { ...a };
 }
 
-export async function listArticles(): Promise<ArticleRow[]> {
-  // 分流走 Java 时异常必须抛出去：下方 SQL 路径的 catch 会降级成 demo 数据，
-  // 若把远程失败也吞进那个 catch，"Java 挂了"就会被伪装成"站点正常"。
-  if (viaJava("listArticles")) return remoteListArticles();
-  const pool = await getPool();
-  if (pool) {
-    try {
-      const [rows] = await pool.query(
-        `SELECT a.slug, a.title, u.nickname AS author, u.avatar_text AS authorAvatar,
-                a.author_id AS authorId,
-                a.summary, IFNULL(a.cover_label,'') AS coverLabel, a.tags,
-                a.read_count AS readCount, a.comment_count AS commentCount,
-                a.agent_qa_count AS agentQaCount, a.like_count AS likeCount,
-                DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
-                (SELECT MAX(b.boost_until) FROM article_boosts b
-                  WHERE b.article_id = a.id AND b.boost_until > NOW()) AS boostUntil,
-                (SELECT IFNULL(SUM(t.amount),0) FROM article_tips t
-                  WHERE t.article_id = a.id) AS tipTotal,
-                IFNULL(a.unlock_price,0) AS unlockPrice,
-                IFNULL(a.discount_price,0) AS discountPrice,
-                a.discount_until AS discountUntil
-         FROM articles a JOIN users u ON u.id = a.author_id
-         WHERE a.status = 'published' AND a.review_status = 'approved'
-         ORDER BY
-           a.pinned DESC,
-           /* 加热中的文章仅次于运营置顶，压过自然重力排序 */
-           EXISTS(SELECT 1 FROM article_boosts b
-                  WHERE b.article_id = a.id AND b.boost_until > NOW()) DESC,
-           /* 重力排序（HN 式）：互动热度 / 时间衰减^1.2，把「新鲜 + 有讨论」的文章顶上来 */
-           /* v15.2：GREATEST 钳制底数 ≥ 1——published_at 晚于 NOW() 时幂运算为负会导致整条 SQL 报错（ER_DATA_OUT_OF_RANGE），首页曾因此整页降级到 demo 数据 */
-           (LOG10(a.read_count + a.comment_count * 5 + a.agent_qa_count * 10 + 10))
-           / POWER(GREATEST(TIMESTAMPDIFF(HOUR, a.published_at, NOW()) + 2, 1), 1.2)
-         DESC LIMIT 50`
-      );
-      if (Array.isArray(rows) && rows.length > 0) {
-        return (rows as Record<string, unknown>[]).map((r) => ({
-          slug: String(r.slug),
-          title: String(r.title),
-          author: String(r.author),
-          authorAvatar: String(r.authorAvatar),
-          authorId: r.authorId ? Number(r.authorId) : undefined,
-          summary: String(r.summary ?? ""),
-          coverLabel: String(r.coverLabel ?? ""),
-          tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
-          readCount: Number(r.readCount),
-          commentCount: Number(r.commentCount),
-          agentQaCount: Number(r.agentQaCount),
-          publishedAt: dateOnly(r.publishedAt),
-          md: "",
-          likeCount: Number(r.likeCount ?? 0),
-          boostUntil: r.boostUntil ? new Date(r.boostUntil as string).toISOString() : null,
-          tipTotal: Number(r.tipTotal ?? 0),
-          unlockPrice: Number(r.unlockPrice ?? 0),
-          discountPrice: Number(r.discountPrice ?? 0),
-          discountUntil: r.discountUntil ? new Date(r.discountUntil as string).toISOString() : null,
-        }));
-      }
-    } catch {
-      // 数据库不可用 → 降级
-    }
-  }
-  return demoArticles.map(demoToRow).sort((a, b) => gravity(b) - gravity(a));
+export async function listArticles(): Promise<ArticleRow[]>  {
+  if (!javaReady()) return demoArticles.map(demoToRow).sort((a, b) => gravity(b) - gravity(a));
+  return remoteListArticles();
 }
 
 /* ---------- 标签聚合页：/tag/[tag] ---------- */
 
-export async function listByTag(tag: string, limit = 50): Promise<ArticleRow[]> {
-  if (viaJava("listByTag")) return remoteListByTag(tag, limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, u.nickname AS author, u.avatar_text AS authorAvatar,
-              a.author_id AS authorId,
-              a.summary, IFNULL(a.cover_label,'') AS coverLabel, a.tags,
-              a.read_count AS readCount, a.comment_count AS commentCount,
-              a.agent_qa_count AS agentQaCount, a.like_count AS likeCount,
-              DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
-              (SELECT IFNULL(SUM(t.amount),0) FROM article_tips t
-                WHERE t.article_id = a.id) AS tipTotal
-       FROM articles a JOIN users u ON u.id = a.author_id
-       WHERE a.status = 'published' AND a.review_status = 'approved'
-         AND JSON_CONTAINS(a.tags, ?)
-       ORDER BY a.published_at DESC LIMIT ?`,
-      [`"${tag.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`, limit]
-    );
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      author: String(r.author),
-      authorAvatar: String(r.authorAvatar),
-      authorId: r.authorId ? Number(r.authorId) : undefined,
-      summary: String(r.summary ?? ""),
-      coverLabel: String(r.coverLabel ?? ""),
-      tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
-      readCount: Number(r.readCount),
-      commentCount: Number(r.commentCount),
-      agentQaCount: Number(r.agentQaCount),
-      publishedAt: dateOnly(r.publishedAt),
-      md: "",
-      likeCount: Number(r.likeCount ?? 0),
-      tipTotal: Number(r.tipTotal ?? 0),
-    }));
-  } catch {
-    return [];
-  }
+export async function listByTag(tag: string, limit = 50): Promise<ArticleRow[]>  {
+  if (!javaReady()) return [];
+  return remoteListByTag(tag, limit);
 }
 
 /** 漫游记：随机取一篇公开且过审文章的 slug；无候选或库不可用时返回 null，页面据此回首页。
  *  原先这条 SQL 直接写在 app/random/page.tsx 里，P3 收进数据层才能整体分流。 */
-export async function randomArticleSlug(exclude = ""): Promise<string | null> {
-  if (viaJava("randomArticleSlug")) return remoteRandomSlug(exclude);
-  const pool = await getPool();
-  if (!pool) return null;
-  try {
-    const [rows] = await pool.query(
-      `SELECT slug FROM articles
-       WHERE status = 'published' AND review_status = 'approved' AND slug != ?
-       ORDER BY RAND() LIMIT 1`,
-      [exclude.trim()]
-    );
-    return (rows as { slug?: string }[])[0]?.slug ?? null;
-  } catch {
-    return null;
-  }
+export async function randomArticleSlug(exclude = ""): Promise<string | null>  {
+  if (!javaReady()) return null;
+  return remoteRandomSlug(exclude);
 }
 
 // 演示模式下的重力排序（与 DB SQL 同一公式）
-function gravity(a: { readCount: number; commentCount: number; agentQaCount: number; publishedAt: string }): number {
+export function gravity(a: { readCount: number; commentCount: number; agentQaCount: number; publishedAt: string }): number {
   const hours = Math.max(0, (Date.now() - new Date(a.publishedAt + "T08:00:00+08:00").getTime()) / 3.6e6);
   return (
     Math.log10(a.readCount + a.commentCount * 5 + a.agentQaCount * 10 + 10) /
@@ -267,82 +170,9 @@ export async function getArticle(
   slug: string,
   viewer?: { id?: number | null; privileged?: boolean },
   opts?: { includeMd?: boolean }
-): Promise<ArticleRow | null> {
-  // 分流到 Java 时 viewer / opts 不再参与：Java 按转发过去的 ink_session 自行判定身份，
-  // 付费墙与审核可见性都在服务端一次判清（详见 lib/java-source.ts 的合并说明）。
-  if (viaJava("getArticle")) return remoteGetArticle(slug);
-  const pool = await getPool();
-  const viewerId = viewer?.id ?? null;
-  const privileged = Boolean(viewer?.privileged);
-  // includeMd=false：只回正文前 6 行（付费墙试读即止），杜绝全文经任何通道（含 dev 调试流）外泄
-  const includeMd = opts?.includeMd !== false;
-  if (pool) {
-    try {
-      const [rows] = await pool.query(
-        `SELECT a.slug, a.title, u.nickname AS author, u.avatar_text AS authorAvatar,
-                COALESCE(u.avatar_tone,'') AS authorTone, COALESCE(u.avatar_shape,'') AS authorShape,
-                a.author_id AS authorId, a.review_status AS reviewStatus, a.review_note AS reviewNote,
-                a.summary, IFNULL(a.cover_label,'') AS coverLabel, a.tags,
-                a.read_count AS readCount, a.comment_count AS commentCount,
-                a.agent_qa_count AS agentQaCount, a.like_count AS likeCount,
-                ${includeMd ? "a.md_content AS md" : "SUBSTRING_INDEX(a.md_content, '\\n', 6) AS md"},
-                IFNULL(a.unlock_price,0) AS unlockPrice,
-                IFNULL(a.discount_price,0) AS discountPrice,
-                a.discount_until AS discountUntil,
-                (SELECT COUNT(*) FROM article_purchases pc WHERE pc.article_id = a.id) AS unlockCount,
-                DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
-                (SELECT MAX(b.boost_until) FROM article_boosts b
-                  WHERE b.article_id = a.id AND b.boost_until > NOW()) AS boostUntil,
-                (SELECT IFNULL(SUM(t.amount),0) FROM article_tips t
-                  WHERE t.article_id = a.id) AS tipTotal,
-                ${viewerId ? "EXISTS(SELECT 1 FROM article_likes l WHERE l.article_id = a.id AND l.user_id = ?)" : "FALSE"} AS viewerLiked,
-                ${viewerId ? `IF(a.author_id = ? OR ?, TRUE, EXISTS(SELECT 1 FROM article_purchases p WHERE p.article_id = a.id AND p.user_id = ?))` : "FALSE"} AS viewerUnlocked
-         FROM articles a JOIN users u ON u.id = a.author_id
-         WHERE a.slug = ? AND a.status = 'published'
-           AND (a.review_status = 'approved'
-                ${viewerId ? "OR a.author_id = ?" : ""}
-                ${privileged ? "OR TRUE" : ""})
-         LIMIT 1`,
-        viewerId ? [viewerId, viewerId, privileged ? 1 : 0, viewerId, slug, viewerId] : [slug]
-      );
-      const r = (rows as Record<string, unknown>[])[0];
-      if (r) {
-        return {
-          slug: String(r.slug),
-          title: String(r.title),
-          author: String(r.author),
-          authorAvatar: String(r.authorAvatar),
-          authorTone: String(r.authorTone ?? ""),
-          authorShape: String(r.authorShape ?? ""),
-          summary: String(r.summary ?? ""),
-          coverLabel: String(r.coverLabel ?? ""),
-          tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
-          readCount: Number(r.readCount),
-          commentCount: Number(r.commentCount),
-          agentQaCount: Number(r.agentQaCount),
-          publishedAt: dateOnly(r.publishedAt),
-          md: String(r.md ?? ""),
-          authorId: Number(r.authorId),
-          likeCount: Number(r.likeCount ?? 0),
-          reviewStatus: (r.reviewStatus as ArticleRow["reviewStatus"]) ?? "approved",
-          reviewNote: r.reviewNote ? String(r.reviewNote) : null,
-          viewerLiked: Number(r.viewerLiked ?? 0) === 1,
-          viewerUnlocked: Number(r.viewerUnlocked ?? 0) === 1,
-          unlockPrice: Number(r.unlockPrice ?? 0),
-          discountPrice: Number(r.discountPrice ?? 0),
-          discountUntil: r.discountUntil ? new Date(r.discountUntil as string).toISOString() : null,
-          unlockCount: Number(r.unlockCount ?? 0),
-          boostUntil: r.boostUntil ? new Date(r.boostUntil as string).toISOString() : null,
-          tipTotal: Number(r.tipTotal ?? 0),
-        };
-      }
-      return null;
-    } catch {
-      // 数据库异常 → 落到下方演示数据兜底
-    }
-  }
-  const all = await listArticles();
-  return all.find((a) => a.slug === slug) ?? null;
+): Promise<ArticleRow | null>  {
+  if (!javaReady()) return (await listArticles()).find((a) => a.slug === slug) ?? null;
+  return remoteGetArticle(slug);
 }
 
 /* ---------- 相关阅读：同标签 > 同作者 > 其余（重力序兜底） ---------- */
@@ -371,31 +201,9 @@ export type ArticleTipRow = {
   createdAt: string;
 };
 
-export async function listArticleTips(slug: string, limit = 6): Promise<ArticleTipRow[]> {
-  if (viaJava("listArticleTips")) return remoteListArticleTips(slug, limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT u.nickname, u.avatar_text, t.amount,
-              DATE_FORMAT(t.created_at, '%m-%d %H:%i') AS createdAt
-       FROM article_tips t
-       JOIN users u ON u.id = t.from_user
-       JOIN articles a ON a.id = t.article_id
-       WHERE a.slug = ?
-       ORDER BY t.created_at DESC
-       LIMIT ?`,
-      [slug, limit]
-    );
-    return (rows as Array<Record<string, unknown>>).map((r) => ({
-      fromName: String(r.nickname),
-      fromAvatar: String(r.avatar_text),
-      amount: Number(r.amount),
-      createdAt: String(r.createdAt),
-    }));
-  } catch {
-    return [];
-  }
+export async function listArticleTips(slug: string, limit = 6): Promise<ArticleTipRow[]>  {
+  if (!javaReady()) return [];
+  return remoteListArticleTips(slug, limit);
 }
 
 /* ============ 我的书房：个人文章管理 ============ */
@@ -425,62 +233,10 @@ export type MyStats = {
 };
 
 /** 书房：我的全部文章（含待审/驳回/下架）+ 汇总数据 */
-export async function listMyArticles(userId: number): Promise<{ rows: MyArticleRow[]; stats: MyStats }> {
-  if (viaJava("listMyArticles")) return remoteMyArticles();
-  const pool = await getPool();
-  if (!pool)
+export async function listMyArticles(userId: number): Promise<{ rows: MyArticleRow[]; stats: MyStats }>  {
+  if (!javaReady())
     return { rows: [], stats: { published: 0, totalReads: 0, totalLikes: 0, tipIncome: 0, totalQa: 0, drafts: 0 } };
-  const [rows] = await pool.query(
-    `SELECT slug, title, status,
-            review_status AS reviewStatus, review_note AS reviewNote,
-            read_count AS readCount, like_count AS likeCount, comment_count AS commentCount,
-            agent_qa_count AS agentQaCount,
-            (SELECT IFNULL(SUM(t.amount),0) FROM article_tips t WHERE t.article_id = a.id) AS tipTotal,
-            (SELECT MAX(b.boost_until) FROM article_boosts b
-              WHERE b.article_id = a.id AND b.boost_until > NOW()) AS boostUntil,
-            DATE_FORMAT(updated_at,'%m-%d %H:%i') AS updatedAt
-     FROM articles a WHERE author_id = ?
-     ORDER BY updated_at DESC LIMIT 100`,
-    [userId]
-  );
-  const [s] = await pool.query(
-    `SELECT
-       COUNT(*) AS published,
-       IFNULL(SUM(read_count),0) AS totalReads,
-       IFNULL(SUM(like_count),0) AS totalLikes,
-       IFNULL(SUM(agent_qa_count),0) AS totalQa,
-       (SELECT COUNT(*) FROM articles WHERE author_id = ? AND status = 'draft') AS drafts,
-       (SELECT IFNULL(SUM(amount),0) FROM article_tips WHERE to_user = ?) AS tipIncome
-     FROM articles WHERE author_id = ? AND status = 'published' AND review_status = 'approved'`,
-    [userId, userId, userId]
-  );
-  const sr = (s as Record<string, unknown>[])[0] ?? {};
-  if (!Array.isArray(rows))
-    return { rows: [], stats: { published: 0, totalReads: 0, totalLikes: 0, tipIncome: 0, totalQa: 0, drafts: 0 } };
-  return {
-    rows: (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      status: String(r.status),
-      reviewStatus: String(r.reviewStatus ?? "approved"),
-      reviewNote: r.reviewNote ? String(r.reviewNote) : null,
-      readCount: Number(r.readCount ?? 0),
-      likeCount: Number(r.likeCount ?? 0),
-      commentCount: Number(r.commentCount ?? 0),
-      agentQaCount: Number(r.agentQaCount ?? 0),
-      tipTotal: Number(r.tipTotal ?? 0),
-      boostUntil: r.boostUntil ? new Date(r.boostUntil as string).toISOString() : null,
-      updatedAt: String(r.updatedAt ?? "—"),
-    })),
-    stats: {
-      published: Number(sr.published ?? 0),
-      totalReads: Number(sr.totalReads ?? 0),
-      totalLikes: Number(sr.totalLikes ?? 0),
-      tipIncome: Number(sr.tipIncome ?? 0),
-      totalQa: Number(sr.totalQa ?? 0),
-      drafts: Number(sr.drafts ?? 0),
-    },
-  };
+  return remoteMyArticles();
 }
 
 /* ============ 评论区 ============ */
@@ -505,7 +261,7 @@ export type CommentRow = {
   avatarShape?: string;
 };
 
-function demoToCommentRows(slug: string): CommentRow[] {
+export function demoToCommentRows(slug: string): CommentRow[] {
   return (demoComments[slug] ?? []).map((c) => ({ ...c, likes: 0, viewerLiked: false }));
 }
 /** 评论点赞/取消（toggle），返回最新状态 */
@@ -527,55 +283,9 @@ export async function toggleCommentLike(userId: number, commentId: number): Prom
   return { liked: !has, likes };
 }
 
-export async function listComments(slug: string, viewerId?: number | null): Promise<CommentRow[]> {
-  // Java 从转发的 Cookie 里取浏览者身份，与这里显式传的 viewerId 同源（页面用的就是 getCurrentUser()）
-  if (viaJava("listComments")) return remoteListComments(slug);
-  const pool = await getPool();
-  if (pool) {
-    try {
-      const [rows] = await pool.query(
-        `SELECT c.id,
-                COALESCE(u.nickname, c.guest_nickname, '访客') AS nickname,
-                c.content,
-                c.parent_id AS parentId,
-                COALESCE(pu.nickname, p.guest_nickname, '楼层') AS parentAuthor,
-                DATE_FORMAT(c.created_at,'%Y-%m-%d %H:%i') AS createdAt,
-                c.user_id AS userId,
-                COALESCE(u.avatar_text, '') AS avatarText,
-                COALESCE(u.avatar_tone, '') AS avatarTone,
-                COALESCE(u.avatar_shape, '') AS avatarShape,
-                (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id = c.id) AS likes,
-                ${viewerId ? "EXISTS(SELECT 1 FROM comment_likes v WHERE v.comment_id = c.id AND v.user_id = ?)" : "0"} AS viewerLiked
-         FROM comments c
-         JOIN articles a ON a.id = c.article_id
-         LEFT JOIN comments p ON p.id = c.parent_id
-         LEFT JOIN users pu ON pu.id = p.user_id
-         LEFT JOIN users u ON u.id = c.user_id
-         WHERE a.slug = ?
-         ORDER BY c.created_at ASC LIMIT 300`,
-        viewerId ? [viewerId, slug] : [slug]
-      );
-      if (Array.isArray(rows)) {
-        return (rows as Record<string, unknown>[]).map((r) => ({
-          id: Number(r.id),
-          nickname: String(r.nickname),
-          content: String(r.content),
-          createdAt: String(r.createdAt),
-          parentId: r.parentId ? Number(r.parentId) : null,
-          parentAuthor: r.parentAuthor ? String(r.parentAuthor) : null,
-          likes: Number(r.likes ?? 0),
-          viewerLiked: Boolean(Number(r.viewerLiked ?? 0)),
-          userId: r.userId ? Number(r.userId) : null,
-          avatarText: String(r.avatarText ?? ""),
-          avatarTone: String(r.avatarTone ?? ""),
-          avatarShape: String(r.avatarShape ?? ""),
-        }));
-      }
-    } catch {
-      // 降级
-    }
-  }
-  return demoToCommentRows(slug);
+export async function listComments(slug: string, viewerId?: number | null): Promise<CommentRow[]>  {
+  if (!javaReady()) return demoToCommentRows(slug);
+  return remoteListComments(slug);
 }
 
 export async function addComment(
@@ -1328,64 +1038,9 @@ export async function searchArticles(
   q: string,
   limit = 20,
   viewerId?: number | null
-): Promise<SearchResultRow[]> {
-  if (viaJava("searchArticles")) return remoteSearchArticles(q, limit, viewerId);
-  const kw = q.trim().slice(0, 60);
-  if (kw.length < 2) return [];
-  const pool = await getPool();
-  if (!pool) return [];
-  // v17.0：转义 LIKE 通配符（% _ \），防用户关键词里的 % 变成全匹配
-  const like = `%${kw.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
-  // v17.2 付费墙纵深（严重级修复）：付费文「未解锁」时，正文既不得被检索、也不得回传摘录。
-  // 修复前的 hit 字段取自完整 md_content，匿名访客用 /api/search?q=<付费正文里的词> 就能
-  // 拿到围绕该词的 120 字付费原文；且 md_content LIKE 本身是一个可无限次探测
-  // 「正文里有没有这个词」的 oracle，逐词二分即可拖走整篇付费内容。
-  // viewerId 缺省（0）= 游客：付费文一律只按标题/摘要命中。
-  const me = Number(viewerId) > 0 ? Number(viewerId) : 0;
-  const locked = `(IFNULL(a.unlock_price,0) > 0 AND a.author_id <> ?
-        AND NOT EXISTS (SELECT 1 FROM article_purchases p
-                         WHERE p.article_id = a.id AND p.user_id = ?))`;
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, a.summary, u.nickname AS author, a.author_id AS authorId, a.tags,
-              a.read_count AS readCount, a.like_count AS likeCount, a.comment_count AS commentCount,
-              DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
-              IFNULL(a.unlock_price,0) AS unlockPrice,
-              IFNULL(a.discount_price,0) AS discountPrice,
-              a.discount_until AS discountUntil,
-              IF(${locked}, NULL,
-                 (SELECT SUBSTRING(a.md_content,
-                    GREATEST(1, LOCATE(?, a.md_content) - 40),
-                    120))) AS hit
-       FROM articles a JOIN users u ON u.id = a.author_id
-       WHERE a.status = 'published' AND a.review_status = 'approved'
-         AND (a.title LIKE ? OR a.summary LIKE ?
-              OR (NOT ${locked} AND a.md_content LIKE ?))
-       /* 相关度：标题命中 > 摘要命中 > 正文命中，同级按阅读量 */
-       ORDER BY (a.title LIKE ?) DESC, (a.summary LIKE ?) DESC, a.read_count DESC
-       LIMIT ?`,
-      [me, me, kw, like, like, me, me, like, like, like, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      summary: String(r.summary ?? ""),
-      author: String(r.author),
-      authorId: r.authorId ? Number(r.authorId) : undefined,
-      readCount: Number(r.readCount ?? 0),
-      likeCount: Number(r.likeCount ?? 0),
-      commentCount: Number(r.commentCount ?? 0),
-      publishedAt: String(r.publishedAt ?? ""),
-      hit: r.hit ? String(r.hit) : null,
-      tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
-      unlockPrice: Number(r.unlockPrice ?? 0),
-      discountPrice: Number(r.discountPrice ?? 0),
-      discountUntil: r.discountUntil ? new Date(r.discountUntil as string).toISOString() : null,
-    }));
-  } catch {
-    return [];
-  }
+): Promise<SearchResultRow[]>  {
+  if (!javaReady()) return [];
+  return remoteSearchArticles(q, limit, viewerId);
 }
 
 /* ---------- 关注系统：作者与读者建立长期连接（留存核心） ---------- */
@@ -1426,39 +1081,15 @@ export type WeeklyStats = {
 };
 
 /** 某作者的粉丝/关注计数 */
-export async function followStats(userId: number): Promise<FollowStats> {
-  if (viaJava("followStats")) return remoteFollowStats(userId);
-  const pool = await getPool();
-  if (!pool) return { followers: 0, following: 0 };
-  try {
-    const [rows] = await pool.query(
-      `SELECT
-         (SELECT COUNT(*) FROM follows WHERE followee_id = ?) AS followers,
-         (SELECT COUNT(*) FROM follows WHERE follower_id = ?) AS following`,
-      [userId, userId]
-    );
-    const r = (rows as Record<string, unknown>[])[0] ?? {};
-    return { followers: Number(r.followers ?? 0), following: Number(r.following ?? 0) };
-  } catch {
-    return { followers: 0, following: 0 };
-  }
+export async function followStats(userId: number): Promise<FollowStats>  {
+  if (!javaReady()) return { followers: 0, following: 0 };
+  return remoteFollowStats(userId);
 }
 
 /** viewer 是否已关注 target */
-export async function isFollowing(followerId: number | null, followeeId: number): Promise<boolean> {
-  if (!followerId) return false;
-  if (viaJava("isFollowing")) return remoteIsFollowing(followerId, followeeId);
-  const pool = await getPool();
-  if (!pool) return false;
-  try {
-    const [rows] = await pool.query(
-      `SELECT 1 AS x FROM follows WHERE follower_id = ? AND followee_id = ? LIMIT 1`,
-      [followerId, followeeId]
-    );
-    return Array.isArray(rows) && rows.length > 0;
-  } catch {
-    return false;
-  }
+export async function isFollowing(followerId: number | null, followeeId: number): Promise<boolean>  {
+  if (!javaReady()) return false;
+  return remoteIsFollowing(followerId, followeeId);
 }
 
 /** 关注/取关（toggle）。返回关注后的最新状态 */
@@ -1489,122 +1120,27 @@ export async function toggleFollow(
 }
 
 /** 关注我的人（个人中心·粉丝列表） */
-export async function listMyFollowers(userId: number, limit = 50): Promise<FollowPeer[]> {
-  if (viaJava("listMyFollowers")) return remoteMyFollowers(limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT u.id, u.nickname, u.avatar_text AS avatarText,
-              COALESCE(u.avatar_tone,'') AS avatarTone, COALESCE(u.avatar_shape,'') AS avatarShape,
-              IFNULL(u.bio, '') AS bio,
-              (SELECT COUNT(*) FROM articles a
-                WHERE a.author_id = u.id AND a.status = 'published' AND a.review_status = 'approved') AS articles
-       FROM follows f JOIN users u ON u.id = f.follower_id
-       WHERE f.followee_id = ?
-       ORDER BY f.created_at DESC LIMIT ?`,
-      [userId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      id: Number(r.id),
-      nickname: String(r.nickname),
-      avatarText: String(r.avatarText ?? "墨"),
-      avatarTone: String(r.avatarTone ?? ""),
-      avatarShape: String(r.avatarShape ?? ""),
-      bio: String(r.bio ?? ""),
-      articles: Number(r.articles ?? 0),
-    }));
-  } catch {
-    return [];
-  }
+export async function listMyFollowers(userId: number, limit = 50): Promise<FollowPeer[]>  {
+  if (!javaReady()) return [];
+  return remoteMyFollowers(limit);
 }
 
 /** 我关注的人（个人中心足迹） */
-export async function listMyFollowing(userId: number, limit = 50): Promise<FollowPeer[]> {
-  if (viaJava("listMyFollowing")) return remoteMyFollowing(limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT u.id, u.nickname, u.avatar_text AS avatarText,
-              COALESCE(u.avatar_tone,'') AS avatarTone, COALESCE(u.avatar_shape,'') AS avatarShape,
-              IFNULL(u.bio, '') AS bio,
-              (SELECT COUNT(*) FROM articles a
-                WHERE a.author_id = u.id AND a.status = 'published' AND a.review_status = 'approved') AS articles
-       FROM follows f JOIN users u ON u.id = f.followee_id
-       WHERE f.follower_id = ?
-       ORDER BY f.created_at DESC LIMIT ?`,
-      [userId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      id: Number(r.id),
-      nickname: String(r.nickname),
-      avatarText: String(r.avatarText ?? "墨"),
-      avatarTone: String(r.avatarTone ?? ""),
-      avatarShape: String(r.avatarShape ?? ""),
-      bio: String(r.bio ?? ""),
-      articles: Number(r.articles ?? 0),
-    }));
-  } catch {
-    return [];
-  }
+export async function listMyFollowing(userId: number, limit = 50): Promise<FollowPeer[]>  {
+  if (!javaReady()) return [];
+  return remoteMyFollowing(limit);
 }
 
 /** 我点赞过的文章（个人中心足迹） */
-export async function listMyLikes(userId: number, limit = 30): Promise<FootprintArticle[]> {
-  if (viaJava("listMyLikes")) return remoteMyLikes(limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, u.nickname AS author, a.read_count AS readCount
-       FROM article_likes l
-       JOIN articles a ON a.id = l.article_id
-       JOIN users u ON u.id = a.author_id
-       WHERE l.user_id = ? AND a.status = 'published'
-       ORDER BY l.created_at DESC LIMIT ?`,
-      [userId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      author: String(r.author),
-      readCount: Number(r.readCount ?? 0),
-    }));
-  } catch {
-    return [];
-  }
+export async function listMyLikes(userId: number, limit = 30): Promise<FootprintArticle[]>  {
+  if (!javaReady()) return [];
+  return remoteMyLikes(limit);
 }
 
 /** 我发表过的评论（个人中心足迹，带文章上下文） */
-export async function listMyComments(userId: number, limit = 30): Promise<MyCommentRow[]> {
-  if (viaJava("listMyComments")) return remoteMyComments(limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT c.id, c.content,
-              DATE_FORMAT(c.created_at,'%Y-%m-%d') AS createdAt,
-              a.slug AS articleSlug, a.title AS articleTitle
-       FROM comments c JOIN articles a ON a.id = c.article_id
-       WHERE c.user_id = ? AND a.status = 'published'
-       ORDER BY c.created_at DESC LIMIT ?`,
-      [userId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      id: Number(r.id),
-      content: String(r.content),
-      createdAt: String(r.createdAt ?? ""),
-      articleSlug: String(r.articleSlug),
-       articleTitle: String(r.articleTitle),
-    }));
-  } catch {
-    return [];
-  }
+export async function listMyComments(userId: number, limit = 30): Promise<MyCommentRow[]>  {
+  if (!javaReady()) return [];
+  return remoteMyComments(limit);
 }
 /** 收藏/取消收藏（toggle），返回最新状态 */
 export async function toggleBookmark(userId: number, slug: string): Promise<{ bookmarked: boolean }> {
@@ -1660,50 +1196,15 @@ export async function toggleBookmark(userId: number, slug: string): Promise<{ bo
 }
 
 /** viewer 是否收藏了某篇 */
-export async function isBookmarked(userId: number | null, slug: string): Promise<boolean> {
-  if (!userId) return false;
-  if (viaJava("isBookmarked")) return remoteIsBookmarked(userId, slug);
-  const pool = await getPool();
-  if (!pool) return false;
-  try {
-    const [rows] = await pool.query(
-      `SELECT b.id FROM bookmarks b JOIN articles a ON a.id = b.article_id
-       WHERE b.user_id = ? AND a.slug = ? LIMIT 1`,
-      [userId, slug]
-    );
-    return Array.isArray(rows) && (rows as unknown[]).length > 0;
-  } catch {
-    return false;
-  }
+export async function isBookmarked(userId: number | null, slug: string): Promise<boolean>  {
+  if (!javaReady()) return false;
+  return remoteIsBookmarked(userId, slug);
 }
 
 /** 我的收藏列表（个人中心足迹） */
-export async function listMyBookmarks(userId: number, limit = 50): Promise<BookmarkRow[]> {
-  if (viaJava("listMyBookmarks")) return remoteMyBookmarks(limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, u.nickname AS author, a.read_count AS readCount,
-              DATE_FORMAT(b.created_at,'%Y-%m-%d') AS savedAt
-       FROM bookmarks b
-       JOIN articles a ON a.id = b.article_id
-       JOIN users u ON u.id = a.author_id
-       WHERE b.user_id = ? AND a.status = 'published'
-       ORDER BY b.created_at DESC LIMIT ?`,
-      [userId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      author: String(r.author),
-      readCount: Number(r.readCount ?? 0),
-      savedAt: String(r.savedAt ?? ""),
-    }));
-  } catch {
-    return [];
-  }
+export async function listMyBookmarks(userId: number, limit = 50): Promise<BookmarkRow[]>  {
+  if (!javaReady()) return [];
+  return remoteMyBookmarks(limit);
 }
 
 /* ---------- 阅读历史「最近读过」（read_history 表由 db/schema.sql 建） ---------- */
@@ -1725,33 +1226,9 @@ export async function recordRead(userId: number, slug: string): Promise<void> {
 }
 
 /** 我的阅读足迹（个人中心「最近读过」） */
-export async function listMyHistory(userId: number, limit = 30): Promise<HistoryRow[]> {
-  if (viaJava("listMyHistory")) return remoteMyHistory(limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, u.nickname AS author, a.read_count AS readCount,
-              DATE_FORMAT(h.read_at,'%Y-%m-%d %H:%i') AS readAt, h.read_times AS times
-       FROM read_history h
-       JOIN articles a ON a.id = h.article_id
-       JOIN users u ON u.id = a.author_id
-       WHERE h.user_id = ? AND a.status = 'published'
-       ORDER BY h.read_at DESC LIMIT ?`,
-      [userId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      author: String(r.author),
-      readCount: Number(r.readCount ?? 0),
-      readAt: String(r.readAt ?? ""),
-      times: Number(r.times ?? 1),
-    }));
-  } catch {
-    return [];
-  }
+export async function listMyHistory(userId: number, limit = 30): Promise<HistoryRow[]>  {
+  if (!javaReady()) return [];
+  return remoteMyHistory(limit);
 }
 
 /* ---------- 作者作品数据（创作台看板） ---------- */
@@ -1768,37 +1245,9 @@ export type AuthorArticleStat = {
   boostUntil: string | null;
 };
 
-export async function authorArticleStats(authorId: number, limit = 50): Promise<AuthorArticleStat[]> {
-  if (viaJava("authorArticleStats")) return remoteAuthorArticleStats(authorId, limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, a.status, DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
-              a.read_count AS readCount, a.like_count AS likeCount, a.comment_count AS commentCount,
-              IFNULL((SELECT SUM(t.amount) FROM article_tips t WHERE t.article_id = a.id), 0) AS tipTotal,
-              (SELECT MAX(b.boost_until) FROM article_boosts b
-                WHERE b.article_id = a.id AND b.boost_until > NOW()) AS boostUntil
-       FROM articles a
-       WHERE a.author_id = ? AND a.status <> 'deleted'
-       ORDER BY GREATEST(a.read_count, 1) DESC, a.id DESC LIMIT ?`,
-      [authorId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      status: String(r.status ?? "published"),
-      publishedAt: String(r.publishedAt ?? ""),
-      readCount: Number(r.readCount ?? 0),
-      likeCount: Number(r.likeCount ?? 0),
-      commentCount: Number(r.commentCount ?? 0),
-      tipTotal: Number(r.tipTotal ?? 0),
-      boostUntil: r.boostUntil ? String(r.boostUntil) : null,
-    }));
-  } catch {
-    return [];
-  }
+export async function authorArticleStats(authorId: number, limit = 50): Promise<AuthorArticleStat[]>  {
+  if (!javaReady()) return [];
+  return remoteAuthorArticleStats(authorId, limit);
 }
 
 /* ---------- 热榜 /hot：按时间窗排序热度 ---------- */
@@ -1807,7 +1256,12 @@ export type HotRange = "day" | "week" | "all";
 
 /** 热度 = 阅读 + 点赞×5 + 评论×5 + 分身问答×10 + 打赏×3，仅统计时间窗内发表的文章 */
 export async function listHot(range: HotRange = "day", limit = 20): Promise<ArticleRow[]> {
-  const all = await listArticles();
+  return rankHot(await listArticles(), range, limit);
+}
+
+/** 热榜的纯计算部分。页面侧（Java 取数）与 lib/data-legacy.ts（Node SQL）共用这一个口径，
+ *  否则"同一篇稿子排在第几"会有两套答案。 */
+export function rankHot(all: ArticleRow[], range: HotRange = "day", limit = 20): ArticleRow[] {
   const published = all.filter((a) => a.reviewStatus === undefined || a.reviewStatus === "approved");
   const now = Date.now();
   const windowMs = range === "day" ? 24 * 3.6e6 : range === "week" ? 7 * 24 * 3.6e6 : Infinity;
@@ -1836,89 +1290,15 @@ export type AuthorProfile = {
   readTotal: number;
 };
 
-export async function getAuthor(id: number): Promise<AuthorProfile | null> {
-  if (viaJava("getAuthor")) return remoteGetAuthor(id);
-  if (!Number.isInteger(id) || id <= 0) return null;
-  const pool = await getPool();
-  if (!pool) return null;
-  try {
-    const [rows] = await pool.query(
-      `SELECT u.id, u.nickname, u.avatar_text AS avatarText,
-              COALESCE(u.avatar_tone,'') AS avatarTone, COALESCE(u.avatar_shape,'') AS avatarShape,
-              IFNULL(u.bio,'') AS bio,
-              DATE_FORMAT(u.created_at,'%Y-%m-%d') AS createdAt,
-              (SELECT COUNT(*) FROM articles a WHERE a.author_id = u.id
-                AND a.status='published' AND a.review_status='approved') AS articles,
-              (SELECT IFNULL(SUM(a.like_count),0) FROM articles a WHERE a.author_id = u.id
-                AND a.status='published' AND a.review_status='approved') AS likes,
-              (SELECT IFNULL(SUM(a.read_count),0) FROM articles a WHERE a.author_id = u.id
-                AND a.status='published' AND a.review_status='approved') AS readTotal
-       FROM users u WHERE u.id = ? LIMIT 1`,
-      [id]
-    );
-    const r = (rows as Record<string, unknown>[])[0];
-    if (!r) return null;
-    return {
-      id: Number(r.id),
-      nickname: String(r.nickname),
-      avatarText: String(r.avatarText ?? "墨"),
-      avatarTone: String(r.avatarTone ?? ""),
-      avatarShape: String(r.avatarShape ?? ""),
-      bio: String(r.bio ?? ""),
-      createdAt: String(r.createdAt ?? ""),
-      articles: Number(r.articles ?? 0),
-      likes: Number(r.likes ?? 0),
-      readTotal: Number(r.readTotal ?? 0),
-    };
-  } catch {
-    return null;
-  }
+export async function getAuthor(id: number): Promise<AuthorProfile | null>  {
+  if (!javaReady()) return null;
+  return remoteGetAuthor(id);
 }
 
 /** 某作者的公开文章（仅 approved），按发布时间倒序 */
-export async function listAuthorArticles(authorId: number, limit = 30): Promise<ArticleRow[]> {
-  if (viaJava("listAuthorArticles")) return remoteListAuthorArticles(authorId, limit);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, u.nickname AS author, u.avatar_text AS authorAvatar,
-              a.summary, IFNULL(a.cover_label,'') AS coverLabel, a.tags,
-              a.read_count AS readCount, a.comment_count AS commentCount,
-              a.agent_qa_count AS agentQaCount, a.like_count AS likeCount,
-              DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
-              (SELECT IFNULL(SUM(t.amount),0) FROM article_tips t WHERE t.article_id = a.id) AS tipTotal,
-              IFNULL(a.unlock_price,0) AS unlockPrice,
-              IFNULL(a.discount_price,0) AS discountPrice,
-              a.discount_until AS discountUntil
-       FROM articles a JOIN users u ON u.id = a.author_id
-       WHERE a.author_id = ? AND a.status = 'published' AND a.review_status = 'approved'
-       ORDER BY a.published_at DESC LIMIT ?`,
-      [authorId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      author: String(r.author),
-      authorAvatar: String(r.authorAvatar),
-      summary: String(r.summary ?? ""),
-      coverLabel: String(r.coverLabel ?? ""),
-      tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
-      readCount: Number(r.readCount),
-      commentCount: Number(r.commentCount),
-      agentQaCount: Number(r.agentQaCount),
-      publishedAt: dateOnly(r.publishedAt),
-      md: "",
-      likeCount: Number(r.likeCount ?? 0),
-      tipTotal: Number(r.tipTotal ?? 0),
-      unlockPrice: Number(r.unlockPrice ?? 0),
-      discountPrice: Number(r.discountPrice ?? 0),
-      discountUntil: r.discountUntil ? new Date(r.discountUntil as string).toISOString() : null,
-    }));
-  } catch {
-    return [];
-  }
+export async function listAuthorArticles(authorId: number, limit = 30): Promise<ArticleRow[]>  {
+  if (!javaReady()) return [];
+  return remoteListAuthorArticles(authorId, limit);
 }
 
 /* ---------- 首页关注动态流：我关注的作者的最新文章 ---------- */
@@ -2299,43 +1679,9 @@ export type SeriesCard = {
 };
 
 /** 合集架：全站专栏（只统计已发布且过审的篇目），按更新时间排；传 authorId 时只取该作者的 */
-export async function listSeries(limit = 60, authorId?: number): Promise<SeriesCard[]> {
-  if (viaJava("listSeries")) return remoteListSeries(limit, authorId);
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const where = authorId ? `WHERE s.author_id = ?` : "";
-    const [rows] = await pool.query(
-      `SELECT s.id, s.title, s.description, s.updated_at AS updatedAt, s.bundle_price AS bundlePrice,
-              u.nickname AS author, u.avatar_text AS authorAvatar, u.id AS authorId,
-              COUNT(si.article_id) AS articleCount,
-              COALESCE(SUM(a.read_count), 0) AS totalReads,
-              (SELECT IFNULL(SUM(sp.item_count),0) FROM series_purchases sp WHERE sp.series_id = s.id) AS soldCount
-         FROM series s
-         JOIN users u ON u.id = s.author_id
-         LEFT JOIN series_items si ON si.series_id = s.id
-         LEFT JOIN articles a ON a.id = si.article_id
-              AND a.status = 'published' AND a.review_status = 'approved'
-         ${where}
-        GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?`,
-      authorId ? [authorId, limit] : [limit]
-    );
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      id: Number(r.id),
-      title: String(r.title),
-      description: String(r.description ?? ""),
-      author: String(r.author),
-      authorAvatar: String(r.authorAvatar ?? "墨"),
-      authorId: Number(r.authorId),
-      articleCount: Number(r.articleCount),
-      totalReads: Number(r.totalReads ?? 0),
-      soldCount: Number(r.soldCount ?? 0),
-      bundlePrice: Number(r.bundlePrice ?? 0),
-      updatedAt: r.updatedAt instanceof Date ? r.updatedAt.toISOString().slice(0, 10) : String(r.updatedAt ?? ""),
-    }));
-  } catch {
-    return [];
-  }
+export async function listSeries(limit = 60, authorId?: number): Promise<SeriesCard[]>  {
+  if (!javaReady()) return [];
+  return remoteListSeries(limit, authorId);
 }
 
 export type SeriesItem = { slug: string; title: string; readCount: number; publishedAt: string };
@@ -2361,76 +1707,9 @@ export type SeriesDetail = {
 };
 
 /** 专栏落地页：有序篇目（仅已发布且过审）+ 打包解锁视角 */
-export async function getSeriesDetail(id: number, viewer?: { id?: number | null }): Promise<SeriesDetail | null> {
-  if (viaJava("getSeriesDetail")) return remoteSeriesDetail(id);
-  const pool = await getPool();
-  if (!pool) return null;
-  try {
-    const [sRows] = await pool.query(
-      `SELECT s.id, s.title, s.description, s.bundle_price AS bundlePrice,
-              u.nickname AS author, u.avatar_text AS authorAvatar, u.id AS authorId
-         FROM series s JOIN users u ON u.id = s.author_id WHERE s.id = ? LIMIT 1`,
-      [id]
-    );
-    const s = (sRows as Record<string, unknown>[])[0];
-    if (!s) return null;
-    const viewerId = viewer?.id ?? null;
-    const [iRows] = await pool.query(
-      `SELECT a.slug, a.title, a.read_count AS readCount, a.published_at AS publishedAt,
-              a.author_id AS authorId,
-              IFNULL(a.unlock_price,0) AS unlockPrice,
-              IFNULL(a.discount_price,0) AS discountPrice, a.discount_until AS discountUntil,
-              ${viewerId ? `EXISTS(SELECT 1 FROM article_purchases p WHERE p.article_id = a.id AND p.user_id = ?)` : "FALSE"} AS viewerUnlocked
-         FROM series_items si JOIN articles a ON a.id = si.article_id
-        WHERE si.series_id = ? AND a.status = 'published' AND a.review_status = 'approved'
-        ORDER BY si.position, si.article_id`,
-      viewerId ? [viewerId, id] : [id]
-    );
-    const items = (iRows as Record<string, unknown>[]).map((r) => {
-      const unlockPrice = Number(r.unlockPrice ?? 0);
-      const effective = effectiveUnlockPrice({
-        unlockPrice,
-        discountPrice: Number(r.discountPrice ?? 0),
-        discountUntil: r.discountUntil ? new Date(r.discountUntil as string).toISOString() : null,
-      });
-      const isOwn = viewerId !== null && Number(r.authorId) === viewerId;
-      const lockedForViewer =
-        unlockPrice > 0 && !isOwn && Number(r.viewerUnlocked ?? 0) !== 1;
-      return {
-        slug: String(r.slug),
-        title: String(r.title),
-        readCount: Number(r.readCount ?? 0),
-        publishedAt: r.publishedAt instanceof Date ? r.publishedAt.toISOString().slice(0, 10) : "",
-        unlockPrice: effective,
-        lockedForViewer,
-      };
-    });
-    const [bRows] = await pool.query(
-      `SELECT 1 AS ok FROM series_purchases WHERE series_id = ? AND user_id = ? LIMIT 1`,
-      [id, viewerId ?? 0]
-    );
-    const [cRows] = await pool.query(
-      `SELECT COUNT(*) AS c, IFNULL(SUM(item_count),0) AS unlocked FROM series_purchases WHERE series_id = ?`,
-      [id]
-    );
-    const fullPrice = items.filter((x) => x.lockedForViewer).reduce((sum, x) => sum + x.unlockPrice, 0);
-    return {
-      id: Number(s.id),
-      title: String(s.title),
-      description: String(s.description ?? ""),
-      author: String(s.author),
-      authorAvatar: String(s.authorAvatar ?? "墨"),
-      authorId: Number(s.authorId),
-      items,
-      bundlePrice: Number(s.bundlePrice ?? 0) > 0 ? Number(s.bundlePrice) : null,
-      bundlePurchased: viewerId !== null && (bRows as unknown[]).length > 0,
-      fullPrice,
-      paidCount: items.filter((x) => x.unlockPrice > 0).length,
-      soldCount: Number((cRows as Record<string, unknown>[])[0]?.unlocked ?? 0),
-    };
-  } catch {
-    return null;
-  }
+export async function getSeriesDetail(id: number, viewer?: { id?: number | null }): Promise<SeriesDetail | null>  {
+  if (!javaReady()) return null;
+  return remoteSeriesDetail(id);
 }
 
 export type MySeries = {
@@ -2441,37 +1720,9 @@ export type MySeries = {
 };
 
 /** 书房管理器：我的专栏 + 各自篇目（含未发布，便于编辑） */
-export async function listMySeries(authorId: number): Promise<MySeries[]> {
-  if (viaJava("listMySeries")) return remoteMySeries();
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [sRows] = await pool.query(
-      `SELECT id, title, description FROM series WHERE author_id = ? ORDER BY updated_at DESC`,
-      [authorId]
-    );
-    const series = (sRows as Record<string, unknown>[]).map((r) => ({
-      id: Number(r.id),
-      title: String(r.title),
-      description: String(r.description ?? ""),
-      items: [] as { slug: string; title: string }[],
-    }));
-    if (series.length === 0) return [];
-    const [iRows] = await pool.query(
-      `SELECT si.series_id AS seriesId, a.slug, a.title
-         FROM series_items si JOIN articles a ON a.id = si.article_id
-        WHERE si.series_id IN (${series.map(() => "?").join(",")})
-        ORDER BY si.position, si.article_id`,
-      series.map((s) => s.id)
-    );
-    for (const r of iRows as Record<string, unknown>[]) {
-      const target = series.find((s) => s.id === Number(r.seriesId));
-      if (target) target.items.push({ slug: String(r.slug), title: String(r.title) });
-    }
-    return series;
-  } catch {
-    return [];
-  }
+export async function listMySeries(authorId: number): Promise<MySeries[]>  {
+  if (!javaReady()) return [];
+  return remoteMySeries();
 }
 
 /** 专栏题名建议：聚合作者已过审文章的标签（≥2 篇才有成柜潜力），按热度取前三 */
@@ -2619,48 +1870,9 @@ export type ArticleSeriesNav = {
 };
 
 /** 文章页专栏导航：文章所属专栏 + 上/下篇（取 position 最小的所属专栏） */
-export async function getArticleSeriesNav(slug: string): Promise<ArticleSeriesNav | null> {
-  if (viaJava("getArticleSeriesNav")) return remoteSeriesNav(slug);
-  const pool = await getPool();
-  if (!pool) return null;
-  try {
-    const [rows] = await pool.query(
-      `SELECT si.series_id AS seriesId, si.position, s.title
-         FROM articles a
-         JOIN series_items si ON si.article_id = a.id
-         JOIN series s ON s.id = si.series_id
-        WHERE a.slug = ? ORDER BY si.position LIMIT 1`,
-      [slug]
-    );
-    const cur = (rows as Record<string, unknown>[])[0];
-    if (!cur) return null;
-    const seriesId = Number(cur.seriesId);
-    const [all] = await pool.query(
-      `SELECT si.article_id AS articleId, si.position, a.slug, a.title
-         FROM series_items si JOIN articles a ON a.id = si.article_id
-        WHERE si.series_id = ? AND a.status = 'published' AND a.review_status = 'approved'
-        ORDER BY si.position, si.article_id`,
-      [seriesId]
-    );
-    const items = all as Record<string, unknown>[];
-    const [self] = await pool.query(`SELECT id FROM articles WHERE slug = ? LIMIT 1`, [slug]);
-    const selfId = (self as Record<string, unknown>[])[0];
-    if (!selfId) return null;
-    const idx = items.findIndex((r) => Number(r.articleId) === Number(selfId.id));
-    if (idx === -1) return null;
-    const near = (r: Record<string, unknown> | undefined) =>
-      r ? { slug: String(r.slug), title: String(r.title) } : null;
-    return {
-      id: seriesId,
-      title: String(cur.title),
-      position: idx + 1,
-      total: items.length,
-      prev: idx > 0 ? near(items[idx - 1]) : null,
-      next: idx < items.length - 1 ? near(items[idx + 1]) : null,
-    };
-  } catch {
-    return null;
-  }
+export async function getArticleSeriesNav(slug: string): Promise<ArticleSeriesNav | null>  {
+  if (!javaReady()) return null;
+  return remoteSeriesNav(slug);
 }
 
 /* ============================ 每周墨报 /weekly ============================ */
@@ -2687,7 +1899,7 @@ export type WeeklyReport = {
   weeks: { label: string; count: number }[];
 };
 
-function weeklyFmt(d: Date): string {
+export function weeklyFmt(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
@@ -2727,37 +1939,10 @@ export async function listWeekly(): Promise<WeeklyReport> {
     tipCount: 0, tipInk: 0, newSeries: 0,
     top, latest, series, weeks,
   };
-  const pool = await getPool();
-  if (viaJava("listWeekly")) {
-    // 只把"本期计数"交给 Java：期号、近 6 周分桶、热榜与最新刊都是对已分流列表的 JS 组装，
-    // 周界算法留在唯一一侧，两栈才不会因为"本周从哪天开始"差出一天。
-    return { ...base, ...(await remoteWeeklyStats(fromStr)) };
-  }
-  if (!pool) return base;
-  try {
-    const cnt = async (sql: string, args: unknown[] = []): Promise<number> => {
-      const [r] = await pool.query(sql, args);
-      return Number((r as Record<string, unknown>[])[0]?.c ?? 0);
-    };
-    const pubFilter = "status='published' AND (review_status IS NULL OR review_status='approved')";
-    const [newArticles, newUsers, newComments, newSeries, tipRow] = await Promise.all([
-      cnt("SELECT COUNT(*) AS c FROM articles WHERE " + pubFilter + " AND published_at >= ?", [fromStr]),
-      cnt("SELECT COUNT(*) AS c FROM users WHERE created_at >= ?", [fromStr]),
-      cnt("SELECT COUNT(*) AS c FROM comments WHERE created_at >= ?", [fromStr]),
-      cnt("SELECT COUNT(*) AS c FROM series WHERE created_at >= ?", [fromStr]),
-      (async () => {
-        const [r] = await pool.query(
-          "SELECT COUNT(*) AS c, IFNULL(SUM(amount),0) AS s FROM article_tips WHERE created_at >= ?",
-          [fromStr]
-        );
-        const row = (r as Record<string, unknown>[])[0] ?? {};
-        return { c: Number(row.c ?? 0), s: Number(row.s ?? 0) };
-      })(),
-    ]);
-    return { ...base, newArticles, newUsers, newComments, newSeries, tipCount: tipRow.c, tipInk: tipRow.s };
-  } catch {
-    return base;
-  }
+  // 只把"本期计数"交给 Java：期号、近 6 周分桶、热榜与最新刊都是对已分流列表的 JS 组装，
+  // 周界算法留在唯一一侧，两栈才不会因为"本周从哪天开始"差出一天。
+  if (!javaReady()) return base; // 演示模式：计数保持 0，与"没有池子"时的旧行为一字不差
+  return { ...base, ...(await remoteWeeklyStats(fromStr)) };
 }
 export type UnlockResult =
   | { ok: true; price: number; authorGot: number; balance: number }
@@ -3152,31 +2337,9 @@ export async function recordPaywallView(slug: string): Promise<void> {
 }
 
 /** 作者付费转化漏斗：阅读 → 付费墙 → 解锁（含收入），按解锁数降序 */
-export async function listMyFunnel(authorId: number): Promise<FunnelRow[]> {
-  if (viaJava("listMyFunnel")) return remoteMyFunnel();
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, a.read_count AS views, IFNULL(a.paywall_views,0) AS paywallViews,
-              (SELECT COUNT(*) FROM article_purchases ap WHERE ap.article_id = a.id) AS unlocks,
-              (SELECT IFNULL(SUM(ap.author_gain),0) FROM article_purchases ap WHERE ap.article_id = a.id) AS revenue
-         FROM articles a
-        WHERE a.author_id = ? AND a.status <> 'deleted' AND IFNULL(a.unlock_price,0) > 0
-        ORDER BY unlocks DESC, a.read_count DESC LIMIT 30`,
-      [authorId]
-    );
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      views: Number(r.views ?? 0),
-      paywallViews: Number(r.paywallViews ?? 0),
-      unlocks: Number(r.unlocks ?? 0),
-      revenue: Number(r.revenue ?? 0),
-    }));
-  } catch {
-    return [];
-  }
+export async function listMyFunnel(authorId: number): Promise<FunnelRow[]>  {
+  if (!javaReady()) return [];
+  return remoteMyFunnel();
 }
 
 /* ======================= 作者解锁收入（书房看板） ======================= */
@@ -3191,37 +2354,7 @@ export type UnlockIncome = {
 };
 
 /** 我的名下文章被解锁的收入汇总（含价格已改的历史成交，按成交价算） */
-export async function listMyUnlockIncome(authorId: number): Promise<UnlockIncome> {
-  if (viaJava("listMyUnlockIncome")) return remoteMyUnlockIncome();
-  const empty: UnlockIncome = { total: 0, sales: 0, byArticle: [] };
-  const pool = await getPool();
-  if (!pool || !authorId) return empty;
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, IFNULL(a.unlock_price,0) AS price,
-              COUNT(p.id) AS sales, IFNULL(SUM(p.author_gain),0) AS earned
-         FROM article_purchases p
-         JOIN articles a ON a.id = p.article_id
-        WHERE a.author_id = ?
-        GROUP BY a.id, a.slug, a.title
-        ORDER BY earned DESC, sales DESC
-        LIMIT 20`,
-      [authorId]
-    );
-    if (!Array.isArray(rows) || rows.length === 0) return empty;
-    const byArticle = (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      price: Number(r.price ?? 0),
-      sales: Number(r.sales ?? 0),
-      earned: Number(r.earned ?? 0),
-    }));
-    return {
-      total: byArticle.reduce((s, x) => s + x.earned, 0),
-      sales: byArticle.reduce((s, x) => s + x.sales, 0),
-      byArticle,
-    };
-  } catch {
-    return empty;
-  }
+export async function listMyUnlockIncome(authorId: number): Promise<UnlockIncome>  {
+  if (!javaReady()) return { total: 0, sales: 0, byArticle: [] };
+  return remoteMyUnlockIncome();
 }

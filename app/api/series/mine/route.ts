@@ -7,7 +7,7 @@
 // 把"会话没解析出来"报成"你还没有专栏"是谎报）。
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { listMySeries } from "@/lib/data";
+import { listMySeries } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 
 export async function GET() {
   const user = await getCurrentUser();

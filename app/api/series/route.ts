@@ -2,7 +2,8 @@
 // GET  /api/series — 公开合集架（"我的专栏"在 /api/series/mine，见下方注释）
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { createSeries, listSeries } from "@/lib/data";
+import { createSeries } from "@/lib/data";
+import { listSeries } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 
 /**
  * 合集架。这条 GET 曾经返回"我的专栏"（书房管理器在用），而 Java 的同一条一直是公开架——

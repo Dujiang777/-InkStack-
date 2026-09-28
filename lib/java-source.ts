@@ -1,19 +1,18 @@
-// Java 后端数据源客户端（渐进双轨期用）。
+// Java 后端数据源客户端。
 //
-// 为什么需要它：28 个页面里有 27 个是 Server Component，直接 import lib/data.ts 在进程内打 MySQL。
-// 后端换到 Java 后，这些页面的数据来源必须能改，但页面本身的 UI 与取数语义不想动。
-// 所以 lib/data.ts 里每个已移植的函数开头加一句"这条路要不要走 Java"的分流，
-// 由 DATA_VIA_JAVA 逐函数控制——页面一行都不用改，回滚也只是清环境变量。
+// 为什么需要它：28 个页面里有 27 个是 Server Component，原本直接 import lib/data.ts 在进程内打 MySQL。
+// 后端换到 Java 后，这些页面的数据来源要改，但页面本身的 UI 与取数语义不想动，
+// 所以取数层每个读函数都收成一句"问 Java"。双轨期那个逐函数开关（DATA_VIA_JAVA）已经随
+// Node 侧读 SQL 一起退场（见 lib/data.ts 头部），现在只剩 javaReady() 这一个开关。
 //
 // 三条硬规矩：
 // 1) 必须转发 ink_session Cookie。Java 侧自己解析会话来决定付费墙与审核可见性，
 //    不转发就会把已登录读者当游客，导致未购正文被当成有权读。
-// 2) 必须 no-store。RSC 默认可能缓存取数结果，双轨期两侧行为要在每次渲染里现取现比。
-// 3) 失败必须抛出，绝不静默回落到 Node SQL 或 demo 数据。静默回落会把"Java 挂了"
-//    伪装成"站点正常"，而 listArticles 原有的 catch-降级-to-demo 正是这个坑。
+// 2) 必须 no-store。RSC 默认可能缓存取数结果，换栈期两侧行为要在每次渲染里现取现比。
+// 3) 失败必须抛出，绝不静默回落。回落会把"Java 挂了"伪装成"站点正常"，
+//    而 listArticles 原本那句 catch-降级成-demo 正是这个坑。
 import { cache } from "react";
 import { cookies } from "next/headers";
-import { javaDataSource } from "./data-mode";
 import type {
   ArticleRow, ArticleSeriesNav, ArticleTipRow, AuthorArticleStat, AuthorProfile, BookmarkRow, CommentRow,
   FollowPeer, FollowStats, FootprintArticle, FunnelRow, HistoryRow, MyArticleRow, MyCommentRow, MySeries,
@@ -23,14 +22,18 @@ import type { SessionUser } from "./auth";
 
 const TIMEOUT_MS = 8_000;
 
+/**
+ * 有没有配 Java 后端。这是页面取数唯一的一个开关：
+ * 配了 → 只问 Java（失败就抛，页面 500）；没配 → 演示模式，只用 lib/demo-data.ts。
+ * 以前的 `DATA_VIA_JAVA` 逐函数开关已经随 P7e′ 退役：Node 侧那份读 SQL 不再是页面的一条退路。
+ */
+export const javaReady = (): boolean => Boolean((process.env.JAVA_BASE ?? "").trim());
+
 function javaBase(): string {
   const base = (process.env.JAVA_BASE ?? "").replace(/\/+$/, "");
-  if (!base) throw new Error("DATA_VIA_JAVA 已启用但 JAVA_BASE 未配置");
+  if (!base) throw new Error("JAVA_BASE 未配置，页面取数无法问到 Java");
   return base;
 }
-
-/** 判据本体在 lib/data-mode.ts（中间件与这里必须读同一份实现，否则报出来的数据来源会与实际不符）。 */
-export const viaJava = (fn: string): boolean => javaDataSource(fn);
 
 /**
  * 返回可直接用作 Cookie 请求头的字符串（`ink_session=<value>`），游客为空串。

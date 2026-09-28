@@ -3,7 +3,8 @@
 // DELETE /api/series/[id] — 删除专栏（条目级联清除）
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { getSeriesDetail, updateSeriesMeta, deleteSeries, setSeriesItems } from "@/lib/data";
+import { updateSeriesMeta, deleteSeries, setSeriesItems } from "@/lib/data";
+import { getSeriesDetail } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 
 /**
  * 落地页。"不存在"一律是 {@code {detail: null}} + 200，不是 404——读侧没有"你访问的东西没了"

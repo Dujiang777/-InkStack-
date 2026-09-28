@@ -2,7 +2,8 @@
 // POST /api/articles/[slug]/comments — 发表评论（登录用户自动绑定账号，游客走昵称）
 // 积分规则：登录评论 +1（每日上限 3 次）；文章被评论作者 +2（每日上限 10 次，自己评自己不发）
 import { NextResponse } from "next/server";
-import { listComments, addComment } from "@/lib/data";
+import { addComment } from "@/lib/data";
+import { listComments } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 import { getCurrentUser } from "@/lib/auth";
 import { getPool } from "@/lib/db";
 import { grantCappedReward } from "@/lib/points";

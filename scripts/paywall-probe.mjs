@@ -6,7 +6,7 @@
 //   node scripts/paywall-probe.mjs <slug>
 import fs from 'node:fs';
 import path from 'node:path';
-import { dataSourceOf, requireNodeDataSource } from './gate-datasource.mjs';
+import { requireExecutor } from './gate-executor.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const env = Object.fromEntries(
@@ -16,8 +16,8 @@ const env = Object.fromEntries(
 // 地址优先级：shell 环境变量 > .env > 默认。反了会"以为在打临时实例、其实在打真 SMTP"。
 const NODE = process.env.PARITY_NODE || env.PARITY_NODE || 'http://localhost:3200';
 const JAVA = process.env.PARITY_JAVA || env.PARITY_JAVA || 'http://localhost:3101';
-// Node 那侧必须还在用 Node 的实现取数，否则这一跑是"拿 Java 比 Java"（见 gate-datasource.mjs）。
-requireNodeDataSource(NODE, await dataSourceOf(NODE));
+// Node 那侧必须真的还是 Node 在答，否则这一跑是"拿 Java 比 Java"。
+await requireExecutor(NODE, "node");
 const slug = (process.argv[2] ?? '').replace(/^\/+/, '');
 if (!slug) {
   console.error('用法：node scripts/paywall-probe.mjs <slug>');

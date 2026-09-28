@@ -1,7 +1,7 @@
 // GET /api/me/overview — 个人中心足迹聚合：关注列表/我点赞的/我评论的（登录限定）
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { listMyFollowing, listMyLikes, listMyComments, followStats } from "@/lib/data";
+import { listMyFollowing, listMyLikes, listMyComments, followStats } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 
 export async function GET() {
   const user = await getCurrentUser();

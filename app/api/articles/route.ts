@@ -2,7 +2,8 @@
 // POST /api/articles — 发布文章（创作台/编辑器用；Markdown 原文入库，渲染层统一消毒）
 // 积分规则：发布 +20，每日上限 1 篇（防灌水；迁移导入不计入该奖励）
 import { NextResponse } from "next/server";
-import { listArticles, parseDiscount } from "@/lib/data";
+import { parseDiscount } from "@/lib/data";
+import { listArticles } from "@/lib/data-legacy"; // P7e′：遗留 Node 读 SQL，随 app/api/** 一起删
 import { getCurrentUser, isStaff } from "@/lib/auth";
 import { getPool, dbEnabled } from "@/lib/db";
 import { makeSlug } from "@/lib/importer";
