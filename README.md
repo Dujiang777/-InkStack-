@@ -41,6 +41,7 @@
 | P7e′ | 页面取数只剩 Java：27 个读函数改成一句 remote 调用，Node 读 SQL 整体搬进 `lib/data-legacy.ts` | ✅ | 搬移用 AST 逐字证明：26 个函数与 `HEAD` 版本**一字不差**（只少了分流语句与分流注释），手写的那一个（`listWeekly` 一半是 JS 组装）也只差 `listHot → rankHot` 一处替换。闸门 4 重做成**页面渲染不变量 + 来源证明**（34/34），并反证过：`JAVA_BASE=""` 的实例第一项就红——页面会安静地渲染演示数据，200、有卡片、有正文。回归：对拍 7/7、互通 8/8、付费墙 4/4、检索防泄漏 4/4、路由盘点无缺口、社区 108/108、书房 117/117、限流 18/18、`tsc` 零错。`DATA_VIA_JAVA` / `lib/data-mode.ts` / `x-data-source` 同时退役 |
 | P7f-1 | `/api` 整前缀切流**演练**（还没删路由）：把"只跑 Java 也能自证"这件事先补上 | ✅ | 一台 `JAVA_ROUTES=/api` 的实例上：切流代理 **60/60**（`--keep-render` 档：五个页面/出口仍由 Next 渲染、`/apiXYZ` 没被顺走）＋ AI 面 21/22（1 项如实 SKIP）、创作台 **51/51**、运营台 **65/65**、书房 **117/117**、页面 **34/34**、互通 **8/8**、限流 **18/18**。<br>资金 **94/100** 与社区 **103/108** 那 11 项不是回归：它们断的是"并发真的来自两个进程"，NODE 侧切成 Java 之后这个宾语没了，于是从**假红**改成 **SKIP**（并发照打、只一路成交/败者分支/零 500/关系行数守恒照验），并反证过——同一对判据打真 Node 侧时 100/100、108/108 零 SKIP。对拍/付费墙/检索防泄漏三道则按设计**拒绝起跑**（两侧同一个执行者时"全绿"不说明任何事）。附带把边缘闸的档位做成环境变量 `EDGE_API_LIMIT`（默认仍 120，另一台实例实测照旧 120 后 429），闸门一次上百发不再把自己刷成 429 冒充两栈不一致 |
 | P7f-1b | 契约基线：把"旧实现应答长什么样"冻结进 `contract/`，闸门 1 从此有不依赖对岸的接班人 | ✅ | 30 条基线（Node 冻结 → Java 重放）**30/30**；Node 对自己的基线也 30/30（基线自洽）。反证三条：① 拿作者身份重放游客的付费墙基线 → 红在 `viewerUnlocked`/`md#lines`/`md#chars` 三条钉住的值上；② 手改基线（删一个键、把一个 `string` 改成 `number`）→ 精确报出 `comments.[*].id 现在多出这个键` 与 `comments.[*].nickname 类型 基线=number 现在=string`，复原即绿；③ 付费墙探针打一个不存在的 slug → 四个身份全部"取不到文章!!"、退出码 1（**改版前它打印"截断防线=不适用"然后报"全部通过"**）。同场把闸门 3/3′ 从"对岸不是 Node 就拒绝起跑"改成"绝对判据照跑、差分项记 —" |
+| P7f-1c | 页面直读 SQL 清单（闸门 18）：把"web 退化为纯渲染层"从一句话变成一个数 | ✅ | 调用图算出来 **14 条仍在 Next 进程内直连 MySQL**（运营台 `adminList*`×7 + `adminInsights`、首页 `platformStats`/`topAuthors`/`listFollowingFeed`、个人中心 `listAchievements`/`badgeRewardClaimed`、书房 `suggestSeriesTitles`），并据此**订正了 P7e′ 那句话**——"页面只剩一条取数路"只对正文 27 个读函数成立，那 14 条从来没有 HTTP 面（`/api/admin/*` 只有 POST），所以对拍 / 契约基线 / 路由盘点三道全绿也看不见它。棘轮双向都反证过：往 `listArticles` 注一句 `getPool()` → 报出 5 条且 `listHot`/`listRelated` 标「经由 listArticles」、`listWeekly` 标「经由 listHot」（证明跑的是可达性闭包，不是逐函数看首行）；往登记表塞一个没有 SQL 的名字 → 报"已经没有本地 SQL"。正则版曾把 `listWeekly` 误判成直连（下一个函数的文档注释里写着"先 INSERT 占位、再 FOR UPDATE 扣款"），所以这一道改走 AST。**P7f-2 的开工条件由 0 变成 14** |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -259,6 +260,20 @@
   于是那一组字段必须钉值（外加 `#lines` / `#chars` 两个派生取值器，因为"截断到第几行"既不是类型
   也不是键）。教训：**每加一层放宽，都要回头问一遍"这层放宽会不会正好盖住最贵的那个 bug"**——
   答案不是一句"值由别的闸门管"，而是把管的闸门跑一次反证给它看。
+- **"还剩多少没迁"不能由三道绿着的闸门回答，因为它们的判据各有盲区**（P7f-1c 订正了本项目自己的说法）：
+  P7e′ 之后 README 写着"页面侧只剩一条取数路"，对拍、契约基线、路由盘点三道也确实全绿。但三道闸门
+  判的都是**一条 HTTP 应答**——而运营台八张表、首页三块、个人中心的成就这些读压根没有 HTTP 面
+  （Server Component 直调 `lib/data.ts`，`/api/admin/*` 只有写侧的 POST）。没有可请求面，就没有判据位置，
+  于是 14 条进程内 SQL 在所有闸门之外活得很好。教训：**问"迁移完了吗"要先问"我的判据摸得到的地方有多大"**——
+  答案不是把三道闸门跑一遍，而是换一种判据（把渲染入口的 import 图走一遍）去量那三道覆盖不到的区域。
+  这也是 P7f-2 的开工条件从"删就完了"改成"14 条清零"的原因：删掉路由不会让这 14 条消失，
+  只会让唯一还能看见它们的地方也消失。
+- **正则切正文会被注释骗，而骗出来的方向恰好是"多报"**（闸门 18 的第一版）：按"从函数头切到下一个
+  函数头"取函数体，`listWeekly` 就顺带吞了后面 `unlockArticle` 的文档注释，注释里有"先 INSERT 占位、
+  再 FOR UPDATE 扣款"两句，于是它被判成直连 MySQL、闸门红在一条不存在的数据路径上。
+  多报比漏报好运——运气的成分在于它逼人去查，但**判据一旦开始说谎，人就会开始怀疑所有绿**：
+  现在改成 AST，注释与字符串根本进不了 `CallExpression` 的视野。规则：**凡是"从源码里数出点什么"的
+  闸门，都要拿它误报过的那一条去反证它现在不误报**（这里就是 `listWeekly`：它必须不在名单里）。
 - **闸门把自己刷爆的 429，读起来和"两栈不一致"一模一样**（P7f-1 顺带收掉的）：边缘闸每 IP
   120 次/分，而一次资金闸门就有一百多发、全来自同一个回环地址。之前只能靠"连跑隔一分钟"这种
   口头纪律躲，踩过两次才知道红不是代码的问题。现在档位是 `EDGE_API_LIMIT`，只给演练实例抬档，
@@ -303,9 +318,9 @@
 `question` / `author` / `about`，`about` 是标题不是 id），要动前端与请求契约，双轨期两栈还得一起改，
 所以单独记一条，不像 `asker_id` 那样顺手就能补。
 
-页面侧（Server Component 进程内取数，不经 HTTP）**只剩一条路**：`lib/data.ts` 里 27 个读函数
-——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
-作者主页 / 专栏架 / 专栏落地页 / 周报计数 / 漫游记 / 个人中心六类足迹 / 创作台四组看板——
+页面侧（Server Component 进程内取数，不经 HTTP）的**正文读路径**只剩一条路：`lib/data.ts` 里
+27 个读函数——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
+作者主页 / 专栏架 / 专栏落地页 / 漫游记 / 个人中心六类足迹 / 创作台四组看板——
 现在都是"配了 `JAVA_BASE` 就问 Java，没配就渲染 `lib/demo-data.ts` 的演示数据"。
 `DATA_VIA_JAVA` 与 `x-data-source` 随之退役：**只剩一条路之后，"报的是哪条路"这个问题不再存在，
 而一个含义会变的信号比没有信号更坏**。
@@ -314,6 +329,18 @@ Node 侧那份读 SQL 没有直接删，它整体住在 `lib/data-legacy.ts`，�
 `listHot` / `listRelated` / RSS / sitemap 不另设开关：它们是 `listArticles` 下游的纯 JS 组装，
 上游一条路，下游就一条路；排序口径收进 `rankHot()` 一个函数，页面侧与遗留侧共用它。
 
+**但"页面侧只剩一条路"这句话当时说过头了，现在由闸门 18 机器订正**：`lib/data.ts` 里还有
+**14 个被页面调用的函数在 Next 进程内直连 MySQL**——运营台八张表（`adminList*` ×7 + `adminInsights`）、
+首页三块（`platformStats` / `topAuthors` / `listFollowingFeed`）、个人中心两条
+（`listAchievements` / `badgeRewardClaimed`）、书房一条（`suggestSeriesTitles`）。
+它们之所以一直看不见，是因为这些读**从来没有 HTTP 面**：运营台是 Server Component 直调
+`lib/data.ts`，`/api/admin/*` 那四条路由只有 POST（写侧）。所以对拍、契约基线、路由盘点三道
+各自的判据里都没有它们的位置——三道闸门全绿，而"web 已经退化成纯渲染层"并不成立。
+`node scripts/page-sql-inventory.mjs --verbose` 现在会把这 14 条连同"哪个页面在调它"列出来，
+并锁成棘轮：登记表之外多一条 → 红；登记表里某条被迁走却没删登记 → 也红。
+**这 14 条迁完之前 P7f-2（删 58 个路由）不能做**——删了路由，Next 仍然带着这 14 条 SQL，
+"纯渲染层"这句话还是假的，只是再没有人提醒我们。
+
 ## 🏗 架构
 
 ```
@@ -321,14 +348,18 @@ Node 侧那份读 SQL 没有直接删，它整体住在 `lib/data-legacy.ts`，�
   │  同域、同一枚 ink_session Cookie
   ▼
 Next.js 15 (App Router)  :3100
-  ├─ 页面（Server Component）…… lib/data.ts ──HTTP（转发 Cookie）──▶ Spring Boot :3101
-  │      （JAVA_BASE 没配则只渲染 lib/demo-data.ts 的演示数据；配了就不回落，挂了即 500）
+  ├─ 页面（Server Component）…… lib/data.ts
+  │      ├─ 正文读路径 27 个函数 ──HTTP（转发 Cookie）──▶ Spring Boot :3101
+  │      │    （JAVA_BASE 没配则只渲染 lib/demo-data.ts 的演示数据；配了就不回落，挂了即 500）
+  │      └─ 还有 14 个函数在**本进程内直连 MySQL**（运营台 8 / 首页 3 / 个人中心 2 / 书房 1）
+  │           —— 闸门 18 数出来的，它们没有 HTTP 面，所以三道差分闸门都看不见；P7f-2 的前置
   ├─ /api/*  ── 未切流 ──────────→ Node Route Handler → lib/data-legacy.ts（遗留读 SQL）→ MySQL
   └─ /api/*  ── JAVA_ROUTES 命中 ─rewrite─▶ Spring Boot :3101 → MySQL（同一库）
                                                 ├─ MyBatis-Plus 手写 SQL
                                                 └─ 智能体引擎（Spring AI + 文章检索工具）→ OpenAI 兼容端点
 （原 agent-service/ (Python FastAPI + AgentScope) :8100 已在 P6c 移除，引擎收进 Java 进程内）
-（页面取数与 Node 路由读 SQL 在 P7e′ 分家：前者只剩 Java，后者集中在 data-legacy，随 P7f 一起删）
+（页面取数与 Node 路由读 SQL 在 P7e′ 分家：前者只剩 Java，后者集中在 data-legacy，随 P7f 一起删
+ —— "前者只剩 Java"只对正文读路径成立，剩下的 14 条见闸门 18）
 ```
 
 安全闸口（限流、CSRF、安全响应头）留在 Next 边缘中间件里，**与"谁来处理请求"解耦**——
@@ -360,7 +391,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十八道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十九道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -697,6 +728,24 @@ node scripts/rate-limit-check.mjs
 #     让两侧同源；哪天兜底被对齐，这条就该变红，提醒把它翻成正向断言。
 #   · 共 18 项。⚠ 计数落在库里就不再随进程重启而清零：连跑或换实例重跑时，
 #     某个桶可能还带着上一轮的命中（本闸门自己的桶进出都清干净，别的闸门没有）。
+
+# 18) 页面直读 SQL 清单：把"web 退化到纯渲染层"这句话从一句说明变成一个数。
+node scripts/page-sql-inventory.mjs --verbose
+#   · 它从渲染入口（page.tsx / layout.tsx / sitemap.ts / feed.xml）走一遍 import 图，看每条边
+#     到底从 lib/data.ts 取走了哪些符号（AST 取 import 具名绑定，不是正则），再对每个被页面
+#     取走的导出函数在**本文件内**做调用闭包：只要可达路径上出现 getPool / pool.query /
+#     beginTransaction 就算"这条读还在 Next 进程里摸 MySQL"。
+#   · 为什么差分闸门抓不到它：这 14 条读**从来没有 HTTP 面**。运营台是 Server Component 直调
+#     lib/data.ts，/api/admin/* 那四条路由只有 POST（写侧）。没有对等可请求面，对拍、契约基线、
+#     路由盘点三道就都没有它们的位置——三道全绿而"页面只剩一条取数路"这句话是错的。
+#   · 棘轮而不是进度条：登记表（今天 14 条）之外冒出新面孔 → 红；登记表里某条已经没有本地
+#     SQL 却没删登记 → 也红。清到 0 条是 P7f-2 的开工条件，不是它的副产品。
+#   · 反证跑过两个方向：往 listArticles 注一句 `await getPool()` → 当场报出 5 条，其中
+#     listHot/listRelated 标「经由 listArticles」、listWeekly 标「经由 listHot」（证明可达性
+#     与跨函数闭包真的在跑，而不是只看函数体第一行）；往登记表塞一个没 SQL 的名字 → 报
+#     "已经没有本地 SQL 了"。复原即回到 14 条 PASS。
+#   · 正则版曾经把 listWeekly 判成直连 MySQL——它下一个函数的文档注释里写着"先 INSERT 占位、
+#     再 FOR UPDATE 扣款"。这一道用 AST 不用正则切正文，教训见下一节。
 ```
 
 切流与回滚：
@@ -844,11 +893,11 @@ mvn spring-boot:run                  # http://localhost:3101
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
 ├── contract/               # 闸门 1′ 的冻结基线：每个接口一份"应答该长成这样"（30 条）
-├── scripts/                # 十八道闸门（parity / contract-check / interop / paywall / page-check
+├── scripts/                # 十九道闸门（parity / contract-check / interop / paywall / page-check
 │                           #   / auth-flow / proxy-cutover / money-check / route-inventory
 │                           #   / community-check / studio-check / admin-check / study-check
 │                           #   / import-check / ai-check / agent-engine-check / schema-check
-│                           #   / rate-limit-check）
+│                           #   / rate-limit-check / page-sql-inventory）
 │                           #   + 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
