@@ -14,9 +14,10 @@
 import { cache } from "react";
 import { cookies } from "next/headers";
 import type {
-  ArticleRow, ArticleSeriesNav, ArticleTipRow, AuthorArticleStat, AuthorProfile, BookmarkRow, CommentRow,
-  FollowPeer, FollowStats, FootprintArticle, FunnelRow, HistoryRow, MyArticleRow, MyCommentRow, MySeries,
-  MyStats, SearchResultRow, SeriesCard, SeriesDetail, UnlockIncome, WeeklyStats,
+  ArticleRow, ArticleSeriesNav, ArticleTipRow, AuthorArticleStat, AuthorProfile, AuthorRankRow, BookmarkRow,
+  CommentRow, Achievement, FeedItem, FollowPeer, FollowStats, FootprintArticle, FunnelRow, HistoryRow,
+  MyArticleRow, MyCommentRow, MySeries, MyStats, PlatformStats, SearchResultRow, SeriesCard, SeriesDetail,
+  SeriesTitleSuggestion, UnlockIncome, WeeklyStats,
 } from "./data";
 import type { SessionUser } from "./auth";
 
@@ -252,4 +253,37 @@ export async function remoteMyFunnel(): Promise<FunnelRow[]> {
 export async function remoteMyUnlockIncome(): Promise<UnlockIncome> {
   const body = await ask<{ income: UnlockIncome }>("/api/me/unlock-income");
   return body.income ?? { total: 0, sales: 0, byArticle: [] };
+}
+
+/* ---------- 首页与个人中心的"没有 HTTP 前身"的读（P7f-1d 补） ----------
+ * 这六条原本只是 Next 进程里的函数调用，从来没有对应的 Node 路由，所以：
+ *   · 没有对岸可以差分——正确性由 scripts/pagereads-check.mjs 回库重算再比对此处守住；
+ *   · 端点的键名/形状由 lib/data.ts 的返回类型单方面决定，改任一侧都要同步另一侧。
+ */
+
+/** 首页数据横幅的四个全站计数。身份无关，游客也要能看到，所以不带 Cookie 也应 200。 */
+export async function remotePlatformStats(): Promise<PlatformStats> {
+  return ask<PlatformStats>("/api/platform/stats");
+}
+
+export async function remoteTopAuthors(limit: number): Promise<AuthorRankRow[]> {
+  return askList<AuthorRankRow>(`/api/platform/top-authors?limit=${limit}`, "authors");
+}
+
+/** 关注动态流：Node 签名收 userId，Java 从转发的 Cookie 里认人（同 remoteMyFunnel 一套）。 */
+export async function remoteFollowingFeed(limit: number): Promise<FeedItem[]> {
+  return askList<FeedItem>(`/api/me/following-feed?limit=${limit}`, "items");
+}
+
+export async function remoteAchievements(): Promise<Achievement[]> {
+  return askList<Achievement>("/api/me/achievements", "achievements");
+}
+
+export async function remoteBadgeRewardClaimed(): Promise<boolean> {
+  const body = await ask<{ claimed: boolean }>("/api/me/badge-reward");
+  return Boolean(body.claimed);
+}
+
+export async function remoteSeriesTitleSuggestions(): Promise<SeriesTitleSuggestion[]> {
+  return askList<SeriesTitleSuggestion>("/api/me/series-title-suggestions", "suggestions");
 }

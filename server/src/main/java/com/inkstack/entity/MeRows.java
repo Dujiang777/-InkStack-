@@ -41,6 +41,21 @@ public final class MeRows {
     private Long articles;
   }
 
+  /** 关注动态流的一行：我只看已发布且过审的文章，按发布时间倒序。 */
+  @Data
+  public static class Feed {
+    private String slug;
+    private String title;
+    private String summary;
+    private Long authorId;
+    private String author;
+    private String authorAvatar;
+    private String publishedAt;
+    private Long readCount;
+    private Long likeCount;
+    private Long commentCount;
+  }
+
   /** 书房（/study）的一篇：含草稿与下架，故 status / reviewStatus 都在。 */
   @Data
   public static class Article {

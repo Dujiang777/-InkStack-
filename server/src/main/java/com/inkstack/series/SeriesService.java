@@ -124,4 +124,36 @@ public class SeriesService {
     return new SeriesViews.Item(row.getSlug(), row.getTitle(), NodeShapes.num(row.getReadCount()),
         NodeShapes.day(row.getPublishedAt()), price, locked);
   }
+
+  /** 后缀轮换表：第 i 个建议挂第 i%5 个词，与 Node 的 SERIES_SUFFIX 逐字同序同值。 */
+  private static final String[] SERIES_SUFFIX = {"手记", "研习录", "漫谈", "札记", "专栏"};
+
+  /**
+   * 专栏题名建议：把该作者已过审文章的标签数一遍，<b>≥2 篇</b>的才算"有成柜潜力"，
+   * 按篇数取前三。三处顺序细节决定结果长得不一样，所以照 Node 原样搬而不是"写得更清楚"：
+   * <ul>
+   *   <li>计数容器必须是 {@link LinkedHashMap}：并列同篇数时，Node 靠 Map 的插入序 +
+   *       V8 的稳定 sort 得到"先出现的标签排前面"；换成 HashMap 就是按哈希序，建议会换人。</li>
+   *   <li>{@link List#sort} 是 TimSort，稳定，与 Array.prototype.sort 同语义。</li>
+   *   <li>标题截断走 {@link NodeShapes#slice}：JS 的 slice 按 UTF-16 码元数，
+   *       而 emoji / 生僻字（代理对）在 Java 的 substring 里长度不同。</li>
+   * </ul>
+   */
+  public List<SeriesViews.Suggestion> titleSuggestions(long authorId) {
+    Map<String, Long> counter = new LinkedHashMap<>();
+    for (String json : series.tagsOfApprovedArticles(authorId)) {
+      for (String tag : NodeShapes.tags(json)) {
+        counter.merge(tag, 1L, Long::sum);
+      }
+    }
+    List<Map.Entry<String, Long>> ranked = new ArrayList<>(counter.entrySet());
+    ranked.removeIf(e -> e.getValue() < 2);
+    ranked.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+    List<SeriesViews.Suggestion> out = new ArrayList<>();
+    for (int i = 0; i < Math.min(3, ranked.size()); i++) {
+      out.add(SeriesViews.Suggestion.of(ranked.get(i).getKey(), ranked.get(i).getValue(),
+          SERIES_SUFFIX[i % SERIES_SUFFIX.length]));
+    }
+    return out;
+  }
 }

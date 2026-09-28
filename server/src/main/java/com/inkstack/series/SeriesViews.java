@@ -28,4 +28,15 @@ public final class SeriesViews {
   public record Detail(long id, String title, String description, String author, String authorAvatar,
       long authorId, List<Item> items, Long bundlePrice, boolean bundlePurchased, long fullPrice,
       long paidCount, long soldCount) {}
+
+  /**
+   * 书房里的"开个专栏"建议一条。题名 = 标签 + 轮换后缀后截 60，hint 里的数字是该标签的篇数——
+   * 两句文案的分隔符「」与空格都是前端直接显示的，改动一个字符用户就能看到。
+   */
+  public record Suggestion(String title, String hint) {
+
+    public static Suggestion of(String tag, long count, String suffix) {
+      return new Suggestion(NodeShapes.slice(tag + suffix, 60), "已有 " + count + " 篇「" + tag + "」文章可以成柜");
+    }
+  }
 }

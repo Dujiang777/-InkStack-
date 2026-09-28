@@ -188,4 +188,16 @@ public interface SeriesMapper {
       """)
   int insertItems(
       @Param("seriesId") long seriesId, @Param("items") List<SeriesRows.Positioned> items);
+
+  /**
+   * 专栏题名建议的原料：该作者所有已过审文章的 tags 列**原文**（MySQL JSON，逐行一段文本）。
+   * 只回这一列，成柜潜力（同一标签≥2 篇）的聚合留给 Java 侧算——Node 原来也是在 JS 里
+   * 用 Map 计数的，把聚合下推到 SQL 会改变并列时的先后顺序，那是看得见的差异。
+   */
+  @Select("""
+      SELECT tags FROM articles
+       WHERE author_id = #{authorId} AND status = 'published'
+         AND review_status = 'approved' AND tags IS NOT NULL
+      """)
+  List<String> tagsOfApprovedArticles(@Param("authorId") long authorId);
 }

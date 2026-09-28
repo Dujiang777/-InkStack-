@@ -112,4 +112,23 @@ public interface SocialMapper {
        ORDER BY h.read_at DESC LIMIT #{limit}
       """)
   List<MeRows.Footprint> myHistory(@Param("userId") long userId, @Param("limit") int limit);
+
+  /**
+   * 首页的"关注动态流"：我关注的作者们的新文章。join 方向是 follows.followee → articles.author，
+   * 所以一篇文章只因其作者被关注而出现，不看"我是否点过它"。
+   * Node 侧多带了一层 {@code dateOnly()} 兜底；这里 DATE_FORMAT 已经直接产出 'yyyy-MM-dd'，
+   * 而 published_at 为 NULL 的行被 {@code review_status='approved'} 挡在外面（NULL 不可能过审）。
+   */
+  @Select("""
+      SELECT a.slug, a.title, a.summary, a.author_id AS authorId,
+             u.nickname AS author, u.avatar_text AS authorAvatar,
+             DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
+             a.read_count AS readCount, a.like_count AS likeCount, a.comment_count AS commentCount
+        FROM follows f
+        JOIN articles a ON a.author_id = f.followee_id
+        JOIN users u ON u.id = a.author_id
+       WHERE f.follower_id = #{userId} AND a.status = 'published' AND a.review_status = 'approved'
+       ORDER BY a.published_at DESC LIMIT #{limit}
+      """)
+  List<MeRows.Feed> followingFeed(@Param("userId") long userId, @Param("limit") int limit);
 }

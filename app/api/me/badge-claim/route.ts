@@ -21,6 +21,8 @@ export async function POST() {
   }
 
   const achievements = await listAchievements(user.id);
+  // 注意：P7f-1d 起 listAchievements 问的是 Java，Java 不可达时这里抛错、本路由 500，
+  // 不再是从前那句"catch 成空数组 → 还差 0 枚"。这条路由随 P7f-2 一起删除，届时判定只剩 Java 一侧。
   const earned = achievements.filter((a) => a.earned).length;
   if (achievements.length === 0 || earned < achievements.length) {
     return NextResponse.json(

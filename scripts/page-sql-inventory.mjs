@@ -164,14 +164,16 @@ const offenders = pageFns.filter((n) => scan(n).direct).sort();
 /**
  * 登记表：今天仍由 Next 进程直连 MySQL 的页面取数函数。
  * 每条写清"谁在调它"，是为了让下一个来清的人知道该给 Java 补哪个读端点，
- * 而不是对着函数名猜。运营台那七条尤其别顺手"改成调 /api/admin/*"——
+ * 而不是对着函数名猜。运营台这八条尤其别顺手"改成调 /api/admin/*"——
  * 那个前缀下 Java 只有 POST（写侧），GET 列表从来就没有 HTTP 面。
+ *
+ * 2026-09-28 P7f-1d：首页统计 / 作者榜 / 关注流 / 成就墙 / 集齐奖励 / 专栏题名建议六条已迁到
+ * Java（读端点见 PlatformController 与 MeReadController），从表上删了。剩下的八条全是运营台，
+ * 需要新建一批 GET 读端点，单独一步做。
  */
 const REGISTERED = [
   "adminInsights", "adminListActions", "adminListArticles", "adminListComments",
   "adminListOrders", "adminListReports", "adminListReview", "adminListUsers",
-  "badgeRewardClaimed", "listAchievements", "listFollowingFeed", "platformStats",
-  "suggestSeriesTitles", "topAuthors",
 ];
 
 const unexpected = offenders.filter((n) => !REGISTERED.includes(n));

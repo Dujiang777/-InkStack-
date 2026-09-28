@@ -1,12 +1,17 @@
 package com.inkstack.user;
 
+import com.inkstack.common.NodeShapes;
 import com.inkstack.entity.FollowCounts;
+import com.inkstack.entity.MeRows;
 import com.inkstack.mapper.ArticleMapper;
 import com.inkstack.mapper.SocialMapper;
+import com.inkstack.money.BadgeService;
+import com.inkstack.series.SeriesService;
 import com.inkstack.session.SessionService;
 import com.inkstack.session.SessionUser;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -31,11 +36,16 @@ public class MeReadController {
   private final SocialMapper social;
   private final ArticleMapper articles;
   private final SessionService sessionService;
+  private final BadgeService badges;
+  private final SeriesService series;
 
-  public MeReadController(SocialMapper social, ArticleMapper articles, SessionService sessionService) {
+  public MeReadController(SocialMapper social, ArticleMapper articles, SessionService sessionService,
+      BadgeService badges, SeriesService series) {
     this.social = social;
     this.articles = articles;
     this.sessionService = sessionService;
+    this.badges = badges;
+    this.series = series;
   }
 
   private Long viewerId(HttpServletRequest request) {
@@ -177,5 +187,68 @@ public class MeReadController {
     stats.put("followers", counts == null || counts.getFollowers() == null ? 0L : counts.getFollowers());
     stats.put("following", counts == null || counts.getFollowing() == null ? 0L : counts.getFollowing());
     return stats;
+  }
+
+  /**
+   * 首页的"关注动态流"。四条 {@code /api/me/*} 都是 P7f-1d 才补的读端点：它们原本只是
+   * Next 进程内的函数（闸门 18 数出来的那 14 条里的四条），没有 HTTP 面也就没有对岸，
+   * 所以正确性不靠差分而靠 {@code scripts/pagereads-check.mjs} 回库重算再比对。
+   */
+  @GetMapping("/following-feed")
+  public ResponseEntity<?> followingFeed(HttpServletRequest request,
+      @RequestParam(name = "limit", defaultValue = "8") int limit) {
+    Long me = viewerId(request);
+    if (me == null) {
+      return ANONYMOUS;
+    }
+    List<Map<String, Object>> items = social.followingFeed(me, clamp(limit, 50)).stream()
+        .map(MeReadController::feedOf).toList();
+    return ResponseEntity.ok(Map.of("items", items));
+  }
+
+  private static Map<String, Object> feedOf(MeRows.Feed r) {
+    Map<String, Object> one = new LinkedHashMap<>();
+    one.put("slug", r.getSlug());
+    one.put("title", r.getTitle());
+    one.put("summary", NodeShapes.text(r.getSummary()));
+    one.put("authorId", NodeShapes.num(r.getAuthorId()));
+    one.put("author", r.getAuthor());
+    one.put("authorAvatar", r.getAuthorAvatar() == null || r.getAuthorAvatar().isEmpty()
+        ? "墨" : r.getAuthorAvatar());
+    one.put("publishedAt", NodeShapes.text(r.getPublishedAt()));
+    one.put("readCount", NodeShapes.num(r.getReadCount()));
+    one.put("likeCount", NodeShapes.num(r.getLikeCount()));
+    one.put("commentCount", NodeShapes.num(r.getCommentCount()));
+    return one;
+  }
+
+  /** 成就墙整面（14 枚）。取不到读数时 Node 回空数组，这里也回空数组而不是报错。 */
+  @GetMapping("/achievements")
+  public ResponseEntity<?> achievements(HttpServletRequest request) {
+    Long me = viewerId(request);
+    if (me == null) {
+      return ANONYMOUS;
+    }
+    return ResponseEntity.ok(Map.of("achievements", badges.wall(me)));
+  }
+
+  /** 那 100 滴墨领过没有。与"集齐徽章"的 POST 判重读的是同一条流水，不是第二个状态位。 */
+  @GetMapping("/badge-reward")
+  public ResponseEntity<?> badgeReward(HttpServletRequest request) {
+    Long me = viewerId(request);
+    if (me == null) {
+      return ANONYMOUS;
+    }
+    return ResponseEntity.ok(Map.of("claimed", badges.rewardClaimed(me)));
+  }
+
+  /** 书房的文章名建议：作者自己的标签聚合，≥2 篇才成候选，最多三条。 */
+  @GetMapping("/series-title-suggestions")
+  public ResponseEntity<?> seriesTitleSuggestions(HttpServletRequest request) {
+    Long me = viewerId(request);
+    if (me == null) {
+      return ANONYMOUS;
+    }
+    return ResponseEntity.ok(Map.of("suggestions", series.titleSuggestions(me)));
   }
 }

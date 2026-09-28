@@ -19,7 +19,8 @@ import {
   remoteListComments, remoteListSeries, remoteMyArticles, remoteMyBookmarks, remoteMyComments,
   remoteMyFollowers, remoteMyFollowing, remoteMyFunnel, remoteMyHistory, remoteMyLikes, remoteMySeries,
   remoteMyUnlockIncome, remoteRandomSlug, remoteSearchArticles, remoteSeriesDetail, remoteSeriesNav,
-  remoteWeeklyStats,
+  remoteAchievements, remoteBadgeRewardClaimed, remoteFollowingFeed, remotePlatformStats,
+  remoteSeriesTitleSuggestions, remoteTopAuthors, remoteWeeklyStats,
 } from "./java-source";
 
 /* ---------- 数据库可重试错误（v18.0） ----------
@@ -87,21 +88,6 @@ export function dateOnly(v: unknown): string {
   if (v == null) return "";
   const s = v instanceof Date ? v.toISOString() : String(v);
   return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : "";
-}
-
-/** 服务器本地日历日键（'YYYY-MM-DD'）。
- *  与 dateOnly() 的区别是**必须**的：DATE 列经 mysql2 回来是「本地零点的 Date」，
- *  走 toISOString() 会整体早一天；而签到/徽章判的是"同一个自然日"，与 /api/checkin
- *  的 dayKey 同源。v18.1 修 listAchievements：原写法 String(date).slice(0,10) 得到
- *  "Mon Sep 14"，与 "2026-09-14" 形的查询键永不相等 → 连签徽章恒为 0、集齐奖励领不到。 */
-function localDayKey(v: unknown): string {
-  if (v instanceof Date) {
-    const y = v.getFullYear();
-    const m = String(v.getMonth() + 1).padStart(2, "0");
-    const d = String(v.getDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
-  }
-  return String(v ?? "").slice(0, 10);
 }
 
 /** 早鸟价统一计价：折扣有效（0 < 折扣 < 原价 且未到期）取折扣，否则原价 */
@@ -943,27 +929,10 @@ export async function logAdminAction(
 
 export type PlatformStats = { articles: number; authors: number; qaTotal: number; tipsTotal: number };
 
+/** 首页数据横幅。演示模式回四个 0，与"没有池子"时旧行为一字不差（同 listWeekly 那条注释的口径）。 */
 export async function platformStats(): Promise<PlatformStats> {
-  const pool = await getPool();
-  if (!pool) return { articles: 0, authors: 0, qaTotal: 0, tipsTotal: 0 };
-  try {
-    const [rows] = await pool.query(
-      `SELECT
-         (SELECT COUNT(*) FROM articles WHERE status = 'published' AND review_status = 'approved') AS articles,
-         (SELECT COUNT(DISTINCT author_id) FROM articles WHERE status = 'published') AS authors,
-         (SELECT COUNT(*) FROM agent_qa) AS qaTotal,
-         (SELECT IFNULL(SUM(amount),0) FROM article_tips) AS tipsTotal`
-    );
-    const r = (rows as Record<string, unknown>[])[0] ?? {};
-    return {
-      articles: Number(r.articles ?? 0),
-      authors: Number(r.authors ?? 0),
-      qaTotal: Number(r.qaTotal ?? 0),
-      tipsTotal: Number(r.tipsTotal ?? 0),
-    };
-  } catch {
-    return { articles: 0, authors: 0, qaTotal: 0, tipsTotal: 0 };
-  }
+  if (!javaReady()) return { articles: 0, authors: 0, qaTotal: 0, tipsTotal: 0 };
+  return remotePlatformStats();
 }
 
 /* ---------- 首页：作者榜（按获赞） ---------- */
@@ -980,36 +949,8 @@ export type AuthorRankRow = {
 };
 
 export async function topAuthors(limit = 5): Promise<AuthorRankRow[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT u.id, u.nickname, u.avatar_text AS avatarText,
-              COALESCE(u.avatar_tone,'') AS avatarTone, COALESCE(u.avatar_shape,'') AS avatarShape,
-              IFNULL(SUM(a.like_count),0) AS likes,
-              COUNT(a.id) AS articles,
-              IFNULL(SUM(a.read_count),0) AS readTotal
-       FROM articles a JOIN users u ON u.id = a.author_id
-       WHERE a.status = 'published' AND a.review_status = 'approved'
-       GROUP BY a.author_id, u.id, u.nickname, u.avatar_text, u.avatar_tone, u.avatar_shape
-       ORDER BY likes DESC, readTotal DESC
-       LIMIT ?`,
-      [limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      id: Number(r.id),
-      nickname: String(r.nickname),
-      avatarText: String(r.avatarText ?? "墨"),
-      avatarTone: String(r.avatarTone ?? ""),
-      avatarShape: String(r.avatarShape ?? ""),
-      likes: Number(r.likes ?? 0),
-      articles: Number(r.articles ?? 0),
-      readTotal: Number(r.readTotal ?? 0),
-    }));
-  } catch {
-    return [];
-  }
+  if (!javaReady()) return [];
+  return remoteTopAuthors(limit);
 }
 
 /* ---------- 全站搜索（标题/摘要/正文 LIKE，游客可用） ---------- */
@@ -1316,42 +1257,20 @@ export type FeedItem = {
   commentCount: number;
 };
 
+/**
+ * 首页关注动态流。签名仍收 userId，但 Java 侧的 `/api/me/following-feed` 认的是**请求 cookie 里的
+ * 那个人**——现在四个调用点传的都是当前会话自己（`user.id`），所以等价；
+ * 哪天要显示别人的动态流，就得在 Java 侧新开一条按 id 取的路由，不能悄悄复用这一条。
+ */
 export async function listFollowingFeed(userId: number, limit = 8): Promise<FeedItem[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT a.slug, a.title, a.summary, a.author_id AS authorId,
-              u.nickname AS author, u.avatar_text AS authorAvatar,
-              DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt,
-              a.read_count AS readCount, a.like_count AS likeCount, a.comment_count AS commentCount
-       FROM follows f
-       JOIN articles a ON a.author_id = f.followee_id
-       JOIN users u ON u.id = a.author_id
-       WHERE f.follower_id = ? AND a.status = 'published' AND a.review_status = 'approved'
-       ORDER BY a.published_at DESC LIMIT ?`,
-      [userId, limit]
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      summary: String(r.summary ?? ""),
-      authorId: Number(r.authorId),
-      author: String(r.author),
-      authorAvatar: String(r.authorAvatar ?? "墨"),
-      publishedAt: dateOnly(r.publishedAt),
-      readCount: Number(r.readCount ?? 0),
-      likeCount: Number(r.likeCount ?? 0),
-      commentCount: Number(r.commentCount ?? 0),
-    }));
-  } catch {
-    return [];
-  }
+  if (!javaReady()) return [];
+  return remoteFollowingFeed(limit);
 }
 
 /* ============================================================
-   成就徽章系统：按用户数据实时计算，不需要建表
+   成就徽章墙：14 枚的阈值表与计数都在 Java 的 BadgeService（P7f-1d 迁走）。
+   这里只剩类型定义。首页与书房的读同批迁走，lib/data.ts 里剩下的进程内 SQL
+   全部属于运营台那 8 条（闸门 18 的登记表）。
    ============================================================ */
 
 export type Achievement = {
@@ -1367,90 +1286,8 @@ export type Achievement = {
 };
 
 export async function listAchievements(userId: number): Promise<Achievement[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const results = await Promise.all([
-      pool.query(
-        `SELECT COUNT(*) n, IFNULL(SUM(read_count),0) rd FROM articles
-         WHERE author_id = ? AND status='published' AND review_status='approved'`,
-        [userId]
-      ),
-      pool.query(
-        `SELECT IFNULL(SUM(a.like_count),0) n FROM articles a
-         WHERE a.author_id = ? AND a.status='published' AND a.review_status='approved'`,
-        [userId]
-      ),
-      pool.query(
-        `SELECT IFNULL(SUM(a.comment_count),0) n FROM articles a
-         WHERE a.author_id = ? AND a.status='published' AND a.review_status='approved'`,
-        [userId]
-      ),
-      pool.query(`SELECT checkin_date FROM checkins WHERE user_id = ? ORDER BY checkin_date DESC LIMIT 30`, [userId]),
-      pool.query(`SELECT points_balance FROM users WHERE id = ?`, [userId]),
-      pool.query(`SELECT COUNT(*) n FROM follows WHERE follower_id = ?`, [userId]),
-      pool.query(`SELECT COUNT(*) n FROM follows WHERE followee_id = ?`, [userId]),
-      pool.query(`SELECT COUNT(*) n FROM agent_qa WHERE asker_id = ?`, [userId]),
-    ]);
-    const num = (res: unknown, field = "n") =>
-      Number(((res as unknown as [Record<string, unknown>[]])[0] as Record<string, unknown>[])[0]?.[field] ?? 0);
-    const arts = num(results[0]);
-    const reads = num(results[0], "rd");
-    const likes = num(results[1]);
-    const cmts = num(results[2]);
-    // 第二处 num() 误用：results[4] 的列名是 points_balance，按默认键 "n" 取会恒得 undefined→0，
-    // "墨水富翁"徽章因此永远算不出来。v18.1 修，与 Java 侧 BadgeService 同口径。
-    const balance = num(results[4], "points_balance");
-    const followingN = num(results[5]);
-    const fansN = num(results[6]);
-    const qaN = num(results[7]);
-
-    // 连续签到：从今天（或昨天）往回数连续签到日
-    const rows = (results[3] as unknown as [Record<string, unknown>[]])[0] ?? [];
-    const dset = new Set(rows.map((r) => localDayKey(r.checkin_date)));
-    const iso = (offset: number) => {
-      const d = new Date();
-      d.setDate(d.getDate() - offset);
-      return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
-    };
-    let streak = 0;
-    let offset = dset.has(iso(0)) ? 0 : dset.has(iso(1)) ? 1 : -1;
-    if (offset >= 0) {
-      while (offset < 30 && dset.has(iso(offset))) {
-        streak++;
-        offset++;
-      }
-    }
-
-    const mk = (key: string, name: string, desc: string, icon: string, cur: number, goal: number): Achievement => ({
-      key,
-      name,
-      desc,
-      icon,
-      earned: cur >= goal,
-      progress: Math.min(1, cur / goal),
-      progressText: Math.min(cur, goal).toLocaleString() + " / " + goal.toLocaleString(),
-    });
-
-    return [
-      mk("first-post", "处女作", "发布第一篇公开文章", "初", arts, 1),
-      mk("prolific", "笔耕不辍", "累计发布 5 篇文章", "耕", arts, 5),
-      mk("voluminous", "著作等身", "累计发布 10 篇文章", "著", arts, 10),
-      mk("reads-100", "初露锋芒", "文章总阅读破 100", "锋", reads, 100),
-      mk("reads-1000", "洛阳纸贵", "文章总阅读破 1000", "贵", reads, 1000),
-      mk("likes-10", "初识知音", "累计获赞 10", "知", likes, 10),
-      mk("likes-50", "人气之星", "累计获赞 50", "星", likes, 50),
-      mk("talk-10", "谈笑风生", "文章累计被评论 10 次", "谈", cmts, 10),
-      mk("streak-3", "三日不辍", "连续签到 3 天", "恒", streak, 3),
-      mk("streak-7", "七日之约", "连续签到 7 天", "约", streak, 7),
-      mk("rich", "墨水富翁", "墨水余额达 1000 滴", "富", balance, 1000),
-      mk("social", "以文会友", "关注 3 位作者", "友", followingN, 3),
-      mk("beloved", "众望所归", "收获 5 位粉丝", "望", fansN, 5),
-      mk("curious", "十问分身", "与分身问答 10 次", "问", qaN, 10),
-    ];
-  } catch {
-    return [];
-  }
+  if (!javaReady()) return [];
+  return remoteAchievements();
 }
 
 /* ============================================================
@@ -1493,21 +1330,13 @@ export function todayInkQuote(): { text: string; from: string; dayIndex: number 
    以 point_ledger 的固定 reason 作为领取凭据，无需新表
    ============================================================ */
 
+/** 这两个常量现在只服务 Node 侧那条 POST 领取路由；P7f-2 删路由时一起消失，Java 侧另有同名常量。 */
 export const BADGE_REWARD_REASON = "集齐徽章奖励";
 export const BADGE_REWARD_AMOUNT = 100;
 
 export async function badgeRewardClaimed(userId: number): Promise<boolean> {
-  const pool = await getPool();
-  if (!pool) return false;
-  try {
-    const [rows] = await pool.query(`SELECT id FROM point_ledger WHERE user_id = ? AND reason = ? LIMIT 1`, [
-      userId,
-      BADGE_REWARD_REASON,
-    ]);
-    return Array.isArray(rows) && (rows as unknown[]).length > 0;
-  } catch {
-    return false;
-  }
+  if (!javaReady()) return false;
+  return remoteBadgeRewardClaimed();
 }
 
 /* ---------- 管理大盘：图表数据（发文/注册/评论趋势、墨水经济、热门榜、标签构成） ---------- */
@@ -1725,36 +1554,12 @@ export async function listMySeries(authorId: number): Promise<MySeries[]>  {
   return remoteMySeries();
 }
 
-/** 专栏题名建议：聚合作者已过审文章的标签（≥2 篇才有成柜潜力），按热度取前三 */
+/** 专栏题名建议：Java 侧聚合作者已过审文章的标签（≥2 篇才有成柜潜力），按热度取前三 */
 export type SeriesTitleSuggestion = { title: string; hint: string };
 
-const SERIES_SUFFIX = ["手记", "研习录", "漫谈", "札记", "专栏"];
-
 export async function suggestSeriesTitles(authorId: number): Promise<SeriesTitleSuggestion[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT tags FROM articles
-        WHERE author_id = ? AND status = 'published' AND review_status = 'approved' AND tags IS NOT NULL`,
-      [authorId]
-    );
-    const counter = new Map<string, number>();
-    for (const r of rows as Record<string, unknown>[]) {
-      const list = Array.isArray(r.tags) ? (r.tags as unknown[]).map(String) : [];
-      for (const t of list) counter.set(t, (counter.get(t) ?? 0) + 1);
-    }
-    const top = [...counter.entries()]
-      .filter(([, n]) => n >= 2)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3);
-    return top.map(([tag, n], i) => ({
-      title: `${tag}${SERIES_SUFFIX[i % SERIES_SUFFIX.length]}`.slice(0, 60),
-      hint: `已有 ${n} 篇「${tag}」文章可以成柜`,
-    }));
-  } catch {
-    return [];
-  }
+  if (!javaReady()) return [];
+  return remoteSeriesTitleSuggestions();
 }
 
 /** 新建专栏，返回 id */

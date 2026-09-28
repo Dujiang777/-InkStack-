@@ -42,6 +42,8 @@
 | P7f-1 | `/api` 整前缀切流**演练**（还没删路由）：把"只跑 Java 也能自证"这件事先补上 | ✅ | 一台 `JAVA_ROUTES=/api` 的实例上：切流代理 **60/60**（`--keep-render` 档：五个页面/出口仍由 Next 渲染、`/apiXYZ` 没被顺走）＋ AI 面 21/22（1 项如实 SKIP）、创作台 **51/51**、运营台 **65/65**、书房 **117/117**、页面 **34/34**、互通 **8/8**、限流 **18/18**。<br>资金 **94/100** 与社区 **103/108** 那 11 项不是回归：它们断的是"并发真的来自两个进程"，NODE 侧切成 Java 之后这个宾语没了，于是从**假红**改成 **SKIP**（并发照打、只一路成交/败者分支/零 500/关系行数守恒照验），并反证过——同一对判据打真 Node 侧时 100/100、108/108 零 SKIP。对拍/付费墙/检索防泄漏三道则按设计**拒绝起跑**（两侧同一个执行者时"全绿"不说明任何事）。附带把边缘闸的档位做成环境变量 `EDGE_API_LIMIT`（默认仍 120，另一台实例实测照旧 120 后 429），闸门一次上百发不再把自己刷成 429 冒充两栈不一致 |
 | P7f-1b | 契约基线：把"旧实现应答长什么样"冻结进 `contract/`，闸门 1 从此有不依赖对岸的接班人 | ✅ | 30 条基线（Node 冻结 → Java 重放）**30/30**；Node 对自己的基线也 30/30（基线自洽）。反证三条：① 拿作者身份重放游客的付费墙基线 → 红在 `viewerUnlocked`/`md#lines`/`md#chars` 三条钉住的值上；② 手改基线（删一个键、把一个 `string` 改成 `number`）→ 精确报出 `comments.[*].id 现在多出这个键` 与 `comments.[*].nickname 类型 基线=number 现在=string`，复原即绿；③ 付费墙探针打一个不存在的 slug → 四个身份全部"取不到文章!!"、退出码 1（**改版前它打印"截断防线=不适用"然后报"全部通过"**）。同场把闸门 3/3′ 从"对岸不是 Node 就拒绝起跑"改成"绝对判据照跑、差分项记 —" |
 | P7f-1c | 页面直读 SQL 清单（闸门 18）：把"web 退化为纯渲染层"从一句话变成一个数 | ✅ | 调用图算出来 **14 条仍在 Next 进程内直连 MySQL**（运营台 `adminList*`×7 + `adminInsights`、首页 `platformStats`/`topAuthors`/`listFollowingFeed`、个人中心 `listAchievements`/`badgeRewardClaimed`、书房 `suggestSeriesTitles`），并据此**订正了 P7e′ 那句话**——"页面只剩一条取数路"只对正文 27 个读函数成立，那 14 条从来没有 HTTP 面（`/api/admin/*` 只有 POST），所以对拍 / 契约基线 / 路由盘点三道全绿也看不见它。棘轮双向都反证过：往 `listArticles` 注一句 `getPool()` → 报出 5 条且 `listHot`/`listRelated` 标「经由 listArticles」、`listWeekly` 标「经由 listHot」（证明跑的是可达性闭包，不是逐函数看首行）；往登记表塞一个没有 SQL 的名字 → 报"已经没有本地 SQL"。正则版曾把 `listWeekly` 误判成直连（下一个函数的文档注释里写着"先 INSERT 占位、再 FOR UPDATE 扣款"），所以这一道改走 AST。**P7f-2 的开工条件由 0 变成 14** |
+| P7f-1d | 页面直读 SQL 迁走第一批（6 条）＋ 给没有 HTTP 面的读立裁判（闸门 19） | ✅ | 首页 `platformStats`/`topAuthors`/`listFollowingFeed`、个人中心 `listAchievements`/`badgeRewardClaimed`、书房 `suggestSeriesTitles` 全部改成"问 Java 的一句"，Java 侧新建 `GET /api/platform/stats`、`/api/platform/top-authors`、`/api/me/following-feed`、`/api/me/achievements`、`/api/me/badge-reward`、`/api/me/series-title-suggestions`；`lib/data.ts` 从此**一个成就算法都没有**（阈值表收进 `BadgeService.TIERS`，展示与领取判定共用一处定义，不会出现"墙上写 5 篇解锁、实际 3 篇发钱"）。<br>**这六条没有对岸可对**：它们从来没有 HTTP 面，所以契约基线（闸门 1′）也冻不出来——于是新建闸门 19 用**回库独立复算**当裁判，**40/40**（1 项如实 SKIP：只有一个账号有可显示的关注流，比不出"换人换答案"）。反证两轮：① 整道打 Node :3200 → 37 红、退出码 1；② 只改闸门自己的口径（把"著作等身"门槛 10→5、千分位 `en-US`→`de-DE`、后缀表 `手记`↔`札记` 对调）→ 精确红在成就墙 3 条与题名建议 2 条，其余 35 项不动。第一轮还揪出闸门一处**空对空假绿**（端点返回 `[]` 时"逐行相等"与 `slice(0,0)` 互相盖章），已补"宾语必须非空"<br>棘轮从 14 降到 **8**（全是运营台，Java 侧那批 GET 读端点是 P7f-1e 的活）。回归：页面 **34/34**、契约 **30/30**、资金 **100/100**、社区 **108/108**、书房 **117/117**、创作台 **51/51**、运营台 **65/65**、互通 8/8、付费墙 4/4、检索防泄漏 4/4、路由盘点无缺口、Java 单测 5 类全绿、`tsc` 零错。顺带记下一处**差分判据失去宾语**：资金闸门那条"两栈还差几枚逐字一致"从今往后比的是分支与文案，不再是两套判定——Node 那条路由的计数已经借道 Java |
+| P7f-1e | 运营台八条读迁到 Java（闸门 18 清零） | ⏳ | — |
 | P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | — |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
@@ -78,8 +80,11 @@
   功能不坏但前端从打字机变成"等十几秒再整篇砸脸"）
 - 只读聚合（为 RSC 分流新增）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
-  `/api/weekly/stats`、`/api/random`、`/api/me/*` 十项。它们中的大部分 Node 侧至今无对位路由
-  （页面直连 `lib/data.ts` 取数，没有 HTTP 入口），只有 `/api/series` 那一族在 P7a 之后两栈都有了
+  `/api/weekly/stats`、`/api/random`、`/api/me/*` 十五项、`/api/platform/stats`、
+  `/api/platform/top-authors`。它们中的大部分 Node 侧至今无对位路由（页面直连 `lib/data.ts` 取数，
+  没有 HTTP 入口），只有 `/api/series` 那一族在 P7a 之后两栈都有了。
+  `/api/me/` 那四条新读（`following-feed`/`achievements`/`badge-reward`/`series-title-suggestions`）
+  与 `/api/platform/` 两条是 P7f-1d 补的，**没有对岸可对拍**，正确性由闸门 19 回库复算钉住
 
 移植过程中修掉的既有 bug（有的在原实现里就存在，有的差一点就跟着移植过去；对拍要求两侧同口径，
 所以一律两边一起改）：
@@ -274,6 +279,19 @@
   多报比漏报好运——运气的成分在于它逼人去查，但**判据一旦开始说谎，人就会开始怀疑所有绿**：
   现在改成 AST，注释与字符串根本进不了 `CallExpression` 的视野。规则：**凡是"从源码里数出点什么"的
   闸门，都要拿它误报过的那一条去反证它现在不误报**（这里就是 `listWeekly`：它必须不在名单里）。
+- **迁走一条"从来没有 HTTP 面"的读，等于迁进一片没有任何差分管的地方**（P7f-1d 为此新建闸门 19）：
+  对拍要两侧都有路由，契约基线要 Node 应答过——这六条两样都不占。所以裁判只能换成**自己回库把同一个
+  数再算一遍**：脚本里的 SQL 照 Node 时代的口径重写（那份源码在 git 里，不依赖任何一栈的实现），
+  于是删掉 `lib/data-legacy.ts` 也不会削掉这一道。教训：**"没有对岸"不是不测的理由，是换判据的理由**。
+- **反证第一次跑，红出来的却是闸门自己**：整道打 Node 时"作者榜逐行相等"记了 **PASS**——端点返回 `[]`，
+  而复算的 `ranked.slice(0, 0)` 也是 `[]`，两条空数组互相盖章。这就是本仓库一直防的"自我证明的信号
+  丢了宾语"，只不过这次丢的人是我刚写的闸门。规则落到代码里：**每个"逐行/逐字段相等"之前必须先断言
+  宾语非空**，非空判不出来就记 SKIP，绝不记 PASS。第二轮反证改打闸门自己的口径（门槛 10→5、
+  千分位 `en-US`→`de-DE`、后缀表两两对调），才证明那 35 项绿不是绿在空气上。
+- **委派会把差分悄悄变成同分**（P7f-1d 的副产品，已在资金闸门那条判据上标出来）：
+  `app/api/me/badge-claim` 仍然是 Node 路由，可它的 `listAchievements` 现在问 Java——于是
+  "两栈'还差几枚'逐字一致"从**两套判定对拍**降级成**同一个人经两条路自比**，还照样绿。
+  判据的措辞必须跟着宾语走：路由删掉（P7f-2）之前，它守的只剩分支与文案，那就得写明只剩分支与文案。
 - **闸门把自己刷爆的 429，读起来和"两栈不一致"一模一样**（P7f-1 顺带收掉的）：边缘闸每 IP
   120 次/分，而一次资金闸门就有一百多发、全来自同一个回环地址。之前只能靠"连跑隔一分钟"这种
   口头纪律躲，踩过两次才知道红不是代码的问题。现在档位是 `EDGE_API_LIMIT`，只给演练实例抬档，
@@ -318,9 +336,10 @@
 `question` / `author` / `about`，`about` 是标题不是 id），要动前端与请求契约，双轨期两栈还得一起改，
 所以单独记一条，不像 `asker_id` 那样顺手就能补。
 
-页面侧（Server Component 进程内取数，不经 HTTP）的**正文读路径**只剩一条路：`lib/data.ts` 里
-27 个读函数——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
-作者主页 / 专栏架 / 专栏落地页 / 漫游记 / 个人中心六类足迹 / 创作台四组看板——
+页面侧（Server Component 进程内取数，不经 HTTP）的**读路径**只剩一条路：`lib/data.ts` 里
+33 个读函数——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
+作者主页 / 专栏架 / 专栏落地页 / 漫游记 / 个人中心六类足迹 / 创作台四组看板 / 全站统计与作者榜 /
+关注动态流 / 成就墙 / 专栏题名建议（后四条是 P7f-1d 补的，见闸门 19）——
 现在都是"配了 `JAVA_BASE` 就问 Java，没配就渲染 `lib/demo-data.ts` 的演示数据"。
 `DATA_VIA_JAVA` 与 `x-data-source` 随之退役：**只剩一条路之后，"报的是哪条路"这个问题不再存在，
 而一个含义会变的信号比没有信号更坏**。
@@ -329,16 +348,16 @@ Node 侧那份读 SQL 没有直接删，它整体住在 `lib/data-legacy.ts`，�
 `listHot` / `listRelated` / RSS / sitemap 不另设开关：它们是 `listArticles` 下游的纯 JS 组装，
 上游一条路，下游就一条路；排序口径收进 `rankHot()` 一个函数，页面侧与遗留侧共用它。
 
-**但"页面侧只剩一条路"这句话当时说过头了，现在由闸门 18 机器订正**：`lib/data.ts` 里还有
-**14 个被页面调用的函数在 Next 进程内直连 MySQL**——运营台八张表（`adminList*` ×7 + `adminInsights`）、
-首页三块（`platformStats` / `topAuthors` / `listFollowingFeed`）、个人中心两条
-（`listAchievements` / `badgeRewardClaimed`）、书房一条（`suggestSeriesTitles`）。
+**但"页面侧只剩一条路"这句话当时说过头了，它由闸门 18 机器订正**：`lib/data.ts` 里被页面调用的函数
+中仍有 **8 个在 Next 进程内直连 MySQL**——全部是运营台八张表（`adminList*` ×7 + `adminInsights`）。
 它们之所以一直看不见，是因为这些读**从来没有 HTTP 面**：运营台是 Server Component 直调
 `lib/data.ts`，`/api/admin/*` 那四条路由只有 POST（写侧）。所以对拍、契约基线、路由盘点三道
 各自的判据里都没有它们的位置——三道闸门全绿，而"web 已经退化成纯渲染层"并不成立。
-`node scripts/page-sql-inventory.mjs --verbose` 现在会把这 14 条连同"哪个页面在调它"列出来，
+`node scripts/page-sql-inventory.mjs --verbose` 会把这 8 条连同"哪个页面在调它"列出来，
 并锁成棘轮：登记表之外多一条 → 红；登记表里某条被迁走却没删登记 → 也红。
-**这 14 条迁完之前 P7f-2（删 58 个路由）不能做**——删了路由，Next 仍然带着这 14 条 SQL，
+首页三块（`platformStats` / `topAuthors` / `listFollowingFeed`）、个人中心两条
+（`listAchievements` / `badgeRewardClaimed`）、书房一条（`suggestSeriesTitles`）已在 **P7f-1d** 迁走，
+从登记表里删了；**剩下这 8 条迁完之前 P7f-2（删 58 个路由）不能做**——删了路由，Next 仍然带着这 8 条 SQL，
 "纯渲染层"这句话还是假的，只是再没有人提醒我们。
 
 ## 🏗 架构
@@ -349,9 +368,9 @@ Node 侧那份读 SQL 没有直接删，它整体住在 `lib/data-legacy.ts`，�
   ▼
 Next.js 15 (App Router)  :3100
   ├─ 页面（Server Component）…… lib/data.ts
-  │      ├─ 正文读路径 27 个函数 ──HTTP（转发 Cookie）──▶ Spring Boot :3101
+  │      ├─ 读路径 33 个函数 ──HTTP（转发 Cookie）──▶ Spring Boot :3101
   │      │    （JAVA_BASE 没配则只渲染 lib/demo-data.ts 的演示数据；配了就不回落，挂了即 500）
-  │      └─ 还有 14 个函数在**本进程内直连 MySQL**（运营台 8 / 首页 3 / 个人中心 2 / 书房 1）
+  │      └─ 还有 8 个函数在**本进程内直连 MySQL**（全在运营台：adminList* ×7 + adminInsights）
   │           —— 闸门 18 数出来的，它们没有 HTTP 面，所以三道差分闸门都看不见；P7f-2 的前置
   ├─ /api/*  ── 未切流 ──────────→ Node Route Handler → lib/data-legacy.ts（遗留读 SQL）→ MySQL
   └─ /api/*  ── JAVA_ROUTES 命中 ─rewrite─▶ Spring Boot :3101 → MySQL（同一库）
@@ -359,7 +378,7 @@ Next.js 15 (App Router)  :3100
                                                 └─ 智能体引擎（Spring AI + 文章检索工具）→ OpenAI 兼容端点
 （原 agent-service/ (Python FastAPI + AgentScope) :8100 已在 P6c 移除，引擎收进 Java 进程内）
 （页面取数与 Node 路由读 SQL 在 P7e′ 分家：前者只剩 Java，后者集中在 data-legacy，随 P7f 一起删
- —— "前者只剩 Java"只对正文读路径成立，剩下的 14 条见闸门 18）
+ —— "前者只剩 Java"到 P7f-1d 才对首页 / 个人中心 / 书房成立，运营台那 8 条见闸门 18）
 ```
 
 安全闸口（限流、CSRF、安全响应头）留在 Next 边缘中间件里，**与"谁来处理请求"解耦**——
@@ -391,7 +410,7 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过十九道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过二十道机器闸门：
 
 ```bash
 # 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
@@ -735,17 +754,38 @@ node scripts/page-sql-inventory.mjs --verbose
 #     到底从 lib/data.ts 取走了哪些符号（AST 取 import 具名绑定，不是正则），再对每个被页面
 #     取走的导出函数在**本文件内**做调用闭包：只要可达路径上出现 getPool / pool.query /
 #     beginTransaction 就算"这条读还在 Next 进程里摸 MySQL"。
-#   · 为什么差分闸门抓不到它：这 14 条读**从来没有 HTTP 面**。运营台是 Server Component 直调
+#   · 为什么差分闸门抓不到它：这些读**从来没有 HTTP 面**。运营台是 Server Component 直调
 #     lib/data.ts，/api/admin/* 那四条路由只有 POST（写侧）。没有对等可请求面，对拍、契约基线、
 #     路由盘点三道就都没有它们的位置——三道全绿而"页面只剩一条取数路"这句话是错的。
-#   · 棘轮而不是进度条：登记表（今天 14 条）之外冒出新面孔 → 红；登记表里某条已经没有本地
-#     SQL 却没删登记 → 也红。清到 0 条是 P7f-2 的开工条件，不是它的副产品。
+#   · 棘轮而不是进度条：登记表（今天 8 条，全是运营台）之外冒出新面孔 → 红；登记表里某条已经没有
+#     本地 SQL 却没删登记 → 也红。清到 0 条是 P7f-2 的开工条件，不是它的副产品。
+#     首页 3 条 + 个人中心 2 条 + 书房 1 条已在 P7f-1d 迁走并从登记表删除（棘轮当场变红提醒，
+#     改完才绿——这个"红一次"就是它在工作）。
 #   · 反证跑过两个方向：往 listArticles 注一句 `await getPool()` → 当场报出 5 条，其中
 #     listHot/listRelated 标「经由 listArticles」、listWeekly 标「经由 listHot」（证明可达性
 #     与跨函数闭包真的在跑，而不是只看函数体第一行）；往登记表塞一个没 SQL 的名字 → 报
-#     "已经没有本地 SQL 了"。复原即回到 14 条 PASS。
+#     "已经没有本地 SQL 了"。复原即回到登记表条数 PASS。
 #   · 正则版曾经把 listWeekly 判成直连 MySQL——它下一个函数的文档注释里写着"先 INSERT 占位、
 #     再 FOR UPDATE 扣款"。这一道用 AST 不用正则切正文，教训见下一节。
+
+# 19) 页面读端点核对：给"根本没有对岸"的那六条读立一个裁判。
+node scripts/pagereads-check.mjs
+#   · 闸门 18 数清还剩几条，闸门 1′ 冻住已有 HTTP 面的形状，但迁过来的这六条**两头都不沾**：
+#     没有 Node 路由可对拍，也没有 Node 时代的应答可冻结。删掉 lib/data-legacy.ts 之后，
+#     "Java 这六条算得对不对"将再没有任何参照物——所以裁判换成**自己回库把同一个数再算一遍**。
+#   · 40 项：六条端点的应答方（x-backend）、全站四计数、作者榜逐行 + limit 前缀一致 + limit
+#     越界不 500、关注流逐行 + 游客/伪造会话必须 401、成就墙 14 枚逐字段（含门槛文案与千分位）、
+#     领取状态对 point_ledger、专栏题名建议（含后缀轮换与「已有 N 篇」的数字）。
+#   · 三条不糊弄的规矩：① **宾语必须存在**——库里没人关注任何作者时，"复算==Java"是两条空数组
+#     互相盖章，那条判据记 SKIP 不记 PASS（今天真有一条这样：只有一个账号有可显示的关注流，
+#     "换 cookie 就换一份动态流"因此 SKIP）；② **身份必须验**——这四条 /me 读签名上不收 userId，
+#     只认 cookie，所以游客与伪造会话都必须 401，否则"忘了读 cookie"也能全绿；
+#     ③ **并列不硬判**——作者榜的 ORDER BY 有同票可能，MySQL 不保证并列稳定，
+#     有并列时只比"排序键非递增 + 行内容集合"。
+#   · 反证两轮：整道打 Node :3200 → 37 红、退出码 1；只改闸门自己的口径（"著作等身"门槛 10→5、
+#     千分位 en-US→de-DE、后缀表手记↔札记对调）→ 精确红在成就墙 3 条与题名建议 2 条，其余不动。
+#     第一轮顺带揪出闸门自己一处假绿：端点返回 [] 时逐行相等与 slice(0,0) 相等，判据却记 PASS。
+#   · 整道**只读**，不写库、不留数据；开跑先问 DATABASE()，连到真库 inkstack 会警告。
 ```
 
 切流与回滚：
@@ -893,11 +933,11 @@ mvn spring-boot:run                  # http://localhost:3101
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
 ├── contract/               # 闸门 1′ 的冻结基线：每个接口一份"应答该长成这样"（30 条）
-├── scripts/                # 十九道闸门（parity / contract-check / interop / paywall / page-check
+├── scripts/                # 二十道闸门（parity / contract-check / interop / paywall / page-check
 │                           #   / auth-flow / proxy-cutover / money-check / route-inventory
 │                           #   / community-check / studio-check / admin-check / study-check
 │                           #   / import-check / ai-check / agent-engine-check / schema-check
-│                           #   / rate-limit-check / page-sql-inventory）
+│                           #   / rate-limit-check / page-sql-inventory / pagereads-check）
 │                           #   + 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```

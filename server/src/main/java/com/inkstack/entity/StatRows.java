@@ -39,4 +39,29 @@ public final class StatRows {
     private Long sales;
     private Long earned;
   }
+
+  /**
+   * 首页数据横幅的四个全站计数。列名逐字对齐 Node 的 platformStats 返回键，
+   * 因为 {@code Map.of} 的键序不参与契约、但**键名**是前端直接取的。
+   */
+  @Data
+  public static class Platform {
+    private Long articles;
+    private Long authors;
+    private Long qaTotal;
+    private Long tipsTotal;
+  }
+
+  /** 首页作者榜一行：按获赞排序，获赞同则按阅读。 */
+  @Data
+  public static class AuthorRank {
+    private Long id;
+    private String nickname;
+    private String avatarText;
+    private String avatarTone;
+    private String avatarShape;
+    private Long likes;
+    private Long articles;
+    private Long readTotal;
+  }
 }

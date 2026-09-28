@@ -470,8 +470,11 @@ async function testBadge(buyer, buyerId, mark) {
   console.log("\n## 6 集齐徽章奖励");
   const beforeJ = await call(JAVA, "POST", "/api/me/badge-claim", {}, buyer);
   const beforeN = await call(NODE, "POST", "/api/me/badge-claim", {}, buyer);
+  // P7f-1d 起这条不再是"两套判定对拍"：Node 那条路由的 listAchievements 已经改问 Java，
+  // 剩下的差分只在**发放分支与文案**（锁行、流水判重、站内信、message 里的枚数）。
+  // 判定的正确性交给闸门 19（回库复算成就墙）。整条路由删掉后（P7f-2）这里只剩 Java 一侧。
   check(beforeN.status === beforeJ.status && beforeN.json?.error === beforeJ.json?.error,
-    "未集齐时两栈'还差几枚'逐字一致（连签与余额两项都参与判定）",
+    "两栈'还差几枚'逐字一致（Node 侧的计数已借道 Java，比的是分支与文案）",
     `node=${beforeN.json?.error} java=${beforeJ.json?.error}`);
 
   // 临时把探针账号刷成"全成就"：10 篇过发文 + 7 天连签 + 关注关系 + 分身问答 + 余额。
