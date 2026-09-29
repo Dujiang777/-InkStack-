@@ -82,4 +82,27 @@ public final class MeRows {
     private Long drafts;
     private Long tipIncome;
   }
+
+  /**
+   * 个人中心的账号资料一行（P7f-1f-a，从 {@code app/me/page.tsx} 那句就地写的 SELECT 搬来）。
+   *
+   * <p>别名与列的兜底顺序都照原句：{@code IFNULL(bio,'')} 与 {@code COALESCE(avatar_tone,'')}
+   * 不是冗余——页面对"没有这一列的值"和"空串"的显示不一样，去掉兜底就会多出一种要判的 null。
+   */
+  @Data
+  public static class Profile {
+    private String bio;
+    private String avatarText;
+    private String avatarTone;
+    private String avatarShape;
+    private String createdAt;
+  }
+
+  /** 墨水账户流水一行。'%m-%d %H:%i' 的格式化留在 SQL 里，与 Node 同处、同格式。 */
+  @Data
+  public static class Ledger {
+    private Long delta;
+    private String reason;
+    private String at;
+  }
 }

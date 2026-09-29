@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // 闸门 19：页面读端点核对（用 MySQL 独立复算当裁判）。
 //
-// 为什么这一道必须存在：P7f-1d / P7f-1e 迁走的这十四读，原本根本没有 HTTP 面——它们是 Server
-// Component 在 Next 进程里直接摸 MySQL 的。于是对拍（闸门 1）看不见它们：两侧都得上 HTTP 才有的比；
+// 为什么这一道必须存在：P7f-1d / P7f-1e / P7f-1f-a 迁走的这**十八读**，原本根本没有 HTTP 面——
+// 它们是 Server Component 在 Next 进程里直接摸 MySQL 的（最后那四条更特殊：SQL 就写在 page.tsx 里，
+// 连 lib/data.ts 都不经过，所以闸门 18 的第一版一条也数不到）。
+// 于是对拍（闸门 1）看不见它们：两侧都得上 HTTP 才有的比；
 // 契约基线（闸门 1′）也看不见，因为基线是从 Node 时代的**应答**冻结的，而它们从不应答。
 // 等 app/api/** 与那份遗留读 SQL 一起删掉之后，"Java 这些算得对不对"就再没有参照物了。
 //
@@ -24,7 +26,8 @@
 //   node scripts/pagereads-check.mjs
 //
 // 前提：Java 已启动（默认 http://localhost:3101），.env 的 DATABASE_URL 指向克隆库 inkstack_j。
-// 整道闸门**只读**，不写库、不留数据。
+// 判据本身只读，但有两处**临时夹具**（⑧ 的待审稿与三条举报、⑨.2b 把 probe 的印章三列
+// 临时清成 NULL），全部在 finally 里删除／恢复并复核残留——跑完库里不该有任何闸门痕迹。
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -52,6 +55,65 @@ function skipped(label, why) {
   console.log(`SKIP  ${label}  — ${why}`);
 }
 const brief = (v) => JSON.stringify(v)?.slice(0, 220) ?? "undefined";
+
+/**
+ * 并列感知的列表比对。want 是复算的候选全集（已按端点声称的次序排好）。
+ * `__ord` 必须是**可比较的原语**（数字，或 '%Y-%m-%d %H:%i:%s' 那种字典序即时序的串）：
+ * 直接把 mysql2 还回来的 Date 塞进去，比的就是 "Mon Sep 21…" 这种字符串，
+ * 闸门会红在一条根本不存在的时间倒序上。
+ */
+function listCheck(label, { want, limit, key, got, dir = "desc", redact = [] }) {
+  const expectedLen = Math.min(limit, want.length);
+  if (!check(Array.isArray(got) && got.length === expectedLen,
+    `${label} 条数与复算一致`, `期望 ${expectedLen} 实得 ${got?.length ?? "非数组"}`)) return;
+  if (!want.length) { skipped(`${label} 逐字段与复算相等`, "复算为空集，比不出任何东西"); return; }
+
+  const byKey = new Map(want.map((r) => [key(r), r]));
+  const strays = [];
+  const fieldDiff = [];
+  for (const g of got) {
+    const w = byKey.get(key(g));
+    if (!w) { strays.push(key(g)); continue; }
+    for (const [f, v] of Object.entries(g)) {
+      if (String(v) !== String(w[f])) {
+        const hide = redact.includes(f);
+        fieldDiff.push(`${String(key(g))}.${f}: 期望 ${hide ? "‹隐去›" : brief(w[f])} 实得 ${hide ? "‹隐去›" : brief(v)}`);
+      }
+    }
+  }
+  check(strays.length === 0, `${label} 每一行都在复算结果里`, strays.slice(0, 3).join(" "));
+  check(fieldDiff.length === 0, `${label} 逐字段与复算相等`,
+    fieldDiff.slice(0, 3).join(" | ") || `${got.length} 行全等${redact.length ? `（${redact.join("/")} 不外显）` : ""}`);
+
+  const ordOf = (g) => {
+    const w = byKey.get(key(g));
+    return w ? w.__ord : null;
+  };
+  const keys = got.map(ordOf);
+  check(keys.every((k) => k !== null && k !== undefined), `${label} 每一行都取得到排序键`, `${keys.length} 行`);
+  const mono = keys.every((k, i) => i === 0 || (dir === "desc" ? k <= keys[i - 1] : k >= keys[i - 1]));
+  check(mono, `${label} 排序键单调（${dir}）`, `${keys[0]} … ${keys[keys.length - 1]}`);
+
+  const windowRows = want.slice(0, expectedLen);
+  const ordKeys = windowRows.map((r) => r.__ord);
+  const tieInside = new Set(ordKeys).size < ordKeys.length;
+  const boundaryTie = want.length > expectedLen
+    && windowRows[expectedLen - 1].__ord === want[expectedLen].__ord;
+  if (boundaryTie) {
+    skipped(`${label} 窗口集合与复算完全一致`,
+      `第 ${expectedLen}/${expectedLen + 1} 名的排序键并列，MySQL 不保证谁进窗口——只钉"每一行都在候选里"`);
+  } else {
+    const sameSet = got.map(key).sort().join("\u0001") === windowRows.map(key).sort().join("\u0001");
+    check(sameSet, `${label} 窗口集合与复算完全一致`,
+      `期望 ${brief(windowRows.slice(0, 2).map(key))} 实得 ${brief(got.slice(0, 2).map(key))}`);
+  }
+  if (!tieInside && !boundaryTie) {
+    check(got.map(key).join("\u0001") === windowRows.map(key).join("\u0001"),
+      `${label} 无并列时逐行同序`, `实得 ${brief(got.map(key).slice(0, 3))}`);
+  } else {
+    skipped(`${label} 无并列时逐行同序`, "窗口内有并列，行序不由 SQL 决定");
+  }
+}
 
 /**
  * 闸门自己出错时必须**记一项失败并退出 1**，而不是甩一段栈就完事。
@@ -228,7 +290,7 @@ if (dbUrl.pathname.slice(1) !== "inkstack_j") {
   console.log(`⚠ 连的是 ${dbUrl.pathname.slice(1)}，不是克隆库 inkstack_j——本闸门只读，不动数据，但请确认这是你想要的。`);
 }
 
-/** 十四条都得由 Java 应答：x-backend 是唯一硬证据（Node 侧这些读根本没有路由）。 */
+/** 十八条都得由 Java 应答：x-backend 是唯一硬证据（Node 侧这些读根本没有路由）。 */
 const endpoints = [
   "/api/platform/stats", "/api/platform/top-authors?limit=5",
   "/api/me/achievements", "/api/me/following-feed", "/api/me/badge-reward",
@@ -403,7 +465,8 @@ for (const p of endpoints) {
 }
 
 /* ⑦ 越权：游客不能问到别人的数 */
-for (const p of ["/api/me/achievements", "/api/me/following-feed", "/api/me/badge-reward", "/api/me/series-title-suggestions"]) {
+for (const p of ["/api/me/achievements", "/api/me/following-feed", "/api/me/badge-reward", "/api/me/series-title-suggestions",
+  "/api/me/profile", "/api/me/points", "/api/security/overview"]) {
   const r = await ask(p);
   check(r.status === 401, `游客打 ${p} 必须 401，不能回任何人的数据`, `status=${r.status} ${brief(r.json).slice(0, 60)}`);
   // 畸形会话也不能"顺手当成某个默认用户"——那是一条把身份判错却仍然 200 的隐蔽路径。
@@ -421,7 +484,7 @@ for (const p of ["/api/platform/stats", "/api/platform/top-authors?limit=5"]) {
  * 所以除了内容对不对，必须先证明"游客 / 伪造会话 / 非运营"三种人一个字节都拿不到；
  * ② 它们几乎全是 `ORDER BY 时间 DESC LIMIT n`，而 MySQL 对**并列行不保证稳定顺序**——
  * 硬按行序比，闸门就会随机红，那种红会让人开始怀疑所有绿。
- * 所以列表比对交给下面的 listCheck：并列只在"窗口内部"和"窗口边界"两处真正影响结果，
+ * 所以列表比对交给顶层的 listCheck：并列只在"窗口内部"和"窗口边界"两处真正影响结果，
  * 就只在那两处放开，其余一律逐行钉死。
  */
 {
@@ -429,64 +492,7 @@ for (const p of ["/api/platform/stats", "/api/platform/top-authors?limit=5"]) {
     "/api/admin/reports", "/api/admin/actions", "/api/admin/orders", "/api/admin/comments",
     "/api/admin/insights"];
 
-  /**
-   * 并列感知的列表比对。want 是复算的候选全集（已按端点声称的次序排好）。
-   * `__ord` 必须是**可比较的原语**（数字，或 '%Y-%m-%d %H:%i:%s' 那种字典序即时序的串）：
-   * 直接把 mysql2 还回来的 Date 塞进去，比的就是 "Mon Sep 21…" 这种字符串，
-   * 闸门会红在一条根本不存在的时间倒序上。
-   */
-  function listCheck(label, { want, limit, key, got, dir = "desc", redact = [] }) {
-    const expectedLen = Math.min(limit, want.length);
-    if (!check(Array.isArray(got) && got.length === expectedLen,
-      `${label} 条数与复算一致`, `期望 ${expectedLen} 实得 ${got?.length ?? "非数组"}`)) return;
-    if (!want.length) { skipped(`${label} 逐字段与复算相等`, "复算为空集，比不出任何东西"); return; }
-
-    const byKey = new Map(want.map((r) => [key(r), r]));
-    const strays = [];
-    const fieldDiff = [];
-    for (const g of got) {
-      const w = byKey.get(key(g));
-      if (!w) { strays.push(key(g)); continue; }
-      for (const [f, v] of Object.entries(g)) {
-        if (String(v) !== String(w[f])) {
-          const hide = redact.includes(f);
-          fieldDiff.push(`${String(key(g))}.${f}: 期望 ${hide ? "‹隐去›" : brief(w[f])} 实得 ${hide ? "‹隐去›" : brief(v)}`);
-        }
-      }
-    }
-    check(strays.length === 0, `${label} 每一行都在复算结果里`, strays.slice(0, 3).join(" "));
-    check(fieldDiff.length === 0, `${label} 逐字段与复算相等`,
-      fieldDiff.slice(0, 3).join(" | ") || `${got.length} 行全等${redact.length ? `（${redact.join("/")} 不外显）` : ""}`);
-
-    const ordOf = (g) => {
-      const w = byKey.get(key(g));
-      return w ? w.__ord : null;
-    };
-    const keys = got.map(ordOf);
-    check(keys.every((k) => k !== null && k !== undefined), `${label} 每一行都取得到排序键`, `${keys.length} 行`);
-    const mono = keys.every((k, i) => i === 0 || (dir === "desc" ? k <= keys[i - 1] : k >= keys[i - 1]));
-    check(mono, `${label} 排序键单调（${dir}）`, `${keys[0]} … ${keys[keys.length - 1]}`);
-
-    const windowRows = want.slice(0, expectedLen);
-    const ordKeys = windowRows.map((r) => r.__ord);
-    const tieInside = new Set(ordKeys).size < ordKeys.length;
-    const boundaryTie = want.length > expectedLen
-      && windowRows[expectedLen - 1].__ord === want[expectedLen].__ord;
-    if (boundaryTie) {
-      skipped(`${label} 窗口集合与复算完全一致`,
-        `第 ${expectedLen}/${expectedLen + 1} 名的排序键并列，MySQL 不保证谁进窗口——只钉"每一行都在候选里"`);
-    } else {
-      const sameSet = got.map(key).sort().join("\u0001") === windowRows.map(key).sort().join("\u0001");
-      check(sameSet, `${label} 窗口集合与复算完全一致`,
-        `期望 ${brief(windowRows.slice(0, 2).map(key))} 实得 ${brief(got.slice(0, 2).map(key))}`);
-    }
-    if (!tieInside && !boundaryTie) {
-      check(got.map(key).join("\u0001") === windowRows.map(key).join("\u0001"),
-        `${label} 无并列时逐行同序`, `实得 ${brief(got.map(key).slice(0, 3))}`);
-    } else {
-      skipped(`${label} 无并列时逐行同序`, "窗口内有并列，行序不由 SQL 决定");
-    }
-  }
+  /** 列表比对用顶层的 listCheck（P7f-1f-a 提出来的，⑨ 那四条读同样要用）。 */
 
   const staff = ACTORS.test;
   const notStaff = ACTORS.writer ?? ACTORS.probe;
@@ -861,6 +867,217 @@ for (const p of ["/api/platform/stats", "/api/platform/top-authors?limit=5"]) {
       check(leftReports === 0 && leftArticles === 0, "夹具已清干净（审核队列 / 举报里没有闸门留下的行）",
         `残留举报 ${leftReports} / 文章 ${leftArticles}`);
     }
+  }
+}
+
+/* ⑨ 四个页面就地 SQL 的新家（P7f-1f-a）
+ *
+ * 这一族最特殊的不是它难算，而是它**原本不在任何判据的视野里**：SQL 直接写在 page.tsx 里，
+ * 连 lib/data.ts 都不经过，所以闸门 18 的第一版一条也数不到；Node 侧又从来没有对应的路由，
+ * 契约基线（闸门 1′）冻不出东西、对拍（闸门 1）没有宾语。裁判仍然只能是回库独立复算。
+ *
+ * 复算一律不抄实现的写法，否则两边共享同一个缺陷时"独立证人"就成了同案犯（P7f-1e 的教训）：
+ *   · 九项计数按九句各自查（实现是一句九个子查询）；
+ *   · 连签按**完整定义**走（实现是 400 行回溯 + 从昨天或今天往前数）；
+ *   · '%m-%d %H:%i' 与 '%Y-%m-%d' 的格式化在 JS 里重做一遍（实现交给 DATE_FORMAT）。
+ */
+{
+  const staff = ACTORS.test;
+  const notStaff = ACTORS.writer ?? ACTORS.probe;
+  const people = [["writer", ACTORS.writer], ["test", ACTORS.test], ["probe", ACTORS.probe]]
+    .filter((pair) => pair[1]);
+
+  const pad = (n) => String(n).padStart(2, "0");
+  /** 本地日历日键（与 Node 页面当年那个 dayKey 同法：DATE 列按本地分量读回原样）。 */
+  const localDay = (offset) => {
+    const d = new Date();
+    d.setDate(d.getDate() - offset);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  /** '%m-%d %H:%i'——MySQL 那个格式串的 JS 版本。mysql2 按本地时区解析 DATETIME，取分量即原墙钟。 */
+  const mmddhhmm = (v) => v instanceof Date
+    ? `${pad(v.getMonth() + 1)}-${pad(v.getDate())} ${pad(v.getHours())}:${pad(v.getMinutes())}`
+    : String(v ?? "");
+
+  /* ⑨.1 运营台总览：九项计数 + 最近问答。先证明门禁在，再比内容。 */
+  {
+    const guest = await ask("/api/admin/overview");
+    check(guest.status === 401, `游客打 /api/admin/overview 必须 401，一个计数都不该给`, `status=${guest.status}`);
+    const forged = await ask("/api/admin/overview", "ink_session=not-a-real-session");
+    check(forged.status === 401, `伪造会话打 /api/admin/overview 同样 401`, `status=${forged.status}`);
+    if (notStaff && staff && notStaff.id !== staff.id) {
+      const r = await ask("/api/admin/overview", notStaff.cookie);
+      check(r.status === 403, `非运营打 /api/admin/overview 是 403 而不是"少几条"`, `status=${r.status}`);
+    }
+  }
+  if (staff) {
+    const r = await ask("/api/admin/overview", staff.cookie);
+    if (check(r.status === 200 && r.backend === "inkstack-java", "运营台总览由 Java 应答",
+      `status=${r.status} backend=${r.backend || "无"}`)) {
+      // 九句各自查，而不是把实现那"一句九个子查询"照抄一遍
+      const want = {
+        users: await num(`SELECT COUNT(*) FROM users`),
+        articles: await num(`SELECT COUNT(*) FROM articles WHERE status='published' AND review_status='approved'`),
+        pending: await num(`SELECT COUNT(*) FROM articles WHERE status='published' AND review_status='pending'`),
+        comments: await num(`SELECT COUNT(*) FROM comments`),
+        qa: await num(`SELECT COUNT(*) FROM agent_qa`),
+        reports: await num(`SELECT COUNT(*) FROM reports WHERE status='open'`),
+        tips: await num(`SELECT IFNULL(SUM(amount),0) FROM article_tips`),
+        topup: await num(`SELECT IFNULL(SUM(points),0) FROM topup_orders WHERE status='paid'`),
+        banned: await num(`SELECT COUNT(*) FROM users WHERE banned=1`),
+      };
+      const got = r.json?.stats ?? {};
+      const wantKeys = Object.keys(want);
+      check(JSON.stringify(Object.keys(got)) === JSON.stringify(wantKeys),
+        "运营台九项计数的键集与键序都不许多也不缺", `实得 ${Object.keys(got).join(",")}`);
+      const mism = wantKeys.filter((k) => Number(got[k]) !== want[k])
+        .map((k) => `${k}: 期望 ${want[k]} 实得 ${got[k]}`);
+      check(mism.length === 0, "运营台九项计数逐项与复算相等（九句各自查，不抄实现那句九子查询）",
+        mism.slice(0, 3).join(" | ") || `${wantKeys.length} 项全等`);
+
+      const qaRaw = await rows(`SELECT question, created_at,
+              DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s') AS ord FROM agent_qa
+              ORDER BY created_at DESC LIMIT 8`);
+      listCheck("运营台最近问答", {
+        // 格式化在 JS 里重做：DATE_FORMAT 那个串由实现那边给，抄过来就等于让它自己证明自己
+        want: qaRaw.map((x) => ({ question: String(x.question), createdAt: mmddhhmm(x.created_at), __ord: String(x.ord) })),
+        limit: 8, key: (q) => `${q.question}|${q.createdAt}`, got: r.json?.recentQa ?? [],
+      });
+      if (!qaRaw.length) skipped("运营台最近问答有宾语", "库里一条问答都没有，比不出任何东西");
+    }
+  } else {
+    skipped("运营台总览的内容判据", ".env 里没有运营账号（INK_TEST_*），拿不到 200 的应答");
+  }
+
+  /* ⑨.2 个人中心账号资料：五个字段逐个复算（含"印文留空回退昵称首字"那条默认值） */
+  for (const [who, a] of people) {
+    const r = await ask("/api/me/profile", a.cookie);
+    if (!check(r.status === 200 && r.backend === "inkstack-java",
+      `${who} 的账号资料由 Java 应答`, `status=${r.status} backend=${r.backend || "无"}`)) continue;
+    const row = await only(`SELECT IFNULL(bio,'') AS bio, avatar_text AS avatarText,
+              COALESCE(avatar_tone,'') AS avatarTone, COALESCE(avatar_shape,'') AS avatarShape,
+              DATE_FORMAT(created_at,'%Y-%m-%d') AS createdAt FROM users WHERE id = ? LIMIT 1`, [a.id]);
+    const sealRaw = row?.avatarText;
+    const want = {
+      bio: String(row?.bio ?? ""),
+      // 与 PATCH /api/me/profile 写库那条同式：留空回退昵称首字（UTF-16 码元，emoji 会切半个）
+      avatarText: sealRaw == null || sealRaw === "" ? String(a.nickname).slice(0, 1) : String(sealRaw),
+      avatarTone: String(row?.avatarTone ?? ""),
+      avatarShape: String(row?.avatarShape ?? ""),
+      createdAt: String(row?.createdAt ?? "—"),
+    };
+    const got = r.json ?? {};
+    check(JSON.stringify(Object.keys(got)) === JSON.stringify(Object.keys(want)),
+      `${who} 的账号资料五个键、键序都不许多也不少`, `实得 ${Object.keys(got).join(",")}`);
+    const mism = Object.entries(want).filter(([k, v]) => got[k] !== v)
+      .map(([k, v]) => `${k}: 期望 ${brief(v)} 实得 ${brief(got[k])}`);
+    check(mism.length === 0, `${who} 的账号资料逐字段与复算相等`, mism.slice(0, 3).join(" | "));
+  }
+
+
+  /* ⑨.2b 账号资料的"印文留空回退昵称首字"那条支路必须被证明走到了（P7f-1e 的教训：
+   *      改错不红的判据等于一条没测过的支路）。三个固定账号的 avatar_text 都非空，
+   *      正常跑进不去那条回退，所以临时把 probe 的印文清成**空串**，读完恢复原值。
+   *
+   *      为什么是空串而不是 NULL：schema.sql 里 avatar_text / avatar_tone / avatar_shape /
+   *      created_at 全写的是 NOT NULL，把它置 NULL 会被数据库直接拒掉（第一版夹具就是这么崩的）。
+   *      顺带记下两处**结构上不可达**的分支，别把它们当成"测过了"：实现与复算里那些
+   *      COALESCE(...) 与 "—" 默认值只对"整行不存在"生效，而那一种需要拿一枚指向
+   *      已删除用户的会话——本闸门刻意不造。 */
+  {
+    const a = ACTORS.probe;
+    if (!a) {
+      skipped("账号资料的印文回退支路", ".env 里没有 probe 账号（INK_PROBE_*），没有可临时改动的行");
+    } else {
+      const before = await only(`SELECT avatar_text FROM users WHERE id = ?`, [a.id]);
+      try {
+        await pool.query(`UPDATE users SET avatar_text = '' WHERE id = ?`, [a.id]);
+        const r = await ask("/api/me/profile", a.cookie);
+        const got = r.json ?? {};
+        const first = String(a.nickname).slice(0, 1);
+        check(r.status === 200 && got.avatarText === first,
+          `印文为空串时确实回退成昵称首字「${first}」（这条支路走到了）`,
+          `avatar_text='' → 实得 ${brief(got.avatarText)}`);
+        check(got.avatarTone === "" && got.avatarShape === "",
+          "印泥色 / 印式为空串时就是空串，不是 \"null\" 也不是占位符",
+          `实得 ${brief(got.avatarTone)} 与 ${brief(got.avatarShape)}`);
+      } finally {
+        await pool.query(`UPDATE users SET avatar_text = ? WHERE id = ?`, [before?.avatar_text ?? "墨", a.id]);
+        const after = await only(`SELECT avatar_text FROM users WHERE id = ?`, [a.id]);
+        check(String(after?.avatar_text ?? "") === String(before?.avatar_text ?? ""),
+          "夹具已恢复（probe 的印文回到改动前）",
+          `改前 ${brief(before?.avatar_text ?? null)} 改后 ${brief(after?.avatar_text ?? null)}`);
+      }
+    }
+  }
+
+  /* ⑨.3 墨水账户四块：余额 / 今日额度是否已发 / 连签 / 流水 20 条 */
+  for (const [who, a] of people) {
+    const r = await ask("/api/me/points", a.cookie);
+    if (!check(r.status === 200 && r.backend === "inkstack-java",
+      `${who} 的墨水账户由 Java 应答`, `status=${r.status} backend=${r.backend || "无"}`)) continue;
+    const got = r.json ?? {};
+    const balance = await num(`SELECT points_balance FROM users WHERE id = ?`, [a.id]);
+    check(Number(got.balance) === balance, `${who}·余额与 users 表当前值相等`,
+      `期望 ${balance} 实得 ${got.balance}`);
+
+    const quota = await only(`SELECT DATE_FORMAT(last_quota_date,'%Y-%m-%d') AS d FROM users WHERE id = ?`, [a.id]);
+    const wantDone = quota?.d != null && String(quota.d) === localDay(0);
+    check(got.quotaDone === wantDone, `${who}·"今日 30 滴已入仓"与 last_quota_date 一致`,
+      `last_quota_date=${brief(quota?.d ?? null)} 今天=${localDay(0)} 实得 ${got.quotaDone}`);
+
+    const days = new Set((await rows(
+      `SELECT DATE_FORMAT(checkin_date,'%Y-%m-%d') AS d FROM checkins WHERE user_id = ?`, [a.id]
+    )).map((x) => x.d));
+    let off = days.has(localDay(0)) ? 0 : days.has(localDay(1)) ? 1 : -1;
+    let wantStreak = 0;
+    while (off >= 0 && days.has(localDay(off))) { wantStreak++; off++; }
+    check(Number(got.streak) === wantStreak, `${who}·连签与完整定义的走查相等`,
+      `期望 ${wantStreak} 实得 ${got.streak}（签到行数 ${days.size}）`);
+
+    // 流水按 id DESC——全序、没有并列，所以逐元素严格比，不需要并列放开
+    const led = await rows(`SELECT delta, reason, DATE_FORMAT(created_at,'%m-%d %H:%i') AS at
+       FROM point_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 20`, [a.id]);
+    const wantLed = led.map((x) => ({ delta: Number(x.delta), reason: String(x.reason), at: String(x.at) }));
+    if (!wantLed.length) {
+      skipped(`${who} 的墨水流水逐条与复算相等`, "这个账号一条流水都没有，比不出任何东西");
+    } else {
+      check(JSON.stringify(got.ledger ?? []) === JSON.stringify(wantLed),
+        `${who} 的墨水流水逐条与复算相等（20 条上限、格式、正负号）`,
+        `期望 ${wantLed.length} 条 ${brief(wantLed[0])}｜实得 ${(got.ledger ?? []).length} 条 ${brief((got.ledger ?? [])[0])}`);
+    }
+  }
+
+  /* ⑨.4 安全中心两块：留痕 20 条 + 两步验证开关 */
+  for (const [who, a] of people) {
+    const r = await ask("/api/security/overview", a.cookie);
+    if (!check(r.status === 200 && r.backend === "inkstack-java",
+      `${who} 的安全中心由 Java 应答`, `status=${r.status} backend=${r.backend || "无"}`)) continue;
+    const got = r.json ?? {};
+    const raw = await rows(`SELECT id, event, ip, detail, created_at,
+            DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s') AS ord FROM audit_logs
+            WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`, [a.id]);
+    listCheck(`${who} 的留痕`, {
+      want: raw.map((x) => ({
+        id: Number(x.id), event: String(x.event), ip: x.ip ?? null, detail: x.detail ?? null,
+        created_at: x.created_at instanceof Date ? x.created_at.toISOString() : String(x.created_at ?? ""),
+        __ord: String(x.ord),
+      })),
+      limit: 20, key: (x) => String(x.id), got: got.audits ?? [],
+    });
+    if (!raw.length) skipped(`${who} 的留痕有宾语`, "这个账号一条审计都没有");
+    const totp = await num(`SELECT IFNULL(totp_enabled,0) FROM users WHERE id = ?`, [a.id]);
+    check(got.totpEnabled === (totp === 1), `${who}·两步验证开关与 users.totp_enabled 一致`,
+      `totp_enabled=${totp} 实得 ${got.totpEnabled}`);
+  }
+
+  /* ⑨.5 这一族自己也得有"支路走到了"的证据：三个身份里至少要有一个拿得到留痕，
+   *      否则上面那四条 listCheck 会全部空集通过（P7f-1e 被这类假绿咬过一次）。 */
+  {
+    const any = await num(`SELECT COUNT(*) FROM audit_logs
+      WHERE user_id IN (${people.map(() => "?").join(",")})`, people.map(([, a]) => a.id));
+    check(people.length === 0 || any > 0, "留痕判据有宾语（三个身份里至少一条审计）",
+      people.length ? `${people.length} 个身份共 ${any} 条` : "没有任何身份可登录");
   }
 }
 

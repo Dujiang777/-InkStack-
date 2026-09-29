@@ -331,3 +331,62 @@ export async function remoteAdminComments(): Promise<AdminCommentRow[]> {
 export async function remoteAdminInsights(): Promise<AdminInsights> {
   return ask<AdminInsights>("/api/admin/insights");
 }
+
+/* ---------- 四个页面就地 SQL 的新家（P7f-1f-a） ----------
+ *
+ * 这一族比运营台八张表更隐蔽：SQL 就写在 page.tsx 里，连 lib/data.ts 都不经过，
+ * 所以"被页面取走的导出函数"那种判据一条也数不到（闸门 18 拓宽之后才现形，见其文件头）。
+ * 类型定义放在这里而不是 lib/data.ts：lib/data.ts 是"页面取数函数"的登记处，
+ * 而这四个读**不经过 lib/data.ts**，页面直接 import 本模块——把类型放远处只会让人以为还有中间层。
+ */
+
+export type AdminOverview = {
+  stats: {
+    users: number;
+    articles: number;
+    pending: number;
+    comments: number;
+    qa: number;
+    reports: number;
+    tips: number;
+    topup: number;
+    banned: number;
+  };
+  recentQa: { question: string; createdAt: string }[];
+};
+
+export type MeProfile = {
+  bio: string;
+  avatarText: string;
+  avatarTone: string;
+  avatarShape: string;
+  createdAt: string;
+};
+
+export type PointsOverview = {
+  balance: number;
+  quotaDone: boolean;
+  streak: number;
+  ledger: { delta: number; reason: string; at: string }[];
+};
+
+export type SecurityOverview = {
+  audits: { id: number; event: string; ip: string | null; detail: string | null; created_at: string }[];
+  totpEnabled: boolean;
+};
+
+export async function remoteAdminOverview(): Promise<AdminOverview> {
+  return ask<AdminOverview>("/api/admin/overview");
+}
+
+export async function remoteMeProfile(): Promise<MeProfile> {
+  return ask<MeProfile>("/api/me/profile");
+}
+
+export async function remotePointsOverview(): Promise<PointsOverview> {
+  return ask<PointsOverview>("/api/me/points");
+}
+
+export async function remoteSecurityOverview(): Promise<SecurityOverview> {
+  return ask<SecurityOverview>("/api/security/overview");
+}

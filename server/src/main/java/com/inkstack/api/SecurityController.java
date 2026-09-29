@@ -5,6 +5,7 @@ import com.inkstack.auth.LoginGuard;
 import com.inkstack.auth.PasswordChangeService;
 import com.inkstack.auth.PasswordHasher;
 import com.inkstack.auth.Totp;
+import com.inkstack.entity.AuditRow;
 import com.inkstack.entity.SessionRow;
 import com.inkstack.entity.User;
 import com.inkstack.common.NodeShapes;
@@ -118,6 +119,37 @@ public class SecurityController {
       rows.add(item);
     }
     return ResponseEntity.ok(Map.of("ok", true, "sessions", rows));
+  }
+
+  /**
+   * 安全中心的两块账号读数（P7f-1f-a）：最近 20 条留痕 + 两步验证开没开。
+   *
+   * <p>它们原本写在 {@code app/security/page.tsx} 里，是两句就地的 {@code pool.query}，
+   * 所以从来没有 HTTP 面、也就从来没有对岸——正确性由闸门 19 回库复算钉住。
+   *
+   * <p>{@code created_at} 回的是 ISO 串（{@link NodeShapes#iso}），与页面原来那句
+   * {@code isoOf(...)} 同形：组件用 {@code new Date(s.replace(" ", "T"))} 解析，
+   * 回 MySQL 那种 "Mon Sep 21 ..." 会让这一栏显示 Invalid Date——这个坑已经在 Node 侧踩过一次。
+   */
+  @GetMapping("/overview")
+  public ResponseEntity<Map<String, Object>> overview(@Current SessionUser me) {
+    if (me == null) {
+      return NEED_LOGIN;
+    }
+    List<Map<String, Object>> audits = new ArrayList<>();
+    for (AuditRow r : audit.recentForUser(me.id(), 20)) {
+      Map<String, Object> one = new LinkedHashMap<>();
+      one.put("id", NodeShapes.num(r.getId()));
+      one.put("event", NodeShapes.jsString(r.getEvent()));
+      one.put("ip", r.getIp());
+      one.put("detail", r.getDetail());
+      one.put("created_at", NodeShapes.iso(r.getCreatedAt()));
+      audits.add(one);
+    }
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("audits", audits);
+    out.put("totpEnabled", NodeShapes.flag(users.totpEnabledOf(me.id())));
+    return ResponseEntity.ok(out);
   }
 
   public record RevokeBody(Long id, Boolean all) {}

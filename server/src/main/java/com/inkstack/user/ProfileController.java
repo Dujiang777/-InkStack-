@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.inkstack.common.Avatars;
 import com.inkstack.common.Nicknames;
 import com.inkstack.common.NodeShapes;
+import com.inkstack.entity.MeRows;
 import com.inkstack.mapper.UserMapper;
 import com.inkstack.session.SessionUser;
 import com.inkstack.web.Bodies;
@@ -12,6 +13,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -61,6 +63,36 @@ public class ProfileController {
     out.put("avatarTone", avatarTone);
     out.put("avatarShape", avatarShape);
     out.put("bio", bio);
+    return ResponseEntity.ok(out);
+  }
+
+  /**
+   * {@code GET /api/me/profile} —— 个人中心显示的那五个字段（P7f-1f-a）。
+   *
+   * <p>它原本是一句写在 {@code app/me/page.tsx} 里的 {@code pool.query}：没有 HTTP 面，
+   * 所以对拍、契约基线、路由盘点三道全绿也看不见它。默认值（印文留空回退昵称首字、
+   * 注册日缺省 "—"）照页面原来的写法搬过来，"预览与刷新后长得不一样"这条老约束
+   * 对读侧同样成立。
+   *
+   * <p>数据库异常时这里<b>直接抛</b>，不再复刻页面那句 {@code catch} 后"简介显示为空"的降级：
+   * 一条读接口的静默降级会让读者以为账号真的没填简介，而 {@code lib/java-source.ts} 的
+   * 第三条硬规矩就是"失败必须抛出"。
+   */
+  @GetMapping("/api/me/profile")
+  public ResponseEntity<Map<String, Object>> read(@Current SessionUser me) {
+    if (me == null) {
+      return ResponseEntity.status(401).body(Map.of("error", "请先登录"));
+    }
+    MeRows.Profile r = users.profileRow(me.id());
+    // JS 的 slice(0,1) 取的是 UTF-16 码元，emoji 昵称会切出半个——这是页面一直在依赖的形状，保持
+    String sealFallback = NodeShapes.slice(me.nickname(), 1);
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("bio", r == null ? "" : NodeShapes.text(r.getBio()));
+    String seal = r == null ? "" : NodeShapes.text(r.getAvatarText());
+    out.put("avatarText", seal.isEmpty() ? sealFallback : seal);
+    out.put("avatarTone", r == null ? "" : NodeShapes.text(r.getAvatarTone()));
+    out.put("avatarShape", r == null ? "" : NodeShapes.text(r.getAvatarShape()));
+    out.put("createdAt", r == null || r.getCreatedAt() == null ? "—" : r.getCreatedAt());
     return ResponseEntity.ok(out);
   }
 }

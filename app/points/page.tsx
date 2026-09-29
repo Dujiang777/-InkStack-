@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { getCurrentUser } from "@/lib/auth";
-import { getPool } from "@/lib/db";
-import { grantDailyQuota, localDateStr } from "@/lib/points";
+import { grantDailyQuota } from "@/lib/points";
+import { javaReady, remotePointsOverview } from "@/lib/java-source";
 import TopUpClient from "@/components/TopUpClient";
 
 export const metadata = { title: "墨仓 · 墨水账户 · 墨栈 InkStack" };
@@ -20,15 +20,6 @@ function rewardForCycleDay(cd: number): number {
   if (cd >= 7) return 40;
   if (cd >= 3) return 20;
   return 10;
-}
-function dayKey(v: unknown): string {
-  if (v instanceof Date) {
-    const y = v.getFullYear();
-    const m = String(v.getMonth() + 1).padStart(2, "0");
-    const d = String(v.getDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
-  }
-  return String(v ?? "").slice(0, 10);
 }
 
 export default async function PointsPage() {
@@ -127,50 +118,13 @@ export default async function PointsPage() {
   // 懒重置：访问本页视作当天活跃，自动补发每日 30（幂等）
   await grantDailyQuota(user.id);
 
-  const pool = await getPool();
-  let balance = user.points;
-  let quotaDone = false;
-  let streak = 0;
-  let ledger: { delta: number; reason: string; at: string }[] = [];
-
-  if (pool) {
-    try {
-      const [uRows] = await pool.query(
-        "SELECT points_balance, last_quota_date FROM users WHERE id = ? LIMIT 1",
-        [user.id]
-      );
-      const u = (uRows as Record<string, unknown>[])[0];
-      if (u) {
-        balance = Number(u.points_balance);
-        quotaDone = dayKey(u.last_quota_date) === localDateStr();
-      }
-      const [cRows] = await pool.query(
-        `SELECT checkin_date FROM checkins
-          WHERE user_id = ? AND checkin_date >= CURDATE() - INTERVAL 60 DAY
-          ORDER BY checkin_date DESC`,
-        [user.id]
-      );
-      const set = new Set((cRows as { checkin_date: unknown }[]).map((r) => dayKey(r.checkin_date)));
-      const cursor = new Date();
-      if (!set.has(dayKey(cursor))) cursor.setDate(cursor.getDate() - 1);
-      while (set.has(dayKey(cursor))) {
-        streak++;
-        cursor.setDate(cursor.getDate() - 1);
-      }
-      const [lRows] = await pool.query(
-        `SELECT delta, reason, DATE_FORMAT(created_at, '%m-%d %H:%i') AS at
-           FROM point_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 20`,
-        [user.id]
-      );
-      ledger = (lRows as Record<string, unknown>[]).map((r) => ({
-        delta: Number(r.delta),
-        reason: String(r.reason),
-        at: String(r.at),
-      }));
-    } catch {
-      /* 查询失败时展示兜底值 */
-    }
-  }
+  // 四块读数原本是三句就地 pool.query + 一段页面里的连签走查（P7f-1f-a 迁给 Java）。
+  // 连签的定义现在只有 Java 一处：与 GET /api/checkin、签到发墨同一条，不会再分叉。
+  const overview = javaReady() ? await remotePointsOverview() : null;
+  const balance = overview?.balance ?? user.points;
+  const quotaDone = overview?.quotaDone ?? false;
+  const streak = overview?.streak ?? 0;
+  const ledger = overview?.ledger ?? [];
 
   const cd = cycleDayOf(streak);
   const curReward = rewardForCycleDay(cd);

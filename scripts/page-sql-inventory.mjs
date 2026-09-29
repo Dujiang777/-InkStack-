@@ -270,21 +270,20 @@ const offenders = [...reached].filter((id) => fact(id).direct).sort();
  * 登记表：今天仍由渲染层在进程内直连 MySQL 的函数，写成 `文件#函数`。
  * 每条都得先给 Java 补一个读端点（或把这件动作整个交给 Java），再从表里摘掉。
  *
- * 这张表在 P7f-1e 那天清过一次零，然后被判据拓宽到 8——见文件头。
- * 记下"为什么在这里"比记下"还剩几条"重要：前四条是页面自己写的 SQL（从来没有 HTTP 面，
- * 所以对拍与契约基线都看不见它们），后四条住在 lib 里、被若干页面共用，其中
- * `getCurrentUser` 是**每个已登录页面**都要走的一次读＋一次节流写，
+ * 这张表在 P7f-1e 那天清过一次零，第二天被判据拓宽到 8——见文件头。
+ * P7f-1f-a 摘掉前四条（页面自己写的 SQL，从来没有 HTTP 面），剩下 4 条都住在 lib 里、
+ * 被若干页面共用：其中 `getCurrentUser` 是**每个已登录页面**都要走的一次读＋一次节流写，
  * `grantDailyQuota` 更是渲染时直接发生的**发放动作**——它连"读"都不是。
+ *
+ * 摘名字的顺序也是有讲究的：先把 Java 端点与页面的 remote 调用都落地、再摘，
+ * 于是这道闸门在中间那一步一定会红一次（"登记表里某条已经没有本地 SQL"），
+ * 那个红就是它在工作——而不是"改坏了"。
  */
 const REGISTER = [
-  { id: "app/admin/page.tsx#AdminPage", why: "运营台总览的 9 项统计 + 最近 8 条问答：应并入 Java 的 /api/admin/insights" },
-  { id: "app/me/page.tsx#MePage", why: "个人中心的 bio/头像三字/注册日：应并进 Java 的当前用户读（含 /api/me 资料）" },
-  { id: "app/points/page.tsx#PointsPage", why: "墨水账户页的余额+签到连击+流水 20 条：Java 缺一个 GET /api/points/overview" },
-  { id: "app/security/page.tsx#SecurityPage", why: "安全中心的审计 20 条 + totp_enabled：Java 缺 GET /api/me/security" },
   { id: "lib/auth.ts#getCurrentUser", why: "会话解析（签名+库内有效性双保险）+ last_seen 节流写：跨栈最硬的一条，要么 Java 出 /api/me/session，要么 Next 只透传令牌不做判定" },
-  { id: "lib/auth.ts#listSessions", why: "安全中心的设备列表：Java 已有 sessions 表读写，缺一个 GET /api/me/sessions" },
+  { id: "lib/auth.ts#listSessions", why: "安全中心的设备列表：Java 的 GET /api/security/sessions 早就在应答同一份数据，这里只是把 Node 那句 pool.query 换成问它" },
   { id: "lib/link-policy.ts#allowedDomains", why: "外链白名单（渲染时读 link_whitelist）：应改问 Java 的链接策略读端点，或把审核判定整个交给 Java" },
-  { id: "lib/points.ts#grantDailyQuota", why: "渲染时发每日 30 滴——这是**写**，不是读：每日额度该由 Java 在会话/账户读路径里发，或由页面显式调一次 Java" },
+  { id: "lib/points.ts#grantDailyQuota", why: "渲染时发每日 30 滴——这是**写**，不是读：Java 的 /api/auth/me 已经在发同一份额度，等 getCurrentUser 一并过去就能整条摘掉" },
 ];
 const REGISTERED = REGISTER.map((r) => r.id);
 const whyOf = (id) => REGISTER.find((r) => r.id === id)?.why ?? "";
@@ -326,7 +325,7 @@ if (!bad && !offenders.length) {
 } else if (!bad) {
   console.log(`\n⚠ 退出码 0（实况与登记表一字不差），但渲染层仍在这 ${offenders.length} 条里摸 MySQL：`);
   console.log("  \"web 退化为纯渲染层\" 还没成立，P7f-2 的删除前提因此**不成立**——");
-  console.log("  app/api/** 与 lib/data-legacy.ts 可以删，但这 8 条得先迁完（P7f-1f），");
-  console.log("  否则删掉遗留 HTTP 面之后，这 8 处仍然是 Next 进程里的第二个后端。");
+  console.log(`  app/api/** 与 lib/data-legacy.ts 可以删，但这 ${offenders.length} 条得先迁完（P7f-1f），`);
+  console.log("  否则删掉遗留 HTTP 面之后，这几处仍然是 Next 进程里的第二个后端。");
 }
 process.exit(bad ? 1 : 0);

@@ -65,6 +65,24 @@ const mysql = createRequire(import.meta.url)("mysql2/promise");
 const conn = await mysql.createConnection(env.DATABASE_URL);
 const only = async (sql, params = []) => (await conn.query(sql, params))[0][0] ?? null;
 const many = async (sql, params = []) => (await conn.query(sql, params))[0];
+
+/**
+ * 等一条**异步落库**的行出现（默认最多 3 秒），等到就返回、等不到返回 null。
+ *
+ * 为什么闸门要等：Node 的 `app/api/admin/articles` 里 `notify(...)` 是不 await 的
+ * fire-and-forget——HTTP 已经 200，站内信却可能还在飞行。读一次就判"没发"是把**闸门的调度
+ * 竞态**当成被测方的缺陷来报，那种红既不说明问题也复现不稳定（同一条判据上午绿下午红）。
+ * 等到上限还没有，才是真正的失败。Java 侧是同步发信，本来不需要等，这条helper对它是白等一轮。
+ */
+async function waitRow(sql, params = [], timeoutMs = 3000) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const row = await only(sql, params);
+    if (row) return row;
+    if (Date.now() >= until) return null;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
 const num = async (sql, params = []) => {
   const row = await only(sql, params);
   if (!row) return 0;
@@ -312,7 +330,7 @@ async function suit() {
     "SELECT review_status AS r, review_note AS n FROM articles WHERE id = ?", [pendingId]);
   check(reject.status === 200 && rejected?.r === "rejected" && rejected?.n === "事实性错误较多",
     "驳回：原因被 trim 后落 review_note", JSON.stringify(rejected));
-  const rejectNotice = await only(
+  const rejectNotice = await waitRow(
     "SELECT title, body, link FROM notifications WHERE user_id = ? AND type='review' AND id > ? ORDER BY id DESC LIMIT 1",
     [writerId, mark.notice]);
   check(rejectNotice?.title === "文章未通过审核"
@@ -400,7 +418,7 @@ async function suit() {
   const ban = await call(JAVA, "POST", "/api/admin/users", { userId: probeId, action: "ban" }, admin);
   check(ban.status === 200 && (await num("SELECT banned FROM users WHERE id = ?", [probeId])) === 1,
     "Java 封禁读者生效", ban.json);
-  const banNotice = await only(
+  const banNotice = await waitRow(
     "SELECT title, body, link FROM notifications WHERE user_id = ? AND type='system' AND id > ? ORDER BY id DESC LIMIT 1",
     [probeId, mark.notice]);
   check(banNotice?.title === "你的账号已被封禁"

@@ -175,6 +175,57 @@ public class AdminQueryService {
   }
 
   /**
+   * 运营台顶部那 9 个计数 + 最近 8 条问答（P7f-1f-a）。
+   *
+   * <p>失败口径照页面原来的写法搬：两句各自查，**第一句成功、第二句挂**时计数保留、问答为空——
+   * 页面原来的 try 块就是这个顺序，把它合并成"一起失败一起清零"会改变可见结果。
+   * 演示模式那组假数据留在页面里（它是 UI 兜底，不是取数），Java 只负责真实读数。
+   */
+  public Map<String, Object> overview() {
+    Map<String, Object> stats = new LinkedHashMap<>();
+    stats.put("users", 0L);
+    stats.put("articles", 0L);
+    stats.put("pending", 0L);
+    stats.put("comments", 0L);
+    stats.put("qa", 0L);
+    stats.put("reports", 0L);
+    stats.put("tips", 0L);
+    stats.put("topup", 0L);
+    stats.put("banned", 0L);
+    try {
+      AdminRows.Stats r = read.stats();
+      if (r != null) {
+        stats.put("users", NodeShapes.num(r.getUsers()));
+        stats.put("articles", NodeShapes.num(r.getArticles()));
+        stats.put("pending", NodeShapes.num(r.getPending()));
+        stats.put("comments", NodeShapes.num(r.getComments()));
+        stats.put("qa", NodeShapes.num(r.getQa()));
+        stats.put("reports", NodeShapes.num(r.getReports()));
+        stats.put("tips", NodeShapes.num(r.getTips()));
+        stats.put("topup", NodeShapes.num(r.getTopup()));
+        stats.put("banned", NodeShapes.num(r.getBanned()));
+      }
+    } catch (RuntimeException e) {
+      log.warn("运营台计数失败，按页面原口径回零：{}", e.getMessage());
+    }
+    List<Map<String, Object>> recentQa = new ArrayList<>();
+    try {
+      for (AdminRows.Qa q : read.recentQa(8)) {
+        Map<String, Object> one = new LinkedHashMap<>();
+        one.put("question", NodeShapes.jsString(q.getQuestion()));
+        one.put("createdAt", NodeShapes.jsString(q.getCreatedAt()));
+        recentQa.add(one);
+      }
+    } catch (RuntimeException e) {
+      log.warn("运营台最近问答失败，按页面原口径回空数组：{}", e.getMessage());
+    }
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("stats", stats);
+    out.put("recentQa", recentQa);
+    return out;
+  }
+
+  /**
    * 运营大盘。<b>整块失败时回"零值 + 完整时间轴"</b>，与 Node 的 catch 分支一字不差：
    * 轴必须还在，否则页面上一片空白，而"图是空的"和"取数挂了"在读者眼里是两件事。
    */

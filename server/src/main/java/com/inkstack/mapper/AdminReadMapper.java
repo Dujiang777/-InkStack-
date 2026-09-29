@@ -218,4 +218,31 @@ public interface AdminReadMapper {
              (SELECT IFNULL(SUM(price), 0) FROM series_purchases) AS bundleRevenue
       """)
   AdminRows.FunnelRow funnel();
+
+  /* ---------- 运营台顶部那 9 个计数 + 最近问答（P7f-1f-a，从 app/admin/page.tsx 搬来） ----------
+   *
+   * 这句原来是写在页面文件里的，所以它对 Node 侧的任何 HTTP 面都不存在——闸门 8、对拍、
+   * 契约基线三道都看不见它，形状与取值由闸门 19 回库复算钉住。
+   * 每个子查询各查各的表，没有跨排序规则的 UNION，所以不需要显式 COLLATE。
+   */
+
+  @Select("""
+      SELECT (SELECT COUNT(*) FROM users) AS users,
+             (SELECT COUNT(*) FROM articles WHERE status='published' AND review_status='approved') AS articles,
+             (SELECT COUNT(*) FROM articles WHERE status='published' AND review_status='pending') AS pending,
+             (SELECT COUNT(*) FROM comments) AS comments,
+             (SELECT COUNT(*) FROM agent_qa) AS qa,
+             (SELECT COUNT(*) FROM reports WHERE status='open') AS reports,
+             (SELECT IFNULL(SUM(amount),0) FROM article_tips) AS tips,
+             (SELECT IFNULL(SUM(points),0) FROM topup_orders WHERE status='paid') AS topup,
+             (SELECT COUNT(*) FROM users WHERE banned=1) AS banned
+      """)
+  AdminRows.Stats stats();
+
+  /** 最近 8 条分身问答。%m-%d %H:%i 留在 SQL 里格式化——页面显示的就是这个串。 */
+  @Select("""
+      SELECT question, DATE_FORMAT(created_at, '%m-%d %H:%i') AS createdAt
+        FROM agent_qa ORDER BY created_at DESC LIMIT #{limit}
+      """)
+  List<AdminRows.Qa> recentQa(@Param("limit") int limit);
 }

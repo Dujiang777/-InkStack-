@@ -44,9 +44,10 @@
 | P7f-1c | 页面直读 SQL 清单（闸门 18）：把"web 退化为纯渲染层"从一句话变成一个数 | ✅ | 调用图算出来 **14 条仍在 Next 进程内直连 MySQL**（运营台 `adminList*`×7 + `adminInsights`、首页 `platformStats`/`topAuthors`/`listFollowingFeed`、个人中心 `listAchievements`/`badgeRewardClaimed`、书房 `suggestSeriesTitles`），并据此**订正了 P7e′ 那句话**——"页面只剩一条取数路"只对正文 27 个读函数成立，那 14 条从来没有 HTTP 面（`/api/admin/*` 只有 POST），所以对拍 / 契约基线 / 路由盘点三道全绿也看不见它。棘轮双向都反证过：往 `listArticles` 注一句 `getPool()` → 报出 5 条且 `listHot`/`listRelated` 标「经由 listArticles」、`listWeekly` 标「经由 listHot」（证明跑的是可达性闭包，不是逐函数看首行）；往登记表塞一个没有 SQL 的名字 → 报"已经没有本地 SQL"。正则版曾把 `listWeekly` 误判成直连（下一个函数的文档注释里写着"先 INSERT 占位、再 FOR UPDATE 扣款"），所以这一道改走 AST。**P7f-2 的开工条件由 0 变成 14**（这个 14 后来被证明是同一个病：判据只盯 `lib/data.ts`，见 P7f-1e′） |
 | P7f-1d | 页面直读 SQL 迁走第一批（6 条）＋ 给没有 HTTP 面的读立裁判（闸门 19） | ✅ | 首页 `platformStats`/`topAuthors`/`listFollowingFeed`、个人中心 `listAchievements`/`badgeRewardClaimed`、书房 `suggestSeriesTitles` 全部改成"问 Java 的一句"，Java 侧新建 `GET /api/platform/stats`、`/api/platform/top-authors`、`/api/me/following-feed`、`/api/me/achievements`、`/api/me/badge-reward`、`/api/me/series-title-suggestions`；`lib/data.ts` 从此**一个成就算法都没有**（阈值表收进 `BadgeService.TIERS`，展示与领取判定共用一处定义，不会出现"墙上写 5 篇解锁、实际 3 篇发钱"）。<br>**这六条没有对岸可对**：它们从来没有 HTTP 面，所以契约基线（闸门 1′）也冻不出来——于是新建闸门 19 用**回库独立复算**当裁判，**40/40**（1 项如实 SKIP：只有一个账号有可显示的关注流，比不出"换人换答案"）。反证两轮：① 整道打 Node :3200 → 37 红、退出码 1；② 只改闸门自己的口径（把"著作等身"门槛 10→5、千分位 `en-US`→`de-DE`、后缀表 `手记`↔`札记` 对调）→ 精确红在成就墙 3 条与题名建议 2 条，其余 35 项不动。第一轮还揪出闸门一处**空对空假绿**（端点返回 `[]` 时"逐行相等"与 `slice(0,0)` 互相盖章），已补"宾语必须非空"<br>棘轮从 14 降到 **8**（全是运营台，Java 侧那批 GET 读端点是 P7f-1e 的活）。回归：页面 **34/34**、契约 **30/30**、资金 **100/100**、社区 **108/108**、书房 **117/117**、创作台 **51/51**、运营台 **65/65**、互通 8/8、付费墙 4/4、检索防泄漏 4/4、路由盘点无缺口、Java 单测 5 类全绿、`tsc` 零错。顺带记下一处**差分判据失去宾语**：资金闸门那条"两栈还差几枚逐字一致"从今往后比的是分支与文案，不再是两套判定——Node 那条路由的计数已经借道 Java |
 | P7f-1e | 运营台八张表迁到 Java：闸门 18 清零，"web 退化为纯渲染层"第一次可以被机器复验 | ✅ | 新建 `GET /api/admin/{articles,review,users,reports,actions,orders,comments,insights}`（**与那四条 POST 同一个 `staffOnly` 门禁**，读侧漏的是邮箱和未上架稿，门禁必须在方法第一件事）。`lib/data.ts` 里被页面取走的 45 个函数**没有一个再直连 MySQL**（棘轮 8→0，登记表清空后这道闸门改守反向：谁再加一句 `getPool()` 就红）。<br>顺带**修掉一个被 `catch` 掩了很久的真 bug**：`adminListOrders` 那句三段 UNION 在**两个活库上都报 `ER_CANT_AGGREGATE_NCOLLATIONS`**（`topup_orders` 是 `0900_ai_ci`、`users/articles/series` 是 `unicode_ci`），因为它整段包在 `catch { return []; }` 里，运营台的"资金流水"面板**一直是空的**而页面看着正常。修法是在 UNION 的字面量与 `IFNULL(p.name, o.pack_key)` 上显式 `COLLATE utf8mb4_unicode_ci`——只钉 `pack_key` 不够，换一种会话排序规则就撞在 `p.name` 上；显式钉住后两种会话（mysql2 的 unicode_ci 与 Connector/J 跟服务器默认走的 0900）实测都能跑。<br>闸门 19 从 40 项扩到 **156 项**：新增"并列感知的列表比对"（`ORDER BY 时间 DESC LIMIT n` 里 MySQL 不保证并列行先后，于是窗口内有并列时不要求同序、边界并列时不要求同集合，其余逐行钉死）、运营台读的门禁判据（游客/伪造会话 401、非运营 403 且文案不变，比对失败时 email 不外显），并给原本空集的两条读**造夹具**（待审稿 + 三条举报：目标已删那一支、匿名举报那一支、一条 `dismissed` 用来证明 `status=open` 真在过滤），判完在 `finally` 里删干净并复核残留 0。<br>两处"判据没有宾语"是反证抓出来的：① 把闸门里 `COALESCE(..., '游客')` 改成 `'匿名'` 一开始**不红**，因为库里每条举报都实名——补了匿名夹具才让那条支路可测；② 整道打 Node 时"作者榜逐行相等"曾绿在 `[]` 与 `slice(0,0)` 互相盖章上。注入三处口径错误（`pinned` 恒真、`游客`→`匿名`、分账 0.9→0.5）后精确红三条。<br>回归：页面 34/34（`JAVA_ROUTES` 空实例与 `/api` 整切实例各一次）、契约 30/30、资金 100/100、社区 108/108、书房 117/117、创作台 51/51、运营台 65/65、互通 8/8、限流 18/18、切流代理 21/21（含"代理导出不泄漏 `:3101`"）、闸门 19 直连 Java 156/156 且**改打切流实例同样 156/156**、Java 单测全绿、`tsc` 零错。**当时结论是"P7f-2 的开工条件已成立"——这句话由下一行订正** |
-| P7f-1e′ | 判据拓宽：闸门 18 从"只看 `lib/data.ts` 的导出符号"改成"渲染层可达集合里任何直接执行 SQL 的函数" | ✅ | 清零第二天就又被推翻，而且这次红得更彻底：登记表说 0，实际有 **8 条**。原因是**判据的边界当初就是照方便画的**——第一版从 `page.tsx` 出发只收集"`from '@/lib/data'` 进来的那些符号"，于是两类东西天生看不见：① 页面文件**自己**写的 `pool.query`（`app/admin`、`app/me`、`app/points`、`app/security` 四个页面各有一处到三处）；② 经 `lib/auth.ts`、`lib/points.ts`、`lib/link-policy.ts`、`components/*` 这些**别的模块**摸到的库。<br>现在按一般化模型重算：全仓 `app`/`lib`/`components` 的顶层函数都成为节点（`文件#函数`），跨文件边靠导入表（含**默认导出的 `default` 别名**——页面组件清一色默认导出，只记本名的话最后一跳会断），**JSX 标签视为一次调用**（`<GateProbe />` 不是 `CallExpression`），`export default` 的三种写法各自钉住；`lib/db.ts` 作为管道排除、`app/api/**` 与 `lib/data-legacy.ts` 作为"待删的遗留 HTTP 面"排除。测得 渲染入口 24 / 可达节点 204 / **直连 MySQL 8 条**，其中 `getCurrentUser` 被 **14 个**渲染入口共同走到（旧版把归属报成"首个发现者"，已改成迭代到不动点）。<br>反证四条：① 往一个新页面上线注入页面内 `pool.query` → 报为登记表之外的新面孔、退出码 1；② 同一页只写 `<GateProbe />`、SQL 藏在组件里 → 也被抓到；③ **关掉 JSX 那条规则再跑**，第 ② 条消失而第 ① 条还在（证明这条规则有独有战果，不是顺手加的）；④ 登记表塞一个已无 SQL 的名字 → 报"已经没有本地 SQL"、退出码 1。<br>登记的 8 条里有一条根本**不是读**：`app/points/page.tsx` 在渲染时调 `grantDailyQuota`，一句 `UPDATE users` + 一条流水。"纯渲染层"这句话从此按 8 条重算，**P7f-2 的开工条件改回未成立**（迁完这 8 条为 P7f-1f） |
-| P7f-2 | 删除 58 个 `app/api/**/route.ts` 与 `lib/data-legacy.ts`，`/api` 整前缀落地 | ⏸ 被 P7f-1f 挡住 | 开工条件不是"路由都切过去了"，而是"渲染层不再自己摸库"。闸门 18 拓宽后仍剩 **8 条**（含渲染时发每日额度这一处**写**），所以删路由之前得先迁完它们；否则删完剩下的仍是 Next 进程里的第二个后端 |
-| P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | 还差两步：P7f-1f（渲染层 8 条清零）→ P7f-2（删路由与遗留读）。契约基线 1′ 在线、`/api` 整前缀演练已通过，这两样不用再等 |
+| P7f-1e′ | 判据拓宽：闸门 18 从"只看 `lib/data.ts` 的导出符号"改成"渲染层可达集合里任何直接执行 SQL 的函数" | ✅ | 清零第二天就又被推翻，而且这次红得更彻底：登记表说 0，实际有 **8 条**。原因是**判据的边界当初就是照方便画的**——第一版从 `page.tsx` 出发只收集"`from '@/lib/data'` 进来的那些符号"，于是两类东西天生看不见：① 页面文件**自己**写的 `pool.query`（`app/admin`、`app/me`、`app/points`、`app/security` 四个页面各有一处到三处）；② 经 `lib/auth.ts`、`lib/points.ts`、`lib/link-policy.ts`、`components/*` 这些**别的模块**摸到的库。<br>现在按一般化模型重算：全仓 `app`/`lib`/`components` 的顶层函数都成为节点（`文件#函数`），跨文件边靠导入表（含**默认导出的 `default` 别名**——页面组件清一色默认导出，只记本名的话最后一跳会断），**JSX 标签视为一次调用**（`<GateProbe />` 不是 `CallExpression`），`export default` 的三种写法各自钉住；`lib/db.ts` 作为管道排除、`app/api/**` 与 `lib/data-legacy.ts` 作为"待删的遗留 HTTP 面"排除。测得 渲染入口 24 / 可达节点 204 / **直连 MySQL 8 条**，其中 `getCurrentUser` 被 **14 个**渲染入口共同走到（旧版把归属报成"首个发现者"，已改成迭代到不动点）。<br>反证四条：① 往一个新页面注入页面内 `pool.query` → 报为登记表之外的新面孔、退出码 1；② 同一页只写 `<GateProbe />`、SQL 藏在组件里 → 也被抓到；③ **关掉 JSX 那条规则再跑**，第 ② 条消失而第 ① 条还在（证明这条规则有独有战果，不是顺手加的）；④ 登记表塞一个已无 SQL 的名字 → 报"已经没有本地 SQL"、退出码 1。<br>登记的 8 条里有一条根本**不是读**：`app/points/page.tsx` 在渲染时调 `grantDailyQuota`，一句 `UPDATE users` + 一条流水。"纯渲染层"这句话从此按 8 条重算，**P7f-2 的开工条件改回未成立**（迁完这 8 条为 P7f-1f） |
+| P7f-1f-a | 四个页面就地 SQL 迁到 Java：`GET /api/admin/overview`、`/api/me/profile`、`/api/me/points`、`/api/security/overview` | ✅ | 这八条里最隐蔽的四条——SQL 直接写在 `page.tsx` 里，连 `lib/data.ts` 都不经过。搬走之后 `app/{admin,me,points,security}/page.tsx` 不再 import `getPool`（棘轮 **8→4**，登记表里每条都写着"该给 Java 补哪个端点"）。三处口径是刻意合并的：**连签只剩一条定义**（`CheckinService.streak()`，与 `GET /api/checkin`、签到发墨同源；Node 的页面那句 `>= CURDATE() - INTERVAL 60 DAY` 是实现上的截断而非规则，连签超过 60 天时页面会与签到组件自相矛盾）；**印文留空回退昵称首字**这条默认值收进 Java，与 `PATCH /api/me/profile` 写库那条同式（分叉的表现是"保存后预览对，刷新就变"）；`/api/security/overview` 只查页面要的四列，`totp_enabled` 单独一条窄读而不是复用 `byIdForSecurity`（那一行带 `password_hash` 与 `totp_secret`，用不到的秘密不该搬进内存）。<br>闸门 19 从 **156 扩到 226 项**：新增这四条读的回库复算（九项计数按**九句各自查**而不是抄实现那句九子查询、`'%m-%d %H:%i'` 的格式化在 JS 里重做一遍、留痕按 `id` 逐条、流水按 `id DESC` 全序逐元素），运营台总览同样过 401/401/403 三道门禁。反证注入六处口径错误（`pending` 数错表、问答时间格式、注册日格式、流水改 `id ASC`、2FA 恒真、"今日已发"写成"往日已发"）→ **精确红 16 项**，复原即 226/226。<br>两处"证人自己站不住"是反证抓出来的：① 第一版夹具把 `avatar_text` 置 NULL，被数据库直接拒掉——`users` 表这四列全 `NOT NULL`，回退支路真正可达的是**空串**那一支；改置空串后"印文回退昵称首字"第一次被证明走到了，同时如实记下 `COALESCE(...)` 与 `"—"` 那两条默认值**结构上不可达**（只有整行不存在才触发，本闸门不造）。② 新加的渲染判据第一版写成"四个计数里在 DOM 找到至少一个"，注入兜底假数 `128/342/…` 后**照样绿**（库里 `users` 恰好是 8，页面上别处也有 8）；改成按 DOM 顺序逐格比八格后，同一条注入立刻红。<br>另有一处**红要归因**：运营台闸门那条"驳回通知作者的文案与链接精确"连续红两次，不是冷编译——Node 的 `app/api/admin/articles` 里 `notify()` 不 await，接口 200 时站内信还在飞行，判据读一次就判负等于把闸门的调度竞态当成被测方的缺陷。改成 `waitRow()` 等到上限再判（Java 侧同步发信，白等一轮），65/65 稳定绿。<br>闸门 4 从 34 项扩到 **50 项**（新增 §5b：四个页面的读数必须落到 DOM 上——八格逐个、注册日、余额位在 `p-balance` 里、留痕按 `audit-tag` 数、且整页不得出现 `Invalid Date`）；`skipped()` 从此记第三态而不是混进 PASS。回归：页面 50/50（`:3200` 与 `/api` 整切实例各一次）、闸门 19 直连 Java 226/226、运营台 65/65、创作台 51/51、资金 100/100、契约 30/30、互通 8/8、切流代理 21/21、路由盘点无缺口（Java 独有涨到 35 条）、Java 单测全绿、`tsc` 零错 |
+| P7f-2 | 删除 58 个 `app/api/**/route.ts` 与 `lib/data-legacy.ts`，`/api` 整前缀落地 | ⏸ 被 P7f-1f 挡住 | 开工条件不是"路由都切过去了"，而是"渲染层不再自己摸库"。闸门 18 拓宽后剩 **4 条**（`getCurrentUser` / `listSessions` / `allowedDomains` / `grantDailyQuota`，含渲染时发每日额度这一处**写**），删路由之前得先迁完它们；否则删完剩下的仍是 Next 进程里的第二个后端 |
+| P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | 还差两步：P7f-1f（渲染层 4 条清零）→ P7f-2（删路由与遗留读）。契约基线 1′ 在线、`/api` 整前缀演练已通过，这两样不用再等 |
 
 当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
 
@@ -54,6 +55,9 @@
   · `GET /api/auth/{github,gitee,qq}` 与三家 `/{p}/callback` · `GET /api/auth/github/status`
 - 安全中心：`POST /api/security/password` · `GET|DELETE /api/security/sessions`
   · `POST|PUT|DELETE /api/security/2fa`
+  · `GET /api/security/overview`（P7f-1f-a：安全中心那 20 条留痕 + 两步验证开关，
+  原本两句写在 `app/security/page.tsx` 里的 `pool.query`；只查页面要的四列，
+  `totp_enabled` 走一条窄读而不是带 `password_hash`/`totp_secret` 的整行）
 - 内容：`GET /api/articles` · `GET /api/articles/{slug}` · `GET /api/search`
 - 墨水经济：`POST /api/articles/{slug}/unlock|tip|boost` · `POST /api/series/{id}/bundle`
   · `GET|POST /api/checkin` · `POST /api/me/badge-claim` · `GET|POST /api/topup/orders`
@@ -66,12 +70,16 @@
   闸门 8 现算出的可整体切流前缀包含它）
 - 运营台：`POST /api/admin/articles|comments|reports|users`（内容管理与审核、删评论连带回复、
   举报三种处置、封禁与点墨增减；`setRole` 两栈都只认 developer，admin 也一样 403）
-  · **`GET /api/admin/articles|review|users|reports|actions|orders|comments|insights`**
-  （P7f-1e 新建：运营台八张表的读，Node 侧从来没有对位 GET 路由，正确性由闸门 19 回库复算钉住。
+  · **`GET /api/admin/articles|review|users|reports|actions|orders|comments|insights|overview`**
+  （P7f-1e 新建前八条：运营台八张表的读，Node 侧从来没有对位 GET 路由，正确性由闸门 19 回库复算钉住。
   八条与那四条 POST **共用同一个 `staffOnly` 门禁**——读侧漏的是邮箱和未上架稿，
-  "只有写接口需要门禁"这种印象必须堵住）
+  "只有写接口需要门禁"这种印象必须堵住。`overview` 是 P7f-1f-a 补的第九读：顶部那九项计数
+  与最近 8 条问答，原先是一句直接写在 `app/admin/page.tsx` 里的 `pool.query`）
 - 书房：`GET|PUT /api/drafts` · `POST /api/history` · `GET|POST|PUT /api/links`
-  · `PATCH /api/me/profile` · `PATCH /api/me/password` · `POST /api/uploads`
+  · `GET|PATCH /api/me/profile`（P7f-1f-a 给 GET 补上"印文留空回退昵称首字"，与 PATCH 写库同一条式）
+  · `GET /api/me/points`（墨水账户四块：余额 / 今日额度已发没有 / 连签 / 流水 20 条；
+  连签**只有一条定义**——复用 `CheckinService`，不在页面里再走一遍查）
+  · `PATCH /api/me/password` · `POST /api/uploads`
   · `GET|POST /api/series` · `GET|PATCH|DELETE /api/series/{id}` · `GET /api/series/mine`
   · `POST /api/series/{id}/bundle`（P5d 时这四条**已实现却切不过去**：切流只有前缀粒度，
   而 `GET /api/series` 两栈同 URL 同方法却不同义——Node 是"我的专栏"
@@ -86,11 +94,14 @@
   功能不坏但前端从打字机变成"等十几秒再整篇砸脸"）
 - 只读聚合（为 RSC 分流新增）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
   `/api/users/{id}/relation`、`/api/tags/{tag}/articles`、`/api/authors/{id}[/articles]`、
-  `/api/weekly/stats`、`/api/random`、`/api/me/*` 十五项、`/api/platform/stats`、
-  `/api/platform/top-authors`。它们中的大部分 Node 侧至今无对位路由（页面直连 `lib/data.ts` 取数，
+  `/api/weekly/stats`、`/api/random`、`/api/me/*` 十七项（含 P7f-1f-a 新补的 `profile` 与 `points`）、
+  `/api/platform/stats`、`/api/platform/top-authors`、`/api/security/overview`。
+  它们中的大部分 Node 侧至今无对位路由（页面直连 `lib/data.ts` 取数，
   没有 HTTP 入口），只有 `/api/series` 那一族在 P7a 之后两栈都有了。
   `/api/me/` 那四条新读（`following-feed`/`achievements`/`badge-reward`/`series-title-suggestions`）
-  与 `/api/platform/` 两条是 P7f-1d 补的，**没有对岸可对拍**，正确性由闸门 19 回库复算钉住
+  与 `/api/platform/` 两条是 P7f-1d 补的，`/api/admin/overview`、`/api/me/profile`、
+  `/api/me/points`、`/api/security/overview` 四条是 P7f-1f-a 补的，
+  **都没有对岸可对拍**，正确性由闸门 19 回库复算钉住
 
 移植过程中修掉的既有 bug（有的在原实现里就存在，有的差一点就跟着移植过去；对拍要求两侧同口径，
 所以一律两边一起改）：
@@ -301,6 +312,24 @@
   "我看不见的地方有多大"，而不是庆祝。同一批里还揪出两处实现缺陷：默认导出的组件只记本名，
   跨文件边会在最后一跳断掉（页面组件清一色默认导出）；`#default` 与真名是同一个函数，
   不去重就会把 4 个页面报成 8 条。
+- **"至少命中一个"是没有宾语的判据的新形态**（闸门 4 的 §5b 第一版，P7f-1f-a）：它写成
+  "四个计数里只要有一个出现在 DOM 里就算绿"。注入兜底假数 `128/342/1284/4200` 之后它**照样绿**——
+  因为库里 `users` 恰好是 8，而页面上别处也有一个 8。和"两条空数组互相盖章"不是一回事：
+  这次宾语存在，只是**撞上的是巧合**。规则：凡是"在页面/集合里找几个目标"的判据，必须写成
+  **逐个对应**（第 i 格等于第 i 个期望值，且格数先对上），"命中过任何一个"不配当判据。
+  改完同一条注入立刻红，位置精确到"第 1 格 期望 8 实得 128"。
+- **同一格连续红两次，就不许再用"偶发"解释**（闸门 11 的"驳回通知作者的文案与链接精确"）：
+  上一轮记录写的是"冷 dev 路由的 fire-and-forget 竞态，热了之后就干净"。这次它连红两轮，
+  去 `app/api/admin/articles/route.ts` 一看，`notify()` 确实**不 await**——HTTP 已 200，
+  站内信还在飞行，而闸门读得比写得快。这不是被测方错了，是**闸门的调度竞态被当成了缺陷报**。
+  改成 `waitRow()` 等到上限（3 秒）再判负：等到就比内容，等不到才红。
+  规则：红要先归因——是代码错、判据错，还是判据读得太早；第三种改判据，前两种改代码。
+- **夹具被数据库拒掉，恰好说明我以为可达的那条支路不可达**（闸门 19 的 ⑨.2b 第一版）：
+  为了证明"印文留空回退昵称首字"走到了，第一版把 `avatar_text` 置 NULL，
+  当场 `Column 'avatar_text' cannot be null`——`users` 表那四列（连同 `created_at`）全写的是
+  NOT NULL。改成置**空串**，那条回退第一次真的被执行到；同时把两件事如实记下：
+  实现与复算里的 `COALESCE(...)` 和 `"—"` 默认值只对"整行不存在"生效，这一支**结构上不可达**，
+  判据不假装测过一条真实数据走不到的路（要测它得伪造一枚指向已删除用户的会话，本闸门不造）。
 - **正则切正文会被注释骗，而骗出来的方向恰好是"多报"**（闸门 18 的第一版）：按"从函数头切到下一个
   函数头"取函数体，`listWeekly` 就顺带吞了后面 `unlockArticle` 的文档注释，注释里有"先 INSERT 占位、
   再 FOR UPDATE 扣款"两句，于是它被判成直连 MySQL、闸门红在一条不存在的数据路径上。
@@ -408,12 +437,14 @@ Node 侧那份读 SQL 没有直接删，它整体住在 `lib/data-legacy.ts`，�
 各自的判据里都没有它们的位置——三道闸门全绿，而"web 已经退化成纯渲染层"并不成立。
 `node scripts/page-sql-inventory.mjs --verbose` 会把它们连同"哪个页面在调它"列出来，锁成棘轮：
 登记表之外多一条 → 红；登记表里某条被迁走却没删登记 → 也红。
-**今天登记表里还有 8 条**——而且这 8 条是**把判据拓宽之后才看见的**，不是新写出来的：
-`node scripts/page-sql-inventory.mjs --verbose` 会逐条报出它在哪个文件第几行、被哪些渲染入口
-共同走到、以及"为什么还挂在这"。登记表之外多一条 → 红；登记表里某条被迁走却没删登记 → 也红。
-所以 P7f-2 的开工条件**目前不成立**：删那 58 个路由之前，得先让这 8 条也归 Java（P7f-1f）。
-"还剩几条"这个数只有在**看得见的地方等于管到的地方**时才有意义，而这条闸门两天里被这件事
-咬了两次（P7f-1c 数漏运营台之外的页面、P7f-1e′ 数漏页面自己写的 SQL），教训已经落进下一节。
+**今天登记表里还有 4 条**，全在 `lib` 里、被若干页面共用：`getCurrentUser`（会话解析 +
+`last_seen` 节流写，14 个渲染入口都要走）、`listSessions`、`allowedDomains`、
+以及 `grantDailyQuota`——最后这条连"读"都不是，是渲染时发每日 30 滴的一次**写**。
+`--verbose` 逐条报出它在哪个文件第几行、被哪些渲染入口共同走到、以及"为什么还挂在这"。
+P7f-1f-a 摘掉的就是那四个页面就地写的 SQL。所以 P7f-2 的开工条件**仍未成立**：
+删那 58 个路由之前，得先让这 4 条也归 Java。
+"还剩几条"这个数只有在**看得见的地方等于管到的地方**时才有意义，而这条闸门一路为这件事红了
+三次（P7f-1c 数漏运营台之外的页面、P7f-1e′ 数漏页面自己写的 SQL），教训已经落进下一节。
 
 ## 🏗 架构
 
@@ -425,11 +456,13 @@ Next.js 15 (App Router)  :3100
   ├─ 页面（Server Component）…… lib/data.ts
   │      ├─ 读路径 41 条 remote 调用 ──HTTP（转发 Cookie）──▶ Spring Boot :3101
   │      │    （JAVA_BASE 没配则只渲染 lib/demo-data.ts 的演示数据；配了就不回落，挂了即 500）
-  │      └─ 页面组件里就地写的 pool.query：admin / me / points / security 四个页面各 1~3 处
-  ├─ 渲染层还经由这些模块摸到 MySQL：lib/auth.ts（会话解析，14 个入口共用）
-  │                                    lib/points.ts（渲染时发每日额度 —— 那是写）
-  │                                    lib/link-policy.ts（外链白名单）
-  │      └─ 闸门 18 数的是**渲染层可达集合里任何直接执行 SQL 的函数**：现在 8 条，逐条登记在案
+  │      ├─ 四个页面另有一条自己直问 Java 的读（P7f-1f-a）：admin / me / points / security
+  │      │    └─ GET /api/admin/overview · /api/me/profile · /api/me/points · /api/security/overview
+  ├─ 渲染层还经由这些模块摸到 MySQL（登记表里剩下 4 条）：
+  │        lib/auth.ts#getCurrentUser（会话解析，14 个入口共用）· #listSessions
+  │        lib/points.ts#grantDailyQuota（渲染时发每日额度 —— 那是写）
+  │        lib/link-policy.ts#allowedDomains（外链白名单）
+  │      └─ 闸门 18 数的是**渲染层可达集合里任何直接执行 SQL 的函数**：现在 4 条，逐条登记在案
   │           （每条写着为什么还在这、该给 Java 补哪个端点），清零之前不许删 app/api/**
   ├─ /api/*  ── 未切流 ──────────→ Node Route Handler → lib/data-legacy.ts（遗留读 SQL）→ MySQL
   └─ /api/*  ── JAVA_ROUTES 命中 ─rewrite─▶ Spring Boot :3101 → MySQL（同一库）
@@ -541,6 +574,15 @@ node scripts/page-check.mjs
 #     必须 307 到一篇文章、抽到的每篇都要在公开列表里（随机池漏进草稿/未过审只有
 #     回查列表看得见）、10 次里必须出现过不止一篇（ORDER BY RAND() 写丢每次同一篇）。
 #   · 单实例即可跑（打 PARITY_NODE，默认 3200）；`--login=test|writer|probe` 只跑一个身份。
+#   · §5b（P7f-1f-a 加）：那四条"页面就地 SQL"迁走之后，**端点算得对不等于页面看得见**——
+#     页面接错一个 prop，十九道判据全绿而面板是空的。所以这一格断言的是 DOM：运营台顶部
+#     **八格按 DOM 顺序逐个**等于复算值（分组符钉 en-US）、/me 的注册日、/points 的余额位
+#     （`<b class="p-balance">`，它不带千分位）、/security 的 `audit-tag` 条数，外加整页
+#     不得出现 `Invalid Date`。反证注入两处：把 stats 换成兜底假数 128/342/… → 八格立刻红；
+#     把 balance 写成常数 → 三个身份那条都红。
+#     这一格的**第一版**写成"四个计数里在 DOM 找到至少一个"，同一条注入下**照样绿**
+#     （库里 users=8，而页面上别处也有 8）——"至少命中一个"是一句没有宾语的判据。
+#     配套地，`skipped()` 从此记第三态（SKIP）而不是混进 PASS，合计行单列。
 #   · ⚠ 它读的是**当前库里有什么**：换种子库、清过库之后要重跑，断言里的"那篇付费文"
 #     是按条件从库里挑的，不是写死的 slug。
 #   · 退役说明：原来的 page-parity（起两台实例、一台 DATA_VIA_JAVA=0 一台='*'，
@@ -819,11 +861,12 @@ node scripts/page-sql-inventory.mjs --verbose
 #     lib/data.ts，/api/admin/* 那四条路由只有 POST（写侧）。没有对等可请求面，对拍、契约基线、
 #     路由盘点三道就都没有它们的位置——三道全绿而"页面只剩一条取数路"这句话是错的。
 #   · 棘轮而不是进度条：登记表之外冒出新面孔 → 红；登记表里某条已经没有本地 SQL 却没删登记 → 也红。
-#     **今天登记表里是 8 条**（四个页面自己写的 SQL + auth/points/link-policy 三条共用 + 一处
-#     会话设备列表），每条都写着"该给 Java 补哪个端点"。P7f-1d 迁 6 条、P7f-1e 迁 8 条那两次，
-#     都是"先从表里删名字让棘轮变红、改完才绿"——那个红一次就是它在工作。
+#     **今天登记表里是 4 条**（lib/auth.ts 的会话解析与设备列表、lib/points.ts 的每日额度发放、
+#     lib/link-policy.ts 的外链白名单），每条都写着"该给 Java 补哪个端点"。P7f-1d 迁 6 条、
+#     P7f-1e 迁 8 条、P7f-1f-a 迁 4 条那三次，都是"先从表里删名字让棘轮变红、改完才绿"——
+#     那个红一次就是它在工作。
 #   · 清零是 P7f-2 的**开工条件**，不是它的副产品；反过来说，只要判据比它想证明的命题窄，
-#     "清零"就只是一句好听的话——这一道两天里被这件事咬了两次（详见 P7f-1e′ 那一行）。
+#     "清零"就只是一句好听的话——这一道为这件事红过两次（详见 P7f-1e′ 那一行）。
 #   · 反证跑过四个方向：① 往 listArticles 注一句 `await getPool()` → 报出 5 条，其中
 #     listHot/listRelated 标「经由 listArticles」（证明跑的是可达性闭包，不是逐函数看首行）；
 #     ② 新建一个页面、SQL 就写在页面函数里 → 抓到（旧版判据这一条**看不见**）；
@@ -833,16 +876,19 @@ node scripts/page-sql-inventory.mjs --verbose
 #   · 正则版曾经把 listWeekly 判成直连 MySQL——它下一个函数的文档注释里写着"先 INSERT 占位、
 #     再 FOR UPDATE 扣款"。这一道用 AST 不用正则切正文，教训见下一节。
 
-# 19) 页面读端点核对：给"根本没有对岸"的那十四读立一个裁判。
+# 19) 页面读端点核对：给"根本没有对岸"的那十八读立一个裁判。
 node scripts/pagereads-check.mjs
-#   · 闸门 18 数清还剩几条，闸门 1′ 冻住已有 HTTP 面的形状，但迁过来的这十四读**两头都不沾**：
+#   · 闸门 18 数清还剩几条，闸门 1′ 冻住已有 HTTP 面的形状，但迁过来的这十八读**两头都不沾**：
 #     没有 Node 路由可对拍，也没有 Node 时代的应答可冻结。删掉 lib/data-legacy.ts 之后，
 #     "Java 这些算得对不对"将再没有任何参照物——所以裁判换成**自己回库把同一个数再算一遍**。
-#   · 156 项：十四条端点的应答方（x-backend）、全站四计数、作者榜逐行 + limit 前缀一致 + limit
+#   · 226 项：十八条端点的应答方（x-backend）、全站四计数、作者榜逐行 + limit 前缀一致 + limit
 #     越界不 500、关注流逐行 + 游客/伪造会话必须 401、成就墙 14 枚逐字段（含门槛文案与千分位）、
 #     领取状态对 point_ledger、专栏题名建议（含后缀轮换与「已有 N 篇」的数字）、
 #     运营台八张表逐行（含 q 过滤那条 '%%' 恒真、`status` 过滤、审计 limit 的 `Number(x)||30` 兜底），
 #     以及八条运营台读的**门禁**：游客 401、伪造会话 401、登录但非运营 403 且文案不变。
+#     P7f-1f-a 再加四条（运营台总览九项计数 + 最近问答、账号资料五字段、墨水账户四块、
+#     安全中心留痕与 2FA 开关），其中九项计数刻意拆成**九句各自查**、时间格式化在 JS 里重做一遍，
+#     都是为了让证人不同于实现（P7f-1e 那次"闸门与实现共享同一个 UNION 缺陷"不能再犯）。
 #   · 四条不糊弄的规矩：① **宾语必须存在**——库里没人关注任何作者时"复算==Java"是两条空数组
 #     互相盖章，那种判据记 SKIP 并写明缺什么宾语；② **身份必须验**——四条 /me 读签名上不收 userId、
 #     只认 cookie，所以游客与伪造会话必须 401，否则"忘了读 cookie"也能全绿；
@@ -851,15 +897,22 @@ node scripts/pagereads-check.mjs
 #     ④ **支路要被证明走到了**——审核队列与举报队列在克隆库里原本为空，空集比空集恒等，
 #     这两条读等于没测；闸门因此种一条待审稿 + 三条举报（目标已删那一支 / 匿名举报那一支 /
 #     一条 dismissed，用来证明 `status=open` 真在过滤），判完在 finally 里删干净并复核残留 0。
-#   · 反证跑过三轮：整道打 Node :3200 → 51 红、退出码 1；只改闸门自己的口径（门槛 10→5、
+#     同一条规矩在 P7f-1f-a 又兑现一次：三个固定账号的印文都非空，"留空回退昵称首字"那支没人走过，
+#     于是临时把 probe 的 `avatar_text` 置成**空串**（不是 NULL——那四列全 NOT NULL，
+#     第一版夹具就是被数据库当场拒掉的），判完在 finally 里恢复并复核。
+#   · 反证跑过四轮：整道打 Node :3200 → 51 红、退出码 1；只改闸门自己的口径（门槛 10→5、
 #     千分位 en-US→de-DE、后缀表手记↔札记对调、`pinned` 恒真、`游客`→`匿名`、分账 0.9→0.5）
 #     → 精确红在对应那几条、其余不动。前两轮还揪出闸门自己两处**假绿**：端点返回 [] 时
 #     "逐行相等"与 `slice(0,0)` 互相盖章；以及 `COALESCE(...,'游客')` 改错**不红**——
 #     因为库里每条举报都实名，那条支路根本没被走到（于是补了匿名举报夹具）。
+#     第四轮打在 P7f-1f-a 那四条新读上：一次注入六处互不相干的口径错误（`pending` 数错表、
+#     问答时间格式、注册日格式、流水改 `id ASC`、2FA 恒真、"今日已发"写成"往日已发"）
+#     → 精确红 16 项，且每条红都归到自己那格判据，复原即 226/226。
 #   · 这一道还是"运营台资金流水一直是空表"那桩旧 bug 的破案现场，见下面"移植过程中修掉的既有 bug"。
-#   · 除夹具那段（种完即删、复核残留）外整道**只读**；开跑先问 DATABASE()，连到真库 inkstack 会警告。
+#   · 判据本身只读；两处临时夹具（⑧ 的待审稿与三条举报、⑨.2b 的印文空串）全部在 finally 里
+#     删除／恢复并复核残留。开跑先问 DATABASE()，连到真库 inkstack 会警告。
 #   · 也可以改打切流实例验代理路径：`PARITY_JAVA=http://localhost:3400 node scripts/pagereads-check.mjs`
-#     → 同样 156 项全绿，说明这十四读经 Next rewrite 到 Java 与直连 Java 答得一模一样。
+#     → 同样全绿，说明这些读经 Next rewrite 到 Java 与直连 Java 答得一模一样。
 ```
 
 切流与回滚：
@@ -893,7 +946,7 @@ node scripts/proxy-cutover-check.mjs --base=http://localhost:3400 --keep-render 
 PARITY_NODE=http://localhost:3400 node scripts/studio-check.mjs      # 51/51
 PARITY_NODE=http://localhost:3400 node scripts/study-check.mjs       # 117/117
 PARITY_NODE=http://localhost:3400 node scripts/admin-check.mjs       # 65/65
-PARITY_NODE=http://localhost:3400 node scripts/page-check.mjs        # 34/34
+PARITY_NODE=http://localhost:3400 node scripts/page-check.mjs        # 50/50
 PARITY_NODE=http://localhost:3400 node scripts/money-check.mjs       # 94 项 + 6 SKIP
 PARITY_NODE=http://localhost:3400 node scripts/community-check.mjs   # 103 项 + 5 SKIP
 PARITY_NODE=http://localhost:3400 node scripts/paywall-probe.mjs bo-20260911-1   # 差分项记 —

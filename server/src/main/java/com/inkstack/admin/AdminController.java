@@ -99,6 +99,13 @@ public class AdminController {
     return gate != null ? gate : ResponseEntity.ok(Map.of("comments", queries.comments()));
   }
 
+  /** 顶部 9 个计数 + 最近问答：同样过 staffOnly，游客连"有多少人注册"都不该问到。 */
+  @GetMapping("/api/admin/overview")
+  public ResponseEntity<Map<String, Object>> overviewRead(@Current SessionUser me) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(queries.overview());
+  }
+
   /** 大盘：形状是对象而非列表，直接把 insights 那五个键平铺回去（页面吃的就是这个）。 */
   @GetMapping("/api/admin/insights")
   public ResponseEntity<Map<String, Object>> insightsRead(@Current SessionUser me) {

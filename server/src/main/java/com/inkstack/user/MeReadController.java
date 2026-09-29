@@ -4,12 +4,17 @@ import com.inkstack.common.NodeShapes;
 import com.inkstack.entity.FollowCounts;
 import com.inkstack.entity.MeRows;
 import com.inkstack.mapper.ArticleMapper;
+import com.inkstack.mapper.PointLedgerMapper;
 import com.inkstack.mapper.SocialMapper;
+import com.inkstack.mapper.UserMapper;
 import com.inkstack.money.BadgeService;
+import com.inkstack.money.CheckinService;
 import com.inkstack.series.SeriesService;
 import com.inkstack.session.SessionService;
 import com.inkstack.session.SessionUser;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,14 +43,21 @@ public class MeReadController {
   private final SessionService sessionService;
   private final BadgeService badges;
   private final SeriesService series;
+  private final UserMapper users;
+  private final PointLedgerMapper ledgerTable;
+  private final CheckinService checkin;
 
   public MeReadController(SocialMapper social, ArticleMapper articles, SessionService sessionService,
-      BadgeService badges, SeriesService series) {
+      BadgeService badges, SeriesService series, UserMapper users,
+      PointLedgerMapper ledgerTable, CheckinService checkin) {
     this.social = social;
     this.articles = articles;
     this.sessionService = sessionService;
     this.badges = badges;
     this.series = series;
+    this.users = users;
+    this.ledgerTable = ledgerTable;
+    this.checkin = checkin;
   }
 
   private Long viewerId(HttpServletRequest request) {
@@ -220,6 +232,40 @@ public class MeReadController {
     one.put("likeCount", NodeShapes.num(r.getLikeCount()));
     one.put("commentCount", NodeShapes.num(r.getCommentCount()));
     return one;
+  }
+
+  /**
+   * 墨水账户页的四块读数（P7f-1f-a）：原本是三句写在 {@code app/points/page.tsx} 里的
+   * {@code pool.query} 加一段页面内的 JS 连签走查。
+   *
+   * <p>连签<b>不重算第二遍</b>：这里取的是 {@link CheckinService#status} 里那一条，
+   * 与 {@code GET /api/checkin}、签到发墨用的是同一个定义——两处各算一次迟早会分叉，
+   * 而分叉的表现为"页面上写着连签 5 天，签到后只发了 3 天的档"。
+   *
+   * <p>{@code quotaDone} 用 JVM 本地日历日比较 {@code last_quota_date}（DATE 列在 JDBC 里
+   * 不做时区换算），与 Node 按本地分量拼的 {@code dayKey} 同序，见 {@link CheckinService} 上那条注释。
+   */
+  @GetMapping("/points")
+  public ResponseEntity<Map<String, Object>> pointsOverview(HttpServletRequest request) {
+    Long me = viewerId(request);
+    if (me == null) {
+      return ANONYMOUS;
+    }
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("balance", NodeShapes.num(users.balanceOf(me)));
+    LocalDate quotaDay = users.lastQuotaDate(me);
+    out.put("quotaDone", quotaDay != null && quotaDay.equals(LocalDate.now()));
+    out.put("streak", checkin.status(me).streak());
+    List<Map<String, Object>> ledger = new ArrayList<>();
+    for (MeRows.Ledger r : ledgerTable.recentRows(me, 20)) {
+      Map<String, Object> one = new LinkedHashMap<>();
+      one.put("delta", NodeShapes.num(r.getDelta()));
+      one.put("reason", NodeShapes.text(r.getReason()));
+      one.put("at", NodeShapes.text(r.getAt()));
+      ledger.add(one);
+    }
+    out.put("ledger", ledger);
+    return ResponseEntity.ok(out);
   }
 
   /** 成就墙整面（14 枚）。取不到读数时 Node 回空数组，这里也回空数组而不是报错。 */

@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
-import { getPool } from "@/lib/db";
+import { javaReady, remoteMeProfile } from "@/lib/java-source";
 import { followStats, listMyFollowing, listMyFollowers, listMyLikes, listMyComments, listMyBookmarks, listMyHistory, listAchievements, badgeRewardClaimed } from "@/lib/data";
 import MeClient from "@/components/MeClient";
 
@@ -13,33 +13,15 @@ export default async function MePage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  const pool = await getPool();
-  let bio = "";
-  let createdAt = "—";
-  let avatarText = user.nickname.slice(0, 1);
-  let avatarTone = "";
-  let avatarShape = "";
-  if (pool) {
-    try {
-      const [rows] = await pool.query(
-        `SELECT IFNULL(bio, '') AS bio, avatar_text AS avatarText,
-                COALESCE(avatar_tone, '') AS avatarTone, COALESCE(avatar_shape, '') AS avatarShape,
-                DATE_FORMAT(created_at, '%Y-%m-%d') AS createdAt
-         FROM users WHERE id = ? LIMIT 1`,
-        [user.id]
-      );
-      const r = (rows as Record<string, unknown>[])[0];
-      if (r) {
-        bio = String(r.bio ?? "");
-        createdAt = String(r.createdAt ?? "—");
-        avatarText = String(r.avatarText ?? avatarText) || avatarText;
-        avatarTone = String(r.avatarTone ?? "");
-        avatarShape = String(r.avatarShape ?? "");
-      }
-    } catch {
-      /* 兜底 */
-    }
-  }
+  // 账号资料那五个字段原本是一句写在本文件里的 pool.query。默认值现在由 Java 负责
+  // （印文留空回退昵称首字、注册日缺省 "—"），因为那条回退规则与 PATCH /api/me/profile
+  // 写库用的是同一条——两处分叉的表现是"保存后预览对的，刷新就变了"。
+  const profile = javaReady() ? await remoteMeProfile() : null;
+  const bio = profile?.bio ?? "";
+  const createdAt = profile?.createdAt ?? "—";
+  const avatarText = profile?.avatarText || user.nickname.slice(0, 1);
+  const avatarTone = profile?.avatarTone ?? "";
+  const avatarShape = profile?.avatarShape ?? "";
 
   const [stats, following, followers, likes, comments, bookmarks, reads, achievements, rewardClaimed] = await Promise.all([
     followStats(user.id),

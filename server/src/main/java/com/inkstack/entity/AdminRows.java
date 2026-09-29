@@ -166,4 +166,30 @@ public final class AdminRows {
     private Long bundles;
     private Long bundleRevenue;
   }
+
+  /**
+   * 运营台顶部那 9 个计数（原样来自 {@code app/admin/page.tsx} 里那句一条 SELECT）。
+   *
+   * <p>字段名就是 SQL 别名：MyBatis 按下划线转驼峰映射，而这些别名本来没有下划线，
+   * 所以一侧改名另一侧就静默变 0——{@code scripts/pagereads-check.mjs} 逐键复算盯着这件事。
+   */
+  @Data
+  public static class Stats {
+    private Long users;
+    private Long articles;
+    private Long pending;
+    private Long comments;
+    private Long qa;
+    private Long reports;
+    private Long tips;
+    private Long topup;
+    private Long banned;
+  }
+
+  /** 运营台"最近问答"一行：'%m-%d %H:%i' 的格式化在 SQL 里做，与 Node 同处。 */
+  @Data
+  public static class Qa {
+    private String question;
+    private String createdAt;
+  }
 }

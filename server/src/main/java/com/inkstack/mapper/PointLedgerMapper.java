@@ -1,5 +1,7 @@
 package com.inkstack.mapper;
 
+import com.inkstack.entity.MeRows;
+import java.util.List;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
@@ -20,4 +22,16 @@ public interface PointLedgerMapper {
    */
   @Select("SELECT id FROM point_ledger WHERE user_id = #{userId} AND reason = #{reason} LIMIT 1")
   Long claimedByReason(@Param("userId") long userId, @Param("reason") String reason);
+
+  /**
+   * 墨水账户页最近 20 条流水（P7f-1f-a，从 {@code app/points/page.tsx} 搬来）。
+   *
+   * <p>{@code ORDER BY id DESC} 而不是 created_at：同一毫秒落两条是常态（签到发墨与
+   * 每日额度可能同刻），按 id 才是页面一直显示的那个先后。
+   */
+  @Select("""
+      SELECT delta, reason, DATE_FORMAT(created_at, '%m-%d %H:%i') AS at
+        FROM point_ledger WHERE user_id = #{userId} ORDER BY id DESC LIMIT #{limit}
+      """)
+  List<MeRows.Ledger> recentRows(@Param("userId") long userId, @Param("limit") int limit);
 }

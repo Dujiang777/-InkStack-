@@ -35,9 +35,15 @@ const IDENTITIES = ONLY_LOGIN ? [ONLY_LOGIN] : [null, "test", "writer", "probe"]
 
 let pass = 0;
 let fail = 0;
+let skip = 0;
 function ok(label, detail = "") {
   pass++;
   console.log(`PASS  ${label}${detail ? "  — " + detail : ""}`);
+}
+/** 判据没有宾语时记 SKIP 而不是 PASS：一条比不出东西的判据，绿了也不说明任何事。 */
+function skipped(label, why) {
+  skip++;
+  console.log(`SKIP  ${label}  — ${why}`);
 }
 function bad(label, detail) {
   fail++;
@@ -249,6 +255,110 @@ for (const id of IDENTITIES) {
     `${id} 身份 /random 307 到一篇文章`, `${rnd.status} → ${rnd.location || "无 location"}`);
 }
 
+
+/* ---------- 5b. 四个"就地 SQL 迁过来"的页面：读数必须真的落到 DOM 上 ----------
+ *
+ * 闸门 19 证明的是**端点算得对**；从端点到读者眼睛之间还剩一段接线：页面把 remote 的返回值
+ * 接错一个 prop，十九道判据全绿而面板是空的。这四条读从来没有对岸，所以这一格只能在渲染层
+ * 这边补——断言的是 DOM 里出现的那个数，不是 JSON 里的那个数。
+ */
+{
+  const emails = {
+    test: env.INK_TEST_EMAIL, writer: env.INK_WRITER_EMAIL, probe: env.INK_PROBE_EMAIL,
+  };
+  /** 分组符钉死 en-US：Java 侧的展示值钉的是同一个 locale，谁的运行时 locale 一变这条就该红，
+   *  而不是跟着运行时一起改口径，把真差异抹平成"两边都绿"。 */
+  const groupedUS = (v) => new Intl.NumberFormat("en-US").format(Number(v));
+
+  /* 5b.1 运营台：顶部计数必须是库里的数，而且那块"演示数据"的牌子不能亮 */
+  {
+    const c = (await q(`SELECT (SELECT COUNT(*) FROM users) AS users,
+            (SELECT COUNT(*) FROM articles WHERE status='published' AND review_status='approved') AS approved,
+            (SELECT COUNT(*) FROM articles WHERE status='published' AND review_status='pending') AS pending,
+            (SELECT COUNT(*) FROM comments) AS comments, (SELECT COUNT(*) FROM agent_qa) AS qa,
+            (SELECT IFNULL(SUM(amount),0) FROM article_tips) AS tips,
+            (SELECT IFNULL(SUM(points),0) FROM topup_orders WHERE status='paid') AS topup,
+            (SELECT COUNT(*) FROM reports WHERE status='open') AS openReports`))[0];
+    const html = (await render("/admin", await loginCookie("test"))).html;
+    const plate = /演示数据/.test(html ?? "") ? "演示数据" : /实时数据/.test(html ?? "") ? "实时数据" : "没有牌子";
+    check(plate === "实时数据", "运营台在配置齐全时打的是「实时数据」的牌子",
+      plate === "实时数据" ? "牌子与下面八格互相印证" : `牌子上写的是「${plate}」——这一页没走到 Java`);
+    /* 顶部八个格子按 DOM 顺序逐个比，而不是"页面上找得到这几个数吗"。
+     * 第一版就是后者，反证时把 stats 整个换成兜底假数（128/342/…）它**照样绿**——
+     * 因为库里的 users 恰好是 8，而页面上别处也有 8。一条"至少命中一个"的判据，
+     * 宾语其实只有一个偶然撞上的数。逐个比之后那条假数路径必须红。
+     * 后四格走 toLocaleString()，这里把分组符钉死 en-US：Java 侧的展示值钉的是同一个 locale，
+     * 谁的运行时 locale 一变这条就该红，而不是跟着运行时一起改口径把差异抹平。 */
+    const groupedUS = (v) => new Intl.NumberFormat("en-US").format(Number(v));
+    const want = [c.users, c.approved, c.pending, c.comments, c.qa, c.tips, c.topup, c.openReports];
+    const shown = [...(html ?? "").matchAll(/<span class="stat-no">([\s\S]*?)<\/span>/g)]
+      .map((m) => m[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim());
+    const mism = want.map((v, i) => ({ v: groupedUS(v), s: shown[i], i }))
+      .filter((x) => x.v !== x.s);
+    if (shown.length !== want.length) {
+      bad("运营台顶部八格逐个等于库里的复算值", `DOM 里只有 ${shown.length} 个 stat-no，期望 ${want.length} 个`);
+    } else {
+      check(mism.length === 0, "运营台顶部八格逐个等于库里的复算值",
+        mism.length ? mism.slice(0, 3).map((x) => `第 ${x.i + 1} 格 期望 ${x.v} 实得 ${x.s || "空"}`).join(" | ")
+          : `八格全等：${shown.join(" / ")}`);
+    }
+  }
+
+  for (const id of ["test", "writer", "probe"]) {
+    if (!emails[id]) continue;
+    const cookie = await loginCookie(id);
+    const uid = (await q(`SELECT id FROM users WHERE email = ?`, [emails[id]]))[0]?.id;
+    if (!uid) { bad(`${id} 的账号能在库里找到`, "登录成功但库里没有这一行"); continue; }
+
+    /* 5b.2 个人中心：注册日必须由 Java 那道读带回来，格式 '%Y-%m-%d' */
+    {
+      const d = (await q(`SELECT DATE_FORMAT(created_at,'%Y-%m-%d') AS d FROM users WHERE id = ?`, [uid]))[0]?.d;
+      const page = await render("/me", cookie);
+      check(page.status === 200 && String(page.shape.text).includes(String(d)),
+        `${id} 的 /me 渲染出真实的注册日`, `status=${page.status} 期望含 ${d}`);
+    }
+
+    /* 5b.3 墨仓：余额与最近一条流水的事由都要在页面上 */
+    {
+      const bal = (await q(`SELECT points_balance AS b FROM users WHERE id = ?`, [uid]))[0]?.b;
+      const led = (await q(`SELECT reason FROM point_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 1`, [uid]))[0];
+      const page = await render("/points", cookie);
+      const shown = ((page.html ?? "").match(/<b class="p-balance">\s*([\d,]+)\s*<\/b>/) ?? [])[1] ?? "";
+      // 余额位**不带千分位**（与运营台后四格不同，那是 toLocaleString 的），所以这里去逗号再比
+      check(page.status === 200 && shown.replace(/,/g, "") === String(bal),
+        `${id} 的 /points 把库里的余额渲染在余额位上`,
+        `status=${page.status} 期望 ${bal} 实得 ${shown || "空"}`);
+      if (!led) {
+        skipped(`${id} 的 /points 渲染出最近一条流水的事由`, "这个账号一条流水都没有");
+      } else {
+        check(page.status === 200 && String(page.shape.text).includes(String(led.reason)),
+          `${id} 的 /points 渲染出最近一条流水的事由`, `期望含「${led.reason}」`);
+      }
+    }
+
+    /* 5b.4 安全中心：留痕要有内容，而且一个 Invalid Date 都不许有。
+     *      后半条不是装饰——Node 侧那处"时间显示成 Invalid Date"的真 bug，就是靠它暴露的，
+     *      而它当时照样 200、照样有内容。
+     *      条数按 DOM 里渲染出来的 audit-tag 数比，而不是按事由文本比：组件把事件码翻成中文
+     *      （login_ok → 「登录成功」那一类），拿库里的码去页面找字符串是一条永远对不上的路。 */
+    {
+      const recent = await q(
+        `SELECT event FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`, [uid]);
+      const page = await render("/security", cookie);
+      check(page.status === 200 && !/Invalid Date/.test(String(page.shape.text)),
+        `${id} 的 /security 没有 Invalid Date`, `status=${page.status}`);
+      if (!recent.length) {
+        skipped(`${id} 的 /security 渲染出留痕列表`, "这个账号没有审计记录");
+      } else {
+        const rendered = ((page.html ?? "").match(/<span class="audit-tag/g) ?? []).length;
+        check(rendered === recent.length,
+          `${id} 的 /security 把最近 ${recent.length} 条留痕一条条渲染出来了`,
+          `DOM 里 ${rendered} 个 audit-tag，库里 ${recent.length} 条（含登录失败 ${recent.filter((r) => r.event === "login_fail").length} 条）`);
+      }
+    }
+  }
+}
+
 /* ---------- 6. 漫游记的三条自证断言（每次抽不同文章，比逐字是假命题） ---------- */
 {
   const DRAWS = 10;
@@ -298,5 +408,5 @@ for (const id of IDENTITIES) {
 }
 
 await conn.end();
-console.log(`\n合计 ${pass + fail} 项，失败 ${fail} 项`);
+console.log(`\n合计 ${pass + fail} 项，失败 ${fail} 项${skip ? `，另有 ${skip} 项因没有宾语记 SKIP` : ""}`);
 process.exit(fail ? 1 : 0);

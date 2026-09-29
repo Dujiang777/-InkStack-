@@ -2,6 +2,7 @@ package com.inkstack.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.inkstack.entity.MoneyRows;
+import com.inkstack.entity.MeRows;
 import com.inkstack.entity.User;
 import java.time.LocalDate;
 import java.util.List;
@@ -148,4 +149,27 @@ public interface UserMapper extends BaseMapper<User> {
    */
   @Update("UPDATE users SET points_balance = #{value} WHERE id = #{uid}")
   int setBalanceAbsolute(@Param("uid") long uid, @Param("value") long value);
+
+  /**
+   * 个人中心要显示的账号资料（P7f-1f-a）。列的兜底顺序照 {@code app/me/page.tsx} 原来那句：
+   * bio 用 IFNULL、tone/shape 用 COALESCE，注册日在 SQL 里就格式化成 '%Y-%m-%d'。
+   */
+  @Select("""
+      SELECT IFNULL(bio, '') AS bio, avatar_text AS avatarText,
+             COALESCE(avatar_tone, '') AS avatarTone, COALESCE(avatar_shape, '') AS avatarShape,
+             DATE_FORMAT(created_at, '%Y-%m-%d') AS createdAt
+        FROM users WHERE id = #{uid} LIMIT 1
+      """)
+  MeRows.Profile profileRow(@Param("uid") long uid);
+
+  /** 最后一次发每日额度的日历日；没发过是 null（页面据此判"今日 30 滴待领取"）。 */
+  @Select("SELECT last_quota_date FROM users WHERE id = #{uid} LIMIT 1")
+  LocalDate lastQuotaDate(@Param("uid") long uid);
+
+  /**
+   * 只问"两步验证开了没有"。刻意不用 {@link #byIdForSecurity}：那一行带 password_hash 与
+   * totp_secret，而安全中心只需要一个 0/1——读接口不该把自己用不到的秘密搬进内存。
+   */
+  @Select("SELECT totp_enabled FROM users WHERE id = #{uid} LIMIT 1")
+  Integer totpEnabledOf(@Param("uid") long uid);
 }
