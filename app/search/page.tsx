@@ -1,6 +1,6 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 import Link from "next/link";
 import { listArticles, searchArticles, effectiveUnlockPrice, type SearchResultRow } from "@/lib/data";
-import { getCurrentUser } from "@/lib/auth";
 
 // 检索台 v3「墨谱检索」：
 // - 类别筛选做成「印章墙」：每个标签一枚墨章，搜素时章面显示「命中/总量」分面计数
@@ -57,7 +57,7 @@ export default async function SearchPage({
 
   const searching = kw.length >= 2;
   // v17.2：付费墙纵深——已登录访客若已购买某篇付费文，该文正文仍可被检索到
-  const viewer = await getCurrentUser();
+  const viewer = await remoteCurrentUser();
   const rows = searching ? await searchArticles(kw, 50, viewer?.id ?? null) : [];
 
   // 全站标签总量（墨章的「共 Y」底数 + 探索态的章面计数）

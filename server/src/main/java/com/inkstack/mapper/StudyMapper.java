@@ -59,6 +59,17 @@ public interface StudyMapper {
       """)
   List<StudyRows.Link> listLinks();
 
+  /**
+   * 渲染层判定外链要用的放行域名（P7f-1f-b）。
+   *
+   * <p>只回 {@code domain} 一列：这条读每次渲染文章都可能被触发，而 {@code url} / {@code note}
+   * 是审核队列的内饰（运营看得见就够了），把它们带进公开路径等于把审核备注摊给读者。
+   * 小写化在 LinksController 里做（这条公开路径的应答就此定死为全小写），Next 侧合并默认清单时
+   * 还会再 lower 一次，那是它自己既有的口径——不是这里的要求。
+   */
+  @Select("SELECT domain FROM link_whitelist WHERE status = 'approved'")
+  List<String> approvedDomains();
+
   /** 审核：status 由服务层从 approve|reject 映射而来，请求里的任何其它字符串都到不了这条语句。 */
   @Update("UPDATE link_whitelist SET status = #{status} WHERE id = #{id}")
   int reviewLink(@Param("id") long id, @Param("status") String status);

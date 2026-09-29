@@ -1,8 +1,8 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { getSeriesDetail } from "@/lib/data";
-import { getCurrentUser } from "@/lib/auth";
 import BundleUnlockBox from "@/components/BundleUnlockBox";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +25,7 @@ export default async function SeriesDetailPage({ params }: { params: Promise<{ i
   const { id: rawId } = await params;
   const id = Number(rawId);
   if (!Number.isInteger(id) || id <= 0) notFound();
-  const viewer = await getCurrentUser();
+  const viewer = await remoteCurrentUser();
   const s = await getSeriesDetail(id, { id: viewer?.id ?? null });
   if (!s) notFound();
   const isOwn = viewer?.id != null && viewer.id === s.authorId;

@@ -12,6 +12,9 @@
 // 200、有卡片、有正文，看起来完全正常——只有"首页列出的 slug 必须与库里公开文章的前 50 篇
 // 一字不差"抓得住这种"渲染得很好但读的不是这份数据"。
 //
+// 这一道整体只读，只有一处例外：5c.2 要证明"渲染一次页面就把今日 30 滴发出去"，
+// 所以会临时改 probe 账号的发放日与余额，并在 finally 里按原值复原、复核残留。
+//
 //   node scripts/page-check.mjs                # 游客 + 三个身份，打 PARITY_NODE（默认 3200）
 //   node scripts/page-check.mjs --login=writer
 import fs from "node:fs";
@@ -354,6 +357,104 @@ for (const id of IDENTITIES) {
         check(rendered === recent.length,
           `${id} 的 /security 把最近 ${recent.length} 条留痕一条条渲染出来了`,
           `DOM 里 ${rendered} 个 audit-tag，库里 ${recent.length} 条（含登录失败 ${recent.filter((r) => r.event === "login_fail").length} 条）`);
+      }
+    }
+  }
+}
+
+/* ---------- 5c. 页面身份来自 Java 的会话（P7f-1f-b 的 DOM 那一半） ----------
+ *
+ * 闸门 18 证明渲染层不再自己摸 MySQL，"我是谁"只剩 Java 一处判定；闸门 19 的 ⑩ 证明那个端点
+ * 认人认得对。中间还剩两段接线，而它们有两个**方向**会错：
+ *   · 接错人——把 A 的昵称印在 B 的页面上，第 5 节那种"页面 200、有内容"抓不住；
+ *   · 认不出人还装作没事——`remoteCurrentUser` 一旦把失败吞成 null，全站每个页面都会安静地
+ *     渲染成游客态，而这一族在没有下面这几条之前会全部照绿。这是"绝不静默回落"那条规矩
+ *     唯一能被机器看见的地方。
+ * 所以成对地钉：每个人在自己的页面上看到自己的昵称与墨仓，看不到别人的；游客谁的都看不到。
+ *
+ * 昵称印在 DOM 上的是 /study 那一句「{昵称} · 墨仓 N 点」——UserMenu 里那个昵称是客户端
+ * fetch 回来的，SSR 的 HTML 里没有，拿它当判据会在 CI 里天天误报。
+ */
+{
+  const names = {};
+  for (const id of ["test", "writer", "probe"]) {
+    const email = { test: env.INK_TEST_EMAIL, writer: env.INK_WRITER_EMAIL, probe: env.INK_PROBE_EMAIL }[id];
+    if (!email) continue;
+    const row = (await q(`SELECT id, nickname FROM users WHERE email = ?`, [email]))[0];
+    if (row) names[id] = { nickname: String(row.nickname), uid: Number(row.id) };
+  }
+  const ids = Object.keys(names);
+  const distinct = new Set(ids.map((id) => names[id].nickname)).size === ids.length;
+  if (!distinct) {
+    skipped("页面身份来自 Java 会话（成对钉）",
+      `这几个测试账号昵称重复（${ids.map((i) => names[i].nickname).join("/")}），"看不到别人"这条比不出东西`);
+  } else {
+    const othersOf = (id) => ids.filter((o) => o !== id).map((o) => names[o].nickname);
+    for (const id of ids) {
+      const page = await render("/study", await loginCookie(id));
+      const text = String(page.shape.text);
+      check(page.status === 200 && text.includes(names[id].nickname),
+        `${id} 的书房页印着自己的昵称（身份是从 Java 的会话里拿的）`,
+        `status=${page.status} 期望含「${names[id].nickname}」`);
+      // 余额在渲染**之后**读：当天第一次访问会顺手发 30 滴，渲染前读到的旧值不是页面的错
+      const bal = (await q(`SELECT points_balance AS b FROM users WHERE id = ?`, [names[id].uid]))[0]?.b;
+      // 取的是**可见文本**而不是原始 HTML：JSX 把相邻的表达式渲染成 `墨仓 <!-- -->27447<!-- --> 点`，
+      // 直接拿正则去 HTML 里找数字，找到的永远是注释边界左边那半截。
+      const shown = (text.match(/墨仓\s*([\d,]+)\s*点/) ?? [])[1] ?? "";
+      check(shown.replace(/,/g, "") === String(bal),
+        `${id} 的书房页印着的墨仓数就是库里那一个（会话带回来的 points 落了 DOM）`,
+        `期望 ${bal} 实得 ${shown || "空"}`);
+      const leaked = othersOf(id).filter((n) => text.includes(n));
+      check(leaked.length === 0, `${id} 的书房页不出现别人的昵称`,
+        leaked.length ? `串到了 ${leaked.join("、")}` : `${ids.length - 1} 个对照昵称都不在页面上`);
+    }
+    const guest = await render("/study");
+    const seen = ids.map((id) => names[id].nickname).filter((n) => String(guest.shape.text).includes(n));
+    check(seen.length === 0, "游客态的书房页谁的昵称都不出现",
+      seen.length ? `泄露 ${seen.join("、")}` : `对照 ${ids.length} 个昵称全不在`);
+  }
+
+  /* 5c.2 每日 30 滴：闸门 19 打的是端点，这里打的是**页面**
+   *
+   * points 页里那句 `grantDailyQuota(user.id)` 已经删了，发放挪进 GET /api/auth/me。
+   * "端点会发"不等于"页面会去发"——首页一个墨仓控件都没有，它只经报头调用一次会话解析；
+   * 而"访问任意页面今日额度自动入仓"这句话要成立，靠的正是这一次。所以这里把当天置成未发，
+   * 只渲染一次首页，再回库里看它到底发没发。夹具是**写**的，按余额、发放日、流水 id 三项精确回滚。 */
+  {
+    const probe = names.probe;
+    if (!probe) {
+      skipped("渲染一次首页就把今日额度发出去", ".env 里没有 probe 账号（INK_PROBE_*），没有可安全改动的墨仓");
+    } else {
+      const before = (await q(`SELECT points_balance AS bal, DATE_FORMAT(last_quota_date,'%Y-%m-%d') AS d,
+              (SELECT IFNULL(MAX(id),0) AS m FROM point_ledger) AS maxLedger
+          FROM users WHERE id = ?`, [probe.uid]))[0];
+      const bal0 = Number(before.bal);
+      try {
+        await q(`UPDATE users SET last_quota_date = DATE_SUB(CURDATE(), INTERVAL 3 DAY) WHERE id = ?`, [probe.uid]);
+        const home = await render("/", await loginCookie("probe"));
+        const after = (await q(`SELECT points_balance AS bal, DATE_FORMAT(last_quota_date,'%Y-%m-%d') AS d
+            FROM users WHERE id = ?`, [probe.uid]))[0];
+        const now = new Date();
+        const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        check(home.status === 200 && String(after?.d) === today,
+          "只渲染一次首页，当天的 30 滴就已经入仓（发放确实跟着会话解析走了）",
+          `首页 status=${home.status} last_quota_date=${String(after?.d)} 今天=${today}`);
+        check(Number(after?.bal) === bal0 + 30, "入仓的数目恰好是 30 滴",
+          `余额 ${bal0} → ${after?.bal}`);
+        const made = await q(`SELECT delta, reason FROM point_ledger WHERE user_id = ? AND id > ?`,
+          [probe.uid, Number(before.maxLedger)]);
+        check(made.length === 1 && Number(made[0].delta) === 30 && String(made[0].reason) === "每日免费额度",
+          "这一次渲染同时落下了一条流水（不是只加了余额）", `实得 ${JSON.stringify(made)}`);
+      } finally {
+        await q(`DELETE FROM point_ledger WHERE user_id = ? AND id > ? AND reason = '每日免费额度'`,
+          [probe.uid, Number(before.maxLedger)]);
+        await q(`UPDATE users SET points_balance = ?, last_quota_date = ? WHERE id = ?`, [bal0, before.d, probe.uid]);
+        const back = (await q(`SELECT points_balance AS bal, DATE_FORMAT(last_quota_date,'%Y-%m-%d') AS d,
+                (SELECT COUNT(*) FROM point_ledger WHERE user_id = ? AND id > ?) AS extra
+            FROM users WHERE id = ?`, [probe.uid, Number(before.maxLedger), probe.uid]))[0];
+        check(Number(back?.bal) === bal0 && String(back?.d) === String(before.d) && Number(back?.extra) === 0,
+          "额度夹具已回滚（余额、发放日、流水三项回到改动前，页面对库没有残留）",
+          `余额 ${back?.bal}（原 ${bal0}）日期 ${String(back?.d)}（原 ${String(before.d)}）多余流水 ${back?.extra} 条`);
       }
     }
   }

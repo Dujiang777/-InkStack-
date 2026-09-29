@@ -4,6 +4,8 @@
 // 为什么这一道必须存在：P7f-1d / P7f-1e / P7f-1f-a 迁走的这**十八读**，原本根本没有 HTTP 面——
 // 它们是 Server Component 在 Next 进程里直接摸 MySQL 的（最后那四条更特殊：SQL 就写在 page.tsx 里，
 // 连 lib/data.ts 都不经过，所以闸门 18 的第一版一条也数不到）。
+// ⑩ 那四条（P7f-1f-b）是同一件事的另一半：它们住在**全站共用**的 lib 里而不是页面里，
+// 其中"每日 30 滴"更不是读，是渲染时直接发生的一次写——所以那一段的判据也是写的判据。
 // 于是对拍（闸门 1）看不见它们：两侧都得上 HTTP 才有的比；
 // 契约基线（闸门 1′）也看不见，因为基线是从 Node 时代的**应答**冻结的，而它们从不应答。
 // 等 app/api/** 与那份遗留读 SQL 一起删掉之后，"Java 这些算得对不对"就再没有参照物了。
@@ -26,10 +28,13 @@
 //   node scripts/pagereads-check.mjs
 //
 // 前提：Java 已启动（默认 http://localhost:3101），.env 的 DATABASE_URL 指向克隆库 inkstack_j。
-// 判据本身只读，但有两处**临时夹具**（⑧ 的待审稿与三条举报、⑨.2b 把 probe 的印章三列
-// 临时清成 NULL），全部在 finally 里删除／恢复并复核残留——跑完库里不该有任何闸门痕迹。
+// 判据本身只读，但有五处**临时夹具**（⑧ 的一行待审稿与三条举报、⑨.2b 把 probe 的印文临时清成
+// 空串、⑩.1b 临时吊销一枚刚签发的会话、⑩.3 三行 link_whitelist、⑩.4 一次真实的每日发墨），
+// 全部在 finally 里删除／按原值恢复并复核残留——跑完库里不该有任何闸门痕迹。
+// ⑩.4 是其中唯一的一处**写业务**：回滚按余额、发放日、流水 id 三项精确复原，不靠重放一遍业务。
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -1078,6 +1083,272 @@ for (const p of ["/api/platform/stats", "/api/platform/top-authors?limit=5"]) {
       WHERE user_id IN (${people.map(() => "?").join(",")})`, people.map(([, a]) => a.id));
     check(people.length === 0 || any > 0, "留痕判据有宾语（三个身份里至少一条审计）",
       people.length ? `${people.length} 个身份共 ${any} 条` : "没有任何身份可登录");
+  }
+}
+
+
+/* ⑩ 渲染层最后 4 条的新家（P7f-1f-b）：会话、设备列表、外链白名单、每日额度
+ *
+ * 这一族与前面九个不是一回事：它们不是某个页面就地写的 SQL，而是住在**全站共用**的 lib 里——
+ * `getCurrentUser` 每个已登录页面都要走两遍（报头一遍、页面一遍），`grantDailyQuota` 更是
+ * 渲染时直接发生的一次**写**。交出去之后，"我是谁"只由 Java 判定，"今日 30 滴"只由
+ * GET /api/auth/me 一处发放。
+ *
+ * 宾语也跟着换了，所以这一节不比数值为主：
+ *   · ⑩.1 比的是**认人**：游客 / 伪造 / 三个真人各拿到什么，以及"换一个人问，答的就换一个人的 id"；
+ *   · ⑩.1b 签有效、库里已吊销那一格必须落到游客——这是"双保险"里容易被省略的第二道；
+ *   · ⑩.2 设备列表回库复算，"是不是本机"由闸门自己算 sha256(令牌) 判定，不抄实现；
+ *   · ⑩.3 白名单必须挡住 pending / rejected。这份库里 approved 恰好是 0 条，
+ *     于是三行夹具（approved / pending / rejected）就是这条判据的宾语——
+ *     同一条记录要在审核队列里看得见、在放行清单里看不见，才叫真过滤过；
+ *   · ⑩.4 是这一族里唯一的写，判据也得是写的判据：把当天置成"未发"再问，余额必须 +30、
+ *     流水必须落一行；同一日再问一次必须一分不加。页面里那句 grantDailyQuota 删了以后，
+ *     "到底还有没有人发"这一格由闸门 4 的渲染判据补（打到端点绿不代表页面会去打）。
+ */
+{
+  const people = [["writer", ACTORS.writer], ["test", ACTORS.test], ["probe", ACTORS.probe]]
+    .filter((pair) => pair[1]);
+  const pad = (n) => String(n).padStart(2, "0");
+  const localDay = (offset) => {
+    const d = new Date();
+    d.setDate(d.getDate() - offset);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  const iso = (v) => (v instanceof Date ? v.toISOString() : String(v ?? ""));
+  const sha256 = (s) => createHash("sha256").update(s).digest("hex");
+  const tokenOf = (cookie) => cookie.replace(/^ink_session=/, "");
+
+  /* ⑩.1 会话解析：三方各拿到什么 */
+  {
+    const guest = await ask("/api/auth/me");
+    check(guest.status === 200 && "user" in (guest.json ?? {}) && guest.json.user === null,
+      "游客问 /api/auth/me 是 200 + user:null，不是 401、也不是少一个键",
+      `status=${guest.status} 实得 ${brief(guest.json)}`);
+    const forged = await ask("/api/auth/me", "ink_session=not-a-real-session");
+    check(forged.status === 200 && (forged.json ?? {}).user === null,
+      "伪造的 Cookie 同样只能拿到 user:null", `status=${forged.status} 实得 ${brief(forged.json)}`);
+  }
+  const ids = [];
+  for (const [who, a] of people) {
+    const r = await ask("/api/auth/me", a.cookie);
+    const u = r.json?.user ?? null;
+    if (!check(r.status === 200 && u !== null && r.backend === "inkstack-java",
+      `${who} 问 /api/auth/me 由 Java 认出了人`, `status=${r.status} backend=${r.backend || "无"} user=${brief(u)}`)) continue;
+    // 复算走的是"这枚令牌的哈希在库里对应的那个人"，与端点同一条链路但两句不同的 SQL
+    const row = await only(`SELECT u.id, u.nickname, u.email, u.role, u.points_balance AS points
+        FROM sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.token_hash = ? AND s.revoked = 0 AND s.expires_at > NOW() LIMIT 1`,
+      [sha256(tokenOf(a.cookie))]);
+    if (!check(!!row, `${who} 的这枚 Cookie 在 sessions 里确实是一条有效会话（双保险的第二道在场）`,
+      `token_hash=${sha256(tokenOf(a.cookie)).slice(0, 12)}…`)) continue;
+    check(JSON.stringify(Object.keys(u)) === '["id","nickname","email","role","points"]',
+      `${who} 的会话应答只有那五个键，键序也不许多不少`, `实得 ${Object.keys(u).join(",")}`);
+    const want = {
+      id: Number(row.id), nickname: String(row.nickname), email: String(row.email),
+      role: String(row.role), points: Number(row.points),
+    };
+    const mism = Object.entries(want).filter(([k, v]) => String(u[k]) !== String(v))
+      .map(([k, v]) => `${k}: 期望 ${brief(v)} 实得 ${brief(u[k])}`);
+    check(mism.length === 0, `${who} 的会话五个字段逐个与库里那行相等`,
+      mism.slice(0, 3).join(" | ") || "五字段全等");
+    if (Number(row.id) !== a.id) {
+      check(false, `${who} 认出来的人就是登录的那一个`, `期望 ${a.id} 实得 ${row.id}`);
+    }
+    ids.push(Number(row.id));
+  }
+  if (ids.length >= 2) {
+    check(new Set(ids).size === ids.length, "换一个人问，答的就换一个人的 id（不是把同一个人应答三遍）",
+      `${ids.length} 个身份 → id ${ids.join(" / ")}`);
+  } else {
+    skipped("换一个人问就换一个人的 id", `只认出 ${ids.length} 个身份，比不出"换人"`);
+  }
+
+  /* ⑩.1b 第二道保险：签名依然有效，但库里已经吊销 → 必须是游客。
+   *      做法是**再登一次**拿一枚新 Cookie（只改这一枚的库状态），于是"签有效 + 库里不通"
+   *      这一格被单独钉住：少读一次 sessions 表也能全绿的实现，在这里一定会红。 */
+  {
+    const a = ACTORS.probe;
+    let sid = 0;
+    if (!a) {
+      skipped("签名有效但库里已吊销那一格", ".env 里没有 probe 账号（INK_PROBE_*），没有可临时吊销的会话");
+    } else {
+      try {
+        const cookie = await login(env.INK_PROBE_EMAIL, env.INK_PROBE_PASSWORD);
+        const h = sha256(tokenOf(cookie));
+        const row = await only(`SELECT id, revoked FROM sessions WHERE token_hash = ? LIMIT 1`, [h]);
+        if (!row) {
+          check(false, "第二次登录在 sessions 里留下了行", "按 token_hash 查不到刚签的那条会话");
+        } else {
+          sid = Number(row.id);
+          const before = await ask("/api/auth/me", cookie);
+          if (check(before.status === 200 && before.json?.user?.id === a.id,
+            "吊销之前这枚 Cookie 认得出人（否则下面的绿说不清是谁的功劳）", `实得 ${brief(before.json)}`)) {
+            await pool.query(`UPDATE sessions SET revoked = 1 WHERE id = ?`, [sid]);
+            const after = await ask("/api/auth/me", cookie);
+            check(after.status === 200 && (after.json ?? {}).user === null,
+              "库里已吊销 → 即使签名有效也只能是游客（第二道保险真的在挡）", `实得 ${brief(after.json)}`);
+          }
+        }
+      } finally {
+        if (sid) {
+          await pool.query(`DELETE FROM sessions WHERE id = ?`, [sid]).catch(() => {});
+          const left = await num(`SELECT COUNT(*) FROM sessions WHERE id = ?`, [sid]);
+          check(left === 0, "夹具会话已清掉（闸门不在 sessions 表里留行）", `残留 ${left} 行`);
+        }
+      }
+    }
+  }
+
+  /* ⑩.2 设备列表：与 sessions 表复算逐行比，外加"本机恰好一台" */
+  {
+    const guest = await ask("/api/security/sessions");
+    check(guest.status === 401, `游客打 /api/security/sessions 必须 401，一台设备都不该给`, `status=${guest.status}`);
+  }
+  for (const [who, a] of people) {
+    const r = await ask("/api/security/sessions", a.cookie);
+    if (!check(r.status === 200 && r.backend === "inkstack-java",
+      `${who} 的设备列表由 Java 应答`, `status=${r.status} backend=${r.backend || "无"}`)) continue;
+    const mine = sha256(tokenOf(a.cookie));
+    const raw = await rows(`SELECT id, ua, ip, token_hash AS tokenHash, created_at, last_seen_at,
+            DATE_FORMAT(last_seen_at,'%Y-%m-%d %H:%i:%s') AS ord
+       FROM sessions WHERE user_id = ? AND revoked = 0 AND expires_at > NOW()
+       ORDER BY last_seen_at DESC LIMIT 30`, [a.id]);
+    const got = r.json?.sessions ?? [];
+    listCheck(`${who} 的设备列表`, {
+      want: raw.map((x) => ({
+        id: Number(x.id), ua: x.ua ?? null, ip: x.ip ?? null,
+        created_at: iso(x.created_at), last_seen_at: iso(x.last_seen_at),
+        current: String(x.tokenHash) === mine, __ord: String(x.ord),
+      })),
+      limit: 30, key: (s) => String(s.id), got,
+    });
+    // "哪一台是本机"是一格布尔，不是排序副产物：只标当前这枚令牌，多标漏标都是错
+    const marked = got.filter((s) => s.current === true).map((s) => String(s.id));
+    const wantMarked = raw.filter((x) => String(x.tokenHash) === mine).map((x) => String(x.id));
+    check(marked.length === 1 && marked[0] === wantMarked[0],
+      `${who} 的设备列表里"本机"有且只有一台，且就是这枚令牌那一行`,
+      `标了 ${brief(marked)}，应为 ${brief(wantMarked)}`);
+    if (!raw.length) skipped(`${who} 的设备列表有宾语`, "这个账号当前没有有效会话行");
+  }
+
+  /* ⑩.3 外链放行清单：公开可取、只回 domain 一列、且必须过滤掉 pending / rejected */
+  {
+    const sorted = (list) => [...list].sort().join("\u0001");
+    const approved = async () => (await rows(
+      `SELECT domain FROM link_whitelist WHERE status = 'approved'`)).map((x) => String(x.domain).toLowerCase());
+    const askDomains = async () => {
+      const r = await ask("/api/links/allowed-domains");
+      return { r, got: Array.isArray(r.json?.domains) ? r.json.domains : null };
+    };
+
+    const first = await askDomains();
+    check(first.r.status === 200 && JSON.stringify(Object.keys(first.r.json ?? {})) === '["domains"]',
+      "放行清单对游客可取，且应答里只有 domains 一个键（审核备注不许顺着这条公开路径漏出去）",
+      `status=${first.r.status} 键 ${brief(Object.keys(first.r.json ?? {}))}`);
+    const baseline = await approved();
+    if (!baseline.length) {
+      skipped("放行清单基线与库里的 approved 相等", `这份库当前 approved 是 0 条——下面的三行夹具才是这条判据的宾语`);
+    } else {
+      check(sorted(first.got ?? []) === sorted(baseline),
+        `放行清单基线与库里的 ${baseline.length} 条 approved 一一对上`,
+        `实得 ${brief((first.got ?? []).slice(0, 3))}`);
+    }
+
+    const FIX = [
+      ["P7F1FB-Gate19-Approved.invalid.test", "approved"],
+      ["p7f1fb-gate19-pending.invalid.test", "pending"],
+      ["p7f1fb-gate19-rejected.invalid.test", "rejected"],
+    ];
+    try {
+      for (const [d, s] of FIX) {
+        await pool.query(`INSERT INTO link_whitelist (domain, url, note, status) VALUES (?, ?, ?, ?)`,
+          [d, `https://${d.toLowerCase()}/`, "闸门19夹具", s]);
+      }
+      const { got } = await askDomains();
+      const list = got ?? [];
+      check(list.includes("p7f1fb-gate19-approved.invalid.test"),
+        "approved 的那条确实进了放行清单，而且回的是小写（大写域名要能被比中）",
+        `实得 ${brief(list.slice(-3))}`);
+      check(!list.includes("p7f1fb-gate19-pending.invalid.test")
+        && !list.includes("p7f1fb-gate19-rejected.invalid.test"),
+        "pending 与 rejected 都不在放行清单里（status='approved' 这个过滤有宾语）",
+        `清单 ${list.length} 条`);
+      check(sorted(list) === sorted([...baseline, "p7f1fb-gate19-approved.invalid.test"]),
+        "除了夹具那一条，其余就是库里的 approved——既不夹带默认的十几个代码站，也不吞掉真实条目",
+        `期望 ${baseline.length + 1} 条 实得 ${list.length} 条`);
+      /* 反方向的宾语：同一条 pending 必须在**审核队列**里看得见。
+       * 少这一句，上面三条在"夹具根本没插进去"时也会全绿。 */
+      const staff = ACTORS.test;
+      if (!staff) {
+        skipped("审核队列看得见那三条夹具", ".env 里没有运营账号（INK_TEST_*），拿不到 /api/links");
+      } else {
+        const q = await ask("/api/links", staff.cookie);
+        const domains = (q.json?.links ?? []).map((l) => String(l.domain).toLowerCase());
+        const missing = FIX.filter(([d]) => !domains.includes(d.toLowerCase())).map(([d]) => d);
+        check(q.status === 200 && missing.length === 0,
+          "那三条夹具在审核队列里三条都在（同表不同判据：队列全见、清单只见 approved）",
+          missing.length ? `队列里缺 ${brief(missing)}` : `队列 ${domains.length} 条`);
+      }
+    } finally {
+      await pool.query(`DELETE FROM link_whitelist WHERE note = '闸门19夹具'`).catch(() => {});
+      const left = await num(`SELECT COUNT(*) FROM link_whitelist WHERE note = '闸门19夹具'`);
+      check(left === 0, "白名单夹具已清干净", `残留 ${left} 行`);
+      const back = await askDomains();
+      check(sorted(back.got ?? []) === sorted(baseline),
+        "清场之后放行清单回到基线（夹具没有被缓存在 Java 侧）",
+        `期望 ${baseline.length} 条 实得 ${(back.got ?? []).length} 条`);
+    }
+  }
+
+  /* ⑩.4 每日 30 滴：这一族里唯一的写，所以判据也是写的判据 */
+  {
+    const a = ACTORS.probe;
+    if (!a) {
+      skipped("每日额度的发放与判重", ".env 里没有 probe 账号（INK_PROBE_*），没有可安全改动的墨仓");
+    } else {
+      const before = await only(`SELECT points_balance AS bal, DATE_FORMAT(last_quota_date,'%Y-%m-%d') AS d,
+              (SELECT IFNULL(MAX(id),0) FROM point_ledger) AS maxLedger
+          FROM users WHERE id = ?`, [a.id]);
+      const bal0 = Number(before.bal);
+      try {
+        // 先把"今天已经发过"这个既成事实抹掉：这是本闸门唯一一处**写夹具**，
+        // 回滚按余额、日期、流水 id 三项精确复原，不靠"重放一遍业务"。
+        await pool.query(`UPDATE users SET last_quota_date = DATE_SUB(CURDATE(), INTERVAL 3 DAY) WHERE id = ?`, [a.id]);
+        const r = await ask("/api/auth/me", a.cookie);
+        const after = await only(`SELECT points_balance AS bal, DATE_FORMAT(last_quota_date,'%Y-%m-%d') AS d
+            FROM users WHERE id = ?`, [a.id]);
+        check(Number(r.json?.user?.points) === bal0 + 30,
+          "当天未发时，一次 GET /api/auth/me 就把 30 滴发出去（应答里带的也是发完之后的余额）",
+          `余额 ${bal0} → 库里 ${after.bal}，应答 ${brief(r.json?.user?.points)}`);
+        check(Number(after.bal) === bal0 + 30, `发放后余额恰好 +30`, `期望 ${bal0 + 30} 实得 ${after.bal}`);
+        check(String(after.d) === localDay(0), "发放把 last_quota_date 记到今天（判重就靠这一列）",
+          `实得 ${brief(after.d)} 今天 ${localDay(0)}`);
+        const made = await rows(`SELECT delta, reason FROM point_ledger WHERE user_id = ? AND id > ?`,
+          [a.id, Number(before.maxLedger)]);
+        check(made.length === 1 && Number(made[0].delta) === 30 && String(made[0].reason) === "每日免费额度",
+          "加出去的墨同时落了一条流水（账实相符）", `实得 ${brief(made)}`);
+
+        const again = await ask("/api/auth/me", a.cookie);
+        const second = await only(`SELECT points_balance AS bal FROM users WHERE id = ?`, [a.id]);
+        const more = await num(`SELECT COUNT(*) FROM point_ledger WHERE user_id = ? AND id > ?`,
+          [a.id, Number(before.maxLedger)]);
+        check(Number(second.bal) === bal0 + 30 && more === made.length
+          && Number(again.json?.user?.points) === bal0 + 30,
+          "同一日再问一次一分都不再发（判重走的是 last_quota_date < 今天）",
+          `余额 ${second.bal} 新增流水 ${more - made.length} 条`);
+      } finally {
+        await pool.query(`DELETE FROM point_ledger WHERE user_id = ? AND id > ? AND reason = '每日免费额度'`,
+          [a.id, Number(before.maxLedger)]).catch(() => {});
+        await pool.query(`UPDATE users SET points_balance = ?, last_quota_date = ? WHERE id = ?`,
+          [bal0, before.d, a.id]).catch(() => {});
+        const back = await only(`SELECT points_balance AS bal, DATE_FORMAT(last_quota_date,'%Y-%m-%d') AS d,
+                (SELECT COUNT(*) FROM point_ledger WHERE user_id = ? AND id > ?) AS extra
+            FROM users WHERE id = ?`, [a.id, Number(before.maxLedger), a.id]);
+        check(Number(back?.bal) === bal0 && String(back?.d) === String(before.d) && Number(back?.extra) === 0,
+          "额度夹具已回滚（余额、发放日、流水三项都回到改动前）",
+          `余额 ${back?.bal}（原 ${bal0}）日期 ${brief(back?.d)}（原 ${brief(before.d)}）多余流水 ${back?.extra} 条`);
+      }
+    }
   }
 }
 

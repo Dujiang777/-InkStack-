@@ -76,6 +76,27 @@ public class LinksController {
     return ResponseEntity.ok(Map.of("links", rows));
   }
 
+  /**
+   * 渲染层要的那份放行域名清单（P7f-1f-b）。
+   *
+   * <p>它与上面那条 {@code GET /api/links} 是两件事：那条是运营台的审核队列（带 url 与备注、
+   * 非运营 403），这条只回答"这个域名能不能直接点开"，游客渲染文章时也要用它，所以必须公开。
+   * 内容也不重合——只回 {@code approved} 的域名本身。
+   *
+   * <p>{@code lib/link-policy.ts} 里那份 {@code DEFAULT_ALLOW}（十几个代码/文档站）留在 Next 侧：
+   * 它是展示层的默认审美，不是库里的数据；两栈各留各的那一半，合并发生在页面那一侧。
+   */
+  @GetMapping("/api/links/allowed-domains")
+  public ResponseEntity<Map<String, Object>> allowedDomains() {
+    List<String> domains = new ArrayList<>();
+    for (String d : db.approvedDomains()) {
+      if (d != null && !d.isBlank()) {
+        domains.add(d.toLowerCase());
+      }
+    }
+    return ResponseEntity.ok(Map.of("domains", domains));
+  }
+
   @PutMapping("/api/links")
   public ResponseEntity<Map<String, Object>> review(
       @Current SessionUser me, HttpServletRequest request) {

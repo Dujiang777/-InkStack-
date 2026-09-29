@@ -1,3 +1,4 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 import Link from "next/link";
 import UserMenu from "./UserMenu";
 import ThemeToggle from "./ThemeToggle";
@@ -5,12 +6,12 @@ import NotifBell from "./NotifBell";
 import NavTabs from "./NavTabs";
 import ViewSwitch from "./ViewSwitch";
 import MobileDock from "./MobileDock";
-import { getCurrentUser, isStaff } from "@/lib/auth";
+import { isStaff } from "@/lib/auth";
 
 // 报头：报头题字 + 印章 + 编号导航（杂志刊头语言）
 // 导航分级：书房仅登录用户可见，运营台仅管理员可见（服务端渲染期判定）
 export default async function Masthead() {
-  const user = await getCurrentUser();
+  const user = await remoteCurrentUser();
   const isAdmin = isStaff(user?.role); // v17.1：admin 与 developer 均可见运营台入口
   return (
     <header className="masthead">

@@ -1,6 +1,6 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
 import { getAuthor, listAuthorArticles, followStats, isFollowing, listSeries, effectiveUnlockPrice } from "@/lib/data";
 import { avatarClasses } from "@/lib/avatar";
 import FollowButton from "@/components/FollowButton";
@@ -17,7 +17,7 @@ export default async function AuthorPage({ params }: { params: Promise<{ id: str
   const author = Number.isInteger(authorId) ? await getAuthor(authorId) : null;
   if (!author) notFound();
 
-  const viewer = await getCurrentUser();
+  const viewer = await remoteCurrentUser();
   const isSelf = viewer?.id === author.id;
   const [articles, stats, following, series] = await Promise.all([
     listAuthorArticles(author.id, 50),

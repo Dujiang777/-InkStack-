@@ -1,7 +1,8 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 ﻿import { notFound } from "next/navigation";
 import Link from "next/link";
 import { getArticle, listComments, listRelated, listArticleTips, isFollowing, isBookmarked, followStats, getArticleSeriesNav, listMySeries } from "@/lib/data";
-import { getCurrentUser, isStaff } from "@/lib/auth";
+import { isStaff } from "@/lib/auth";
 import { renderMarkdown, withHeadingIds } from "@/lib/render";
 import AgentChat from "@/components/AgentChat";
 import ReadingProgress from "@/components/ReadingProgress";
@@ -32,7 +33,7 @@ function teaserOf(md: string): string {
 // 审核流：pending/rejected 文章仅作者与管理员可见，页顶展示状态横幅
 export default async function ArticlePage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const viewer = await getCurrentUser();
+  const viewer = await remoteCurrentUser();
   const privileged = isStaff(viewer?.role);
   const article = await getArticle(slug, { id: viewer?.id ?? null, privileged }, { includeMd: false });
   if (!article) notFound();

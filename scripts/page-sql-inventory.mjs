@@ -270,21 +270,18 @@ const offenders = [...reached].filter((id) => fact(id).direct).sort();
  * 登记表：今天仍由渲染层在进程内直连 MySQL 的函数，写成 `文件#函数`。
  * 每条都得先给 Java 补一个读端点（或把这件动作整个交给 Java），再从表里摘掉。
  *
- * 这张表在 P7f-1e 那天清过一次零，第二天被判据拓宽到 8——见文件头。
- * P7f-1f-a 摘掉前四条（页面自己写的 SQL，从来没有 HTTP 面），剩下 4 条都住在 lib 里、
- * 被若干页面共用：其中 `getCurrentUser` 是**每个已登录页面**都要走的一次读＋一次节流写，
- * `grantDailyQuota` 更是渲染时直接发生的**发放动作**——它连"读"都不是。
+ * 这张表的历史就是这道闸门被反证的全过程：P7f-1e 清过一次零 → 第二天判据拓宽到 8 →
+ * P7f-1f-a 摘掉 4 条页面就地 SQL → P7f-1f-b 摘掉最后 4 条（getCurrentUser / listSessions /
+ * allowedDomains / grantDailyQuota，前三条是被若干页面共用的读，最后一条是渲染时直接发生的
+ * **发放动作**——它连"读"都不是）。
+ * 现在它是空的，但**不许退役**：清空之前它守的是"别多出来"，清空之后它守的是"别退回去"——
+ * 把一个页面改回进程内 SQL、或给 lib 加一句 pool.query，都会在这里立刻变红。
  *
  * 摘名字的顺序也是有讲究的：先把 Java 端点与页面的 remote 调用都落地、再摘，
  * 于是这道闸门在中间那一步一定会红一次（"登记表里某条已经没有本地 SQL"），
  * 那个红就是它在工作——而不是"改坏了"。
  */
-const REGISTER = [
-  { id: "lib/auth.ts#getCurrentUser", why: "会话解析（签名+库内有效性双保险）+ last_seen 节流写：跨栈最硬的一条，要么 Java 出 /api/me/session，要么 Next 只透传令牌不做判定" },
-  { id: "lib/auth.ts#listSessions", why: "安全中心的设备列表：Java 的 GET /api/security/sessions 早就在应答同一份数据，这里只是把 Node 那句 pool.query 换成问它" },
-  { id: "lib/link-policy.ts#allowedDomains", why: "外链白名单（渲染时读 link_whitelist）：应改问 Java 的链接策略读端点，或把审核判定整个交给 Java" },
-  { id: "lib/points.ts#grantDailyQuota", why: "渲染时发每日 30 滴——这是**写**，不是读：Java 的 /api/auth/me 已经在发同一份额度，等 getCurrentUser 一并过去就能整条摘掉" },
-];
+const REGISTER = [];
 const REGISTERED = REGISTER.map((r) => r.id);
 const whyOf = (id) => REGISTER.find((r) => r.id === id)?.why ?? "";
 

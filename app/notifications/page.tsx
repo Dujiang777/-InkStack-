@@ -1,10 +1,10 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 import Link from "next/link";
-import { getCurrentUser } from "@/lib/auth";
 import NotifList from "@/components/NotifList";
 
 // 通知中心：评论 / 打赏 / 点赞 / 审核结果 / 系统消息
 export default async function NotificationsPage() {
-  const user = await getCurrentUser();
+  const user = await remoteCurrentUser();
   if (!user) {
     return (
       <div className="notif-page">

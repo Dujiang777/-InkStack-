@@ -9,14 +9,14 @@ import {
   adminListComments,
   adminInsights,
 } from "@/lib/data";
-import { javaReady, remoteAdminOverview } from "@/lib/java-source";
-import { getCurrentUser, isStaff } from "@/lib/auth";
+import { javaReady, remoteAdminOverview, remoteCurrentUser } from "@/lib/java-source";
+import { isStaff } from "@/lib/auth";
 import AdminConsole from "@/components/AdminConsole";
 
 // 运营台（完整版）：总览 / 审核 / 内容 / 用户 / 举报 / 日志 / 评论 / 资金
 // 权限：admin 与 developer（v17.1）；DB 未配置（演示模式）时展示演示数据预览
 export default async function AdminPage() {
-  const user = await getCurrentUser();
+  const user = await remoteCurrentUser();
   const demoMode = !dbEnabled();
   // "实时数据"这块牌子要配得上：MySQL 与 JAVA_BASE 缺任何一头，页面上就是兜底假数
   const live = javaReady();

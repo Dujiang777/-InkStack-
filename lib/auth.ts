@@ -148,7 +148,15 @@ export async function clearSessionCookie(): Promise<void> {
   jar.set(SESSION_COOKIE, "", { httpOnly: true, path: "/", maxAge: 0 });
 }
 
-/* ---------- 服务器端会话校验与吊销 ---------- */
+/* ---------- 服务器端会话校验与吊销 ----------
+ *
+ * ⚠ 从 P7f-1f-b 起，这一组只服务 `app/api/**` 那 44 条遗留路由（闸门 18 把它们算作
+ * "待删的遗留 HTTP 面"，不属于渲染层）。**页面不再走这里**：页面用
+ * `lib/java-source.ts#remoteCurrentUser`，问的是 Java 的 `GET /api/auth/me`。
+ * 之所以不留一条"页面也顺手用它"的路，是因为 `JAVA_BASE` 留空必须仍然能整套回滚到 Node——
+ * 一旦 Node 路由的身份判定也要问 Java，回滚就变成"Java 挂了谁也进不来"。
+ * 这 44 条路由在 P7f-2 与 `lib/data-legacy.ts` 一起删掉，这一组跟着它们一起退场。
+ */
 const gSeen = globalThis as typeof globalThis & { __inkSeen?: Map<string, number> };
 const seenMap = (gSeen.__inkSeen ??= new Map<string, number>());
 

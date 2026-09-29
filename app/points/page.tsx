@@ -1,7 +1,5 @@
 import Link from "next/link";
-import { getCurrentUser } from "@/lib/auth";
-import { grantDailyQuota } from "@/lib/points";
-import { javaReady, remotePointsOverview } from "@/lib/java-source";
+import { javaReady, remoteCurrentUser, remotePointsOverview } from "@/lib/java-source";
 import TopUpClient from "@/components/TopUpClient";
 
 export const metadata = { title: "墨仓 · 墨水账户 · 墨栈 InkStack" };
@@ -23,7 +21,7 @@ function rewardForCycleDay(cd: number): number {
 }
 
 export default async function PointsPage() {
-  const user = await getCurrentUser();
+  const user = await remoteCurrentUser();
   if (!user) {
     return (
       <div className="points-page">
@@ -115,8 +113,7 @@ export default async function PointsPage() {
     );
   }
 
-  // 懒重置：访问本页视作当天活跃，自动补发每日 30（幂等）
-  await grantDailyQuota(user.id);
+  // 每日 30 滴的懒发放不再由本页触发：remoteCurrentUser() 走的 GET /api/auth/me 里已经发了
 
   // 四块读数原本是三句就地 pool.query + 一段页面里的连签走查（P7f-1f-a 迁给 Java）。
   // 连签的定义现在只有 Java 一处：与 GET /api/checkin、签到发墨同一条，不会再分叉。

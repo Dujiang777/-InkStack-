@@ -1,6 +1,6 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 import Link from "next/link";
 import { listArticles, platformStats, topAuthors, listMyFollowing, listFollowingFeed, listMyHistory, todayInkQuote, effectiveUnlockPrice } from "@/lib/data";
-import { getCurrentUser } from "@/lib/auth";
 import Reveal from "@/components/Reveal";
 import InkQuote from "@/components/InkQuote";
 import { plainText } from "@/components/plain-text";
@@ -8,7 +8,7 @@ import { avatarClasses } from "@/lib/avatar";
 
 // 首页 v3：数据横幅 → 头条 → 热榜+作者榜侧栏 → 关注动态流（登录且有关注时）→ 编号卡片流
 export default async function HomePage() {
-  const user = await getCurrentUser();
+  const user = await remoteCurrentUser();
   const [articles, stats, authors, feed, myFollowing, resume] = await Promise.all([
     listArticles(),
     platformStats(),

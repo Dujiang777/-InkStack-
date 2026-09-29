@@ -20,7 +20,7 @@ import type {
   MyArticleRow, MyCommentRow, MySeries, MyStats, PlatformStats, ReportRow, ReviewRow, SearchResultRow,
   SeriesCard, SeriesDetail, SeriesTitleSuggestion, UnlockIncome, WeeklyStats,
 } from "./data";
-import type { SessionUser } from "./auth";
+import type { SessionRow, SessionUser } from "./auth";
 
 const TIMEOUT_MS = 8_000;
 
@@ -98,13 +98,9 @@ export const remoteGetArticle = cache(async (slug: string): Promise<ArticleRow |
   }
 });
 
-export async function remoteMe(): Promise<{ user: SessionUser | null }> {
-  return ask<{ user: SessionUser | null }>("/api/auth/me");
-}
-
 /* ---------- 文章页读侧 ----------
  * Java 端一律从转发的 Cookie 里取当前身份，而 Node 侧这些函数的签名是显式传 viewerId/authorId。
- * 两条路同源（页面用的就是 getCurrentUser() 的结果），所以不需要额外校验。
+ * 两条路同源（页面用的就是同一个会话解析的结果），所以不需要额外校验。
  */
 
 /** 关注关系一次取全（粉丝数/关注数/我是否已关注）；同一渲染内合流，避免三次往返。 */
@@ -389,4 +385,30 @@ export async function remotePointsOverview(): Promise<PointsOverview> {
 
 export async function remoteSecurityOverview(): Promise<SecurityOverview> {
   return ask<SecurityOverview>("/api/security/overview");
+}
+
+/* ---------- 会话与外链白名单（P7f-1f-b：闸门 18 的最后四条） ----------
+ *
+ * `currentUser` 走的是 `/api/auth/me`：Java 的 `SessionService.resolve` 与 Node 那句
+ * `SELECT … FROM sessions JOIN users` 是同一套双保险（签名 + 库内有效 + uid 相符 + 未封禁），
+ * 而且顺带做两件页面原本自己在进程里做的事——`last_seen_at` 的 60 秒节流写、每日 30 滴的懒发放。
+ * 所以这一句调用的语义不只是"我是谁"，它同时兑现了墨仓页那句"访问任意页自动入仓"。
+ *
+ * 用 cache() 包一层：一次渲染里 Masthead 与页面各调一次是常态，不合并就会同一渲染打两次
+ * /api/auth/me（顺带两次 UPDATE 尝试）。cache() 只合流同一请求内，不跨请求缓存。
+ */
+
+export const remoteCurrentUser = cache(async (): Promise<SessionUser | null> => {
+  const body = await ask<{ user: SessionUser | null }>("/api/auth/me");
+  return body?.user ?? null;
+});
+
+/** 自己的活跃设备列表。键名沿用 Node 的 snake_case（组件类型就是这么写的）。 */
+export async function remoteSessions(): Promise<SessionRow[]> {
+  return askList<SessionRow>("/api/security/sessions", "sessions");
+}
+
+/** 放行域名（不含 DEFAULT_ALLOW，那一半留在 lib/link-policy.ts）。 */
+export async function remoteAllowedDomains(): Promise<string[]> {
+  return askList<string>("/api/links/allowed-domains", "domains");
 }

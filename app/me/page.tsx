@@ -1,6 +1,5 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
-import { javaReady, remoteMeProfile } from "@/lib/java-source";
+import { javaReady, remoteCurrentUser, remoteMeProfile } from "@/lib/java-source";
 import { followStats, listMyFollowing, listMyFollowers, listMyLikes, listMyComments, listMyBookmarks, listMyHistory, listAchievements, badgeRewardClaimed } from "@/lib/data";
 import MeClient from "@/components/MeClient";
 
@@ -10,7 +9,7 @@ export const dynamic = "force-dynamic";
 // 个人中心（/me）：账号资料 / 安全 / 墨水资产 / 关注与足迹。
 // 与「我的书房 /study」（作品管理）分工：书房管作品，这里管账号与关系。
 export default async function MePage() {
-  const user = await getCurrentUser();
+  const user = await remoteCurrentUser();
   if (!user) redirect("/login");
 
   // 账号资料那五个字段原本是一句写在本文件里的 pool.query。默认值现在由 Java 负责

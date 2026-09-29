@@ -1,13 +1,13 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { getCurrentUser } from "@/lib/auth";
 import { listMyArticles, authorArticleStats, listMySeries, listMyUnlockIncome, listMyFunnel, suggestSeriesTitles } from "@/lib/data";
 import StudyClient from "@/components/StudyClient";
 import SeriesManager from "@/components/SeriesManager";
 
 // 我的书房：个人主页 + 文章管理（草稿/待审/驳回/已发布），驳回可改后重新提交 + 专栏合集管理
 export default async function StudyPage() {
-  const user = await getCurrentUser();
+  const user = await remoteCurrentUser();
   if (!user) redirect("/login");
 
   const { rows, stats } = await listMyArticles(user.id);

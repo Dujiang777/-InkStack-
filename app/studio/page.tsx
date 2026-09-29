@@ -1,13 +1,14 @@
+import { remoteCurrentUser } from "@/lib/java-source";
 ﻿import Link from "next/link";
 import StudioClient from "@/components/StudioClient";
-import { getCurrentUser, isStaff } from "@/lib/auth";
+import { isStaff } from "@/lib/auth";
 import { dbEnabled } from "@/lib/db";
 
 // AI 创作台：稿纸编辑器 + AI 编辑部 + 发布台
 // ?edit=slug 进入编辑模式（书房「编辑」入口跳转而来）
 export default async function StudioPage({ searchParams }: { searchParams: Promise<{ edit?: string }> }) {
   const { edit } = await searchParams;
-  const user = dbEnabled() ? await getCurrentUser() : null;
+  const user = dbEnabled() ? await remoteCurrentUser() : null;
   const points = user ? user.points : null;
   const editSlug = user ? (edit ?? null) : null;
 

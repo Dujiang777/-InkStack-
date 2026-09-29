@@ -1,4 +1,4 @@
-import { getCurrentUser } from "@/lib/auth";
+import { remoteCurrentUser } from "@/lib/java-source";
 import ImportClient from "@/components/ImportClient";
 
 export const metadata = { title: "迁移工坊 · 墨栈 InkStack" };
@@ -6,7 +6,7 @@ export const metadata = { title: "迁移工坊 · 墨栈 InkStack" };
 // 迁移工坊：旧博客 → 墨栈的一键搬家（P0 获客钩子）
 // 登录后文章导入自己账号，分身全文索引即时生效
 export default async function ImportPage() {
-  const user = await getCurrentUser();
+  const user = await remoteCurrentUser();
 
   return (
     <div className="import-page">
