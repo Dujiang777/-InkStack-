@@ -53,6 +53,18 @@ public final class NodeShapes {
   }
 
   /**
+   * Node 的 {@code String(r.x)}——<b>没有</b> {@code ??} 兜底的那一种。
+   *
+   * <p>{@code String(null)} 在 JS 里得到字符串 "null" 而不是抛错，运营台有几处列表字段就是这么
+   * 从数据库里的 NULL 变成页面上一个看得见却没人管的 "null"。移植时把它原样搬过来（而不是
+   * 顺手改成 {@code text()}），否则"Java 修好了一个显示 bug"这种差异会伪装成数据变了：
+   * 差分的两边在同一个位置上不再回答同一个东西，比那个 "null" 更难查。
+   */
+  public static String jsString(String value) {
+    return value == null ? "null" : value;
+  }
+
+  /**
    * DATETIME → 'YYYY-MM-DD'（UTC 日历日）。对齐 Node 的
    * {@code v instanceof Date ? v.toISOString().slice(0,10) : String(v ?? "")}：
    * NULL 落空串而不是 "null"，这一点曾让 /sitemap.xml 整站 500。

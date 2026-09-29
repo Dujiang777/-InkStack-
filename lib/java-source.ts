@@ -15,9 +15,10 @@ import { cache } from "react";
 import { cookies } from "next/headers";
 import type {
   ArticleRow, ArticleSeriesNav, ArticleTipRow, AuthorArticleStat, AuthorProfile, AuthorRankRow, BookmarkRow,
-  CommentRow, Achievement, FeedItem, FollowPeer, FollowStats, FootprintArticle, FunnelRow, HistoryRow,
-  MyArticleRow, MyCommentRow, MySeries, MyStats, PlatformStats, SearchResultRow, SeriesCard, SeriesDetail,
-  SeriesTitleSuggestion, UnlockIncome, WeeklyStats,
+  CommentRow, Achievement, AdminActionLogRow, AdminArticleRow, AdminCommentRow, AdminInsights, AdminOrderRow,
+  AdminUserRow, FeedItem, FollowPeer, FollowStats, FootprintArticle, FunnelRow, HistoryRow,
+  MyArticleRow, MyCommentRow, MySeries, MyStats, PlatformStats, ReportRow, ReviewRow, SearchResultRow,
+  SeriesCard, SeriesDetail, SeriesTitleSuggestion, UnlockIncome, WeeklyStats,
 } from "./data";
 import type { SessionUser } from "./auth";
 
@@ -286,4 +287,47 @@ export async function remoteBadgeRewardClaimed(): Promise<boolean> {
 
 export async function remoteSeriesTitleSuggestions(): Promise<SeriesTitleSuggestion[]> {
   return askList<SeriesTitleSuggestion>("/api/me/series-title-suggestions", "suggestions");
+}
+
+/* ---------- 运营台八张表的读（P7f-1e 补） ----------
+ * 同样是"没有 HTTP 前身"的一族：运营台是 Server Component 直调 lib/data.ts，
+ * /api/admin/* 在 Node 侧只有 POST。八条 GET 全部过 Java 的运营门禁（未登录 401 / 非运营 403），
+ * 门禁由转发的 Cookie 决定身份——所以这里不能因为"页面里已经判过角色"就省掉 Cookie 转发。
+ * q / status 一律 encodeURIComponent：搜索框里的内容会原样进 URL，不转义等于把
+ * "&"、"#" 之类的字符变成查询串的一部分（少一条结果或者多一个参数，都很难从页面上看出来）。
+ */
+
+export async function remoteAdminArticles(): Promise<AdminArticleRow[]> {
+  return askList<AdminArticleRow>("/api/admin/articles", "articles");
+}
+
+export async function remoteAdminReview(): Promise<ReviewRow[]> {
+  return askList<ReviewRow>("/api/admin/review", "review");
+}
+
+export async function remoteAdminUsers(q?: string): Promise<AdminUserRow[]> {
+  const kw = encodeURIComponent(q ?? "");
+  return askList<AdminUserRow>(`/api/admin/users?q=${kw}`, "users");
+}
+
+export async function remoteAdminReports(status?: string): Promise<ReportRow[]> {
+  const st = encodeURIComponent(status ?? "");
+  return askList<ReportRow>(`/api/admin/reports?status=${st}`, "reports");
+}
+
+export async function remoteAdminActions(limit: number): Promise<AdminActionLogRow[]> {
+  return askList<AdminActionLogRow>(`/api/admin/actions?limit=${limit}`, "actions");
+}
+
+export async function remoteAdminOrders(): Promise<AdminOrderRow[]> {
+  return askList<AdminOrderRow>("/api/admin/orders", "orders");
+}
+
+export async function remoteAdminComments(): Promise<AdminCommentRow[]> {
+  return askList<AdminCommentRow>("/api/admin/comments", "comments");
+}
+
+/** 大盘：返回的是对象（days / ink / topArticles / tags / funnel 五个键平铺），不是列表。 */
+export async function remoteAdminInsights(): Promise<AdminInsights> {
+  return ask<AdminInsights>("/api/admin/insights");
 }

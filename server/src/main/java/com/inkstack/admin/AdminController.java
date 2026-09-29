@@ -14,7 +14,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -33,11 +35,75 @@ public class AdminController {
   private static final List<String> USER_ACTIONS = List.of("ban", "unban", "grant", "revoke", "setRole");
 
   private final AdminService admin;
+  private final AdminQueryService queries;
   private final Notifier notifier;
 
-  public AdminController(AdminService admin, Notifier notifier) {
+  public AdminController(AdminService admin, AdminQueryService queries, Notifier notifier) {
     this.admin = admin;
+    this.queries = queries;
     this.notifier = notifier;
+  }
+
+  /* ==================== 运营台读侧（P7f-1e） ====================
+   *
+   * 这八条 GET 是运营台页面原本在 Next 进程里直连 MySQL 的那八条读的新家。它们和上面四条写
+   * 共用<b>同一个</b> staffOnly 门禁——读侧漏出来的东西比写侧更敏感（用户管理那张表带邮箱），
+   * 所以"只有四条写接口需要门禁"这种旧印象必须在这里堵住：门禁写在方法第一件事，一条不落。
+   *
+   * Node 侧从来没有这些 URL（Server Component 直调 lib/data.ts，压根不经过 HTTP），
+   * 因此没有对岸可对拍：形状与取数的正确性由闸门 19 回库复算钉住。
+   */
+
+  @GetMapping("/api/admin/articles")
+  public ResponseEntity<Map<String, Object>> articlesRead(@Current SessionUser me) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(Map.of("articles", queries.articles()));
+  }
+
+  @GetMapping("/api/admin/review")
+  public ResponseEntity<Map<String, Object>> reviewRead(@Current SessionUser me) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(Map.of("review", queries.reviewQueue()));
+  }
+
+  @GetMapping("/api/admin/users")
+  public ResponseEntity<Map<String, Object>> usersRead(
+      @Current SessionUser me, @RequestParam(name = "q", required = false) String q) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(Map.of("users", queries.users(q)));
+  }
+
+  @GetMapping("/api/admin/reports")
+  public ResponseEntity<Map<String, Object>> reportsRead(
+      @Current SessionUser me, @RequestParam(name = "status", required = false) String status) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(Map.of("reports", queries.reports(status)));
+  }
+
+  @GetMapping("/api/admin/actions")
+  public ResponseEntity<Map<String, Object>> actionsRead(
+      @Current SessionUser me, @RequestParam(name = "limit", required = false) String limit) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(Map.of("actions", queries.actions(limit)));
+  }
+
+  @GetMapping("/api/admin/orders")
+  public ResponseEntity<Map<String, Object>> ordersRead(@Current SessionUser me) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(Map.of("orders", queries.orders()));
+  }
+
+  @GetMapping("/api/admin/comments")
+  public ResponseEntity<Map<String, Object>> commentsRead(@Current SessionUser me) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(Map.of("comments", queries.comments()));
+  }
+
+  /** 大盘：形状是对象而非列表，直接把 insights 那五个键平铺回去（页面吃的就是这个）。 */
+  @GetMapping("/api/admin/insights")
+  public ResponseEntity<Map<String, Object>> insightsRead(@Current SessionUser me) {
+    ResponseEntity<Map<String, Object>> gate = staffOnly(me);
+    return gate != null ? gate : ResponseEntity.ok(queries.insights());
   }
 
   @PostMapping("/api/admin/articles")

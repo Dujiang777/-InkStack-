@@ -62,7 +62,7 @@ cp .env.example .env
 | **DATABASE_URL** | `mysql://inkstack:密码@localhost:3306/inkstack` |
 | **NEXT_PUBLIC_SITE_URL** | `https://你的域名`（不填 sitemap/RSS/邮件链接会落 localhost） |
 | **TRUST_PROXY** | **必须设 `1`**（Nginx 反代后限流/审计才能取真实 IP，否则限流可被伪造头绕过） |
-| EDGE_API_LIMIT | Next 边缘那道全站 API 滑窗限流的档位，留空 = 每 IP 每 60 秒 120 次。只有一种情况需要动它：出口共用一个公网 IP 的用户群（公司 NAT / 校园网）被 120 误伤——在这里调高，别去中间件里改常量。跑批量闸门时也可以只对演练实例抬档（`EDGE_API_LIMIT=100000 next dev -p 3400`），对照实例照旧 120，闸门才能同时验"档位生效"与"默认没被拆" |
+| EDGE_API_LIMIT | Next 边缘那道全站 API 滑窗限流的档位，留空 = 每 IP 每 60 秒 120 次。只有一种情况需要动它：出口共用一个公网 IP 的用户群（公司 NAT / 校园网）被 120 误伤——在这里调高，别去中间件里改常量。跑批量闸门时也可以只对演练实例抬档（`EDGE_API_LIMIT=100000 next dev -p 3400`），对照实例照旧 120，闸门才能同时验"档位生效"与"默认没被拆"。<br>⚠ 在 Git Bash 里起第二个实例时**必须带 `MSYS_NO_PATHCONV=1` 与独立 `NEXT_DIST_DIR`**：MSYS 会把 `JAVA_ROUTES=/api` 里的 `/api` 当路径转换成 `C:/Program Files/Git/api`，于是那台"演练实例"静默地一条都没切走（症状是 `/api/admin/articles` 回 405 而不是 Java 的 401，看起来像新端点没生效）。完整命令见 README 的"切流与回滚"一节 |
 | **SESSION_SECRET** | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | SMTP_* | 生产强烈建议配（注册/重置/2FA 邮箱恢复依赖；漏配时生产不会回显验证码，但用户收不到信） |
 | GITEE/GITHUB_CLIENT_* | OAuth 回调统一填 `https://你的域名/api/auth/<厂商>/callback` |

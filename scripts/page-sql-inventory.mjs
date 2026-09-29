@@ -164,17 +164,13 @@ const offenders = pageFns.filter((n) => scan(n).direct).sort();
 /**
  * 登记表：今天仍由 Next 进程直连 MySQL 的页面取数函数。
  * 每条写清"谁在调它"，是为了让下一个来清的人知道该给 Java 补哪个读端点，
- * 而不是对着函数名猜。运营台这八条尤其别顺手"改成调 /api/admin/*"——
- * 那个前缀下 Java 只有 POST（写侧），GET 列表从来就没有 HTTP 面。
+ * 而不是对着函数名猜。
  *
- * 2026-09-28 P7f-1d：首页统计 / 作者榜 / 关注流 / 成就墙 / 集齐奖励 / 专栏题名建议六条已迁到
- * Java（读端点见 PlatformController 与 MeReadController），从表上删了。剩下的八条全是运营台，
- * 需要新建一批 GET 读端点，单独一步做。
+ * 2026-09-29 P7f-1e：运营台八条（adminInsights / adminList* ×7）迁到 Java 的
+ * /api/admin/* GET 读端点之后，这张表**清空**。清零不等于这一道作废——它从此守的是反向：
+ * 谁再往渲染层里加一句 getPool()，这里立刻红。
  */
-const REGISTERED = [
-  "adminInsights", "adminListActions", "adminListArticles", "adminListComments",
-  "adminListOrders", "adminListReports", "adminListReview", "adminListUsers",
-];
+const REGISTERED = [];
 
 const unexpected = offenders.filter((n) => !REGISTERED.includes(n));
 const migrated = REGISTERED.filter((n) => !offenders.includes(n));
@@ -206,8 +202,11 @@ if (migrated.length) {
   console.log("      棘轮只许单向转：从 REGISTERED 删掉它们。");
 }
 if (!bad && !offenders.length) {
-  console.log("\n✓ 登记表已清空：web 层不再有任何进程内 SQL，"
+  console.log("\n✓ 登记表已清空：被页面取走的函数里没有任何进程内 SQL，"
     + "\"页面只渲染、数据全问 Java\" 从此可以被机器复验。");
+  console.log("  （app/api/** 与 lib/data-legacy.ts 里那些仍然直连 MySQL 的读是**待删的遗留 HTTP 面**，");
+  console.log("    不属于渲染层，由闸门 8 计数、P7f-2 一次删除——这一道刻意不把它们算进来，");
+  console.log("    否则\"还剩多少没迁\"会随每条路由的写法抖动。）");
 } else if (!bad) {
   console.log(`⚠ 退出码 0（与登记表一致），但离"纯渲染层"还差 ${offenders.length} 条。`);
 }

@@ -19,7 +19,9 @@ import {
   remoteListComments, remoteListSeries, remoteMyArticles, remoteMyBookmarks, remoteMyComments,
   remoteMyFollowers, remoteMyFollowing, remoteMyFunnel, remoteMyHistory, remoteMyLikes, remoteMySeries,
   remoteMyUnlockIncome, remoteRandomSlug, remoteSearchArticles, remoteSeriesDetail, remoteSeriesNav,
-  remoteAchievements, remoteBadgeRewardClaimed, remoteFollowingFeed, remotePlatformStats,
+  remoteAchievements, remoteAdminActions, remoteAdminArticles, remoteAdminComments,
+  remoteAdminInsights, remoteAdminOrders, remoteAdminReports, remoteAdminReview,
+  remoteAdminUsers, remoteBadgeRewardClaimed, remoteFollowingFeed, remotePlatformStats,
   remoteSeriesTitleSuggestions, remoteTopAuthors, remoteWeeklyStats,
 } from "./java-source";
 
@@ -343,31 +345,8 @@ export type AdminArticleRow = {
 };
 
 export async function adminListArticles(): Promise<AdminArticleRow[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  const [rows] = await pool.query(
-    `SELECT a.slug, a.title, u.nickname AS author, a.status, a.review_status AS reviewStatus,
-            a.pinned, a.featured,
-            a.read_count AS readCount, a.comment_count AS commentCount,
-            IFNULL(a.unlock_price,0) AS unlockPrice,
-            DATE_FORMAT(a.published_at,'%Y-%m-%d') AS publishedAt
-     FROM articles a JOIN users u ON u.id = a.author_id
-     ORDER BY a.updated_at DESC LIMIT 100`
-  );
-  if (!Array.isArray(rows)) return [];
-  return (rows as Record<string, unknown>[]).map((r) => ({
-    slug: String(r.slug),
-    title: String(r.title),
-    author: String(r.author),
-    status: String(r.status),
-    reviewStatus: String(r.reviewStatus ?? "approved"),
-    pinned: Number(r.pinned) === 1,
-    featured: Number(r.featured) === 1,
-    readCount: Number(r.readCount),
-    commentCount: Number(r.commentCount),
-    publishedAt: String(r.publishedAt ?? "—"),
-    unlockPrice: Number(r.unlockPrice ?? 0),
-  }));
+  if (!javaReady()) return [];
+  return remoteAdminArticles();
 }
 
 export type AdminAction = "publish" | "unpublish" | "pin" | "unpin" | "feature" | "unfeature";
@@ -406,23 +385,8 @@ export type ReviewRow = {
 
 /** 审核队列：待审核文章（最早提交优先） */
 export async function adminListReview(): Promise<ReviewRow[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  const [rows] = await pool.query(
-    `SELECT a.slug, a.title, u.nickname AS author, a.summary,
-            DATE_FORMAT(a.updated_at,'%m-%d %H:%i') AS submittedAt
-     FROM articles a JOIN users u ON u.id = a.author_id
-     WHERE a.review_status = 'pending' AND a.status = 'published'
-     ORDER BY a.updated_at ASC LIMIT 50`
-  );
-  if (!Array.isArray(rows)) return [];
-  return (rows as Record<string, unknown>[]).map((r) => ({
-    slug: String(r.slug),
-    title: String(r.title),
-    author: String(r.author),
-    summary: String(r.summary ?? ""),
-    submittedAt: String(r.submittedAt ?? "—"),
-  }));
+  if (!javaReady()) return [];
+  return remoteAdminReview();
 }
 
 export type AdminUserRow = {
@@ -438,29 +402,8 @@ export type AdminUserRow = {
 
 /** 用户管理列表（q 模糊匹配昵称/邮箱） */
 export async function adminListUsers(q?: string): Promise<AdminUserRow[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  const like = `%${(q ?? "").trim()}%`;
-  const [rows] = await pool.query(
-    `SELECT u.id, u.nickname, u.email, u.role, u.banned, u.points_balance AS points,
-            (SELECT COUNT(*) FROM articles a WHERE a.author_id = u.id) AS articleCount,
-            DATE_FORMAT(u.created_at,'%Y-%m-%d') AS createdAt
-     FROM users u
-     WHERE ? = '%%' OR u.nickname LIKE ? OR u.email LIKE ?
-     ORDER BY u.id ASC LIMIT 200`,
-    [like, like, like]
-  );
-  if (!Array.isArray(rows)) return [];
-  return (rows as Record<string, unknown>[]).map((r) => ({
-    id: Number(r.id),
-    nickname: String(r.nickname),
-    email: String(r.email),
-    role: String(r.role),
-    banned: Number(r.banned) === 1,
-    points: Number(r.points),
-    articleCount: Number(r.articleCount),
-    createdAt: String(r.createdAt ?? "—"),
-  }));
+  if (!javaReady()) return [];
+  return remoteAdminUsers(q);
 }
 
 export type ReportRow = {
@@ -476,34 +419,8 @@ export type ReportRow = {
 
 /** 举报处理队列（status 缺省返回全部） */
 export async function adminListReports(status?: string): Promise<ReportRow[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  const [rows] = await pool.query(
-    `SELECT r.id, r.target_type AS targetType, r.target_id AS targetId, r.reason, r.status,
-            COALESCE(ru.nickname, '游客') AS reporter,
-            CASE r.target_type
-              WHEN 'article' THEN (SELECT a.title FROM articles a WHERE a.id = r.target_id)
-              ELSE (SELECT CONCAT('评论：', LEFT(c.content, 40))
-                    FROM comments c WHERE c.id = r.target_id)
-            END AS targetTitle,
-            DATE_FORMAT(r.created_at,'%m-%d %H:%i') AS createdAt
-     FROM reports r
-     LEFT JOIN users ru ON ru.id = r.reporter_id
-     ${status ? "WHERE r.status = ?" : ""}
-     ORDER BY r.created_at DESC LIMIT 100`,
-    status ? [status] : []
-  );
-  if (!Array.isArray(rows)) return [];
-  return (rows as Record<string, unknown>[]).map((r) => ({
-    id: Number(r.id),
-    targetType: String(r.targetType) as "article" | "comment",
-    targetId: Number(r.targetId),
-    reason: String(r.reason),
-    status: String(r.status) as ReportRow["status"],
-    reporter: String(r.reporter),
-    targetTitle: String(r.targetTitle ?? "（内容已不存在）"),
-    createdAt: String(r.createdAt ?? "—"),
-  }));
+  if (!javaReady()) return [];
+  return remoteAdminReports(status);
 }
 
 export type AdminActionLogRow = {
@@ -518,25 +435,8 @@ export type AdminActionLogRow = {
 
 /** 最近管理操作审计日志 */
 export async function adminListActions(limit = 30): Promise<AdminActionLogRow[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  const [rows] = await pool.query(
-    `SELECT g.id, COALESCE(u.nickname, '未知') AS admin, g.action,
-            g.target_type AS targetType, g.target_id AS targetId, g.detail,
-            DATE_FORMAT(g.created_at,'%m-%d %H:%i') AS createdAt
-     FROM admin_actions g LEFT JOIN users u ON u.id = g.admin_id
-     ORDER BY g.created_at DESC LIMIT ${Number(limit) || 30}`
-  );
-  if (!Array.isArray(rows)) return [];
-  return (rows as Record<string, unknown>[]).map((r) => ({
-    id: Number(r.id),
-    admin: String(r.admin),
-    action: String(r.action),
-    targetType: String(r.targetType),
-    targetId: String(r.targetId),
-    detail: r.detail ? String(r.detail) : null,
-    createdAt: String(r.createdAt ?? "—"),
-  }));
+  if (!javaReady()) return [];
+  return remoteAdminActions(limit);
 }
 
 /** 审核操作：通过 / 驳回（驳回需带原因，会通知作者） */
@@ -655,41 +555,8 @@ export type AdminOrderRow = {
 
 /** 资金流水：充值 + 单篇解锁 + 专栏打包，合并最近 60 条 */
 export async function adminListOrders(): Promise<AdminOrderRow[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `(SELECT '充值' AS kind, u.nickname AS user, IFNULL(p.name, o.pack_key) AS title,
-              o.points AS amount, 0 AS gain,
-              DATE_FORMAT(o.paid_at,'%m-%d %H:%i') AS createdAt
-         FROM topup_orders o JOIN users u ON u.id = o.user_id
-         LEFT JOIN (SELECT 'starter' AS k,'体验包' AS name UNION ALL SELECT 'standard','标准包' UNION ALL SELECT 'pro','创作包') p
-           ON p.k = o.pack_key
-        WHERE o.status = 'paid')
-       UNION ALL
-       (SELECT '单篇解锁', u.nickname, a.title, ap.price, ap.author_gain,
-              DATE_FORMAT(ap.created_at,'%m-%d %H:%i')
-         FROM article_purchases ap JOIN users u ON u.id = ap.user_id
-         JOIN articles a ON a.id = ap.article_id)
-       UNION ALL
-       (SELECT '专栏打包', u.nickname, s.title, sp.price, sp.author_gain,
-              DATE_FORMAT(sp.created_at,'%m-%d %H:%i')
-         FROM series_purchases sp JOIN users u ON u.id = sp.user_id
-         JOIN series s ON s.id = sp.series_id)
-       ORDER BY createdAt DESC LIMIT 60`
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      kind: String(r.kind),
-      user: String(r.user),
-      title: String(r.title),
-      amount: Number(r.amount ?? 0),
-      gain: Number(r.gain ?? 0),
-      createdAt: String(r.createdAt),
-    }));
-  } catch {
-    return [];
-  }
+  if (!javaReady()) return [];
+  return remoteAdminOrders();
 }
 
 export type AdminCommentRow = {
@@ -703,31 +570,8 @@ export type AdminCommentRow = {
 
 /** 最近评论（运营管理用） */
 export async function adminListComments(): Promise<AdminCommentRow[]> {
-  const pool = await getPool();
-  if (!pool) return [];
-  try {
-    const [rows] = await pool.query(
-      `SELECT c.id, IFNULL(u.nickname, IFNULL(c.guest_nickname,'旅人')) AS author,
-              a.slug AS articleSlug, a.title AS articleTitle,
-              LEFT(c.content, 120) AS content,
-              DATE_FORMAT(c.created_at,'%m-%d %H:%i') AS createdAt
-       FROM comments c
-       LEFT JOIN users u ON u.id = c.user_id
-       JOIN articles a ON a.id = c.article_id
-       ORDER BY c.created_at DESC LIMIT 60`
-    );
-    if (!Array.isArray(rows)) return [];
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      id: Number(r.id),
-      author: String(r.author),
-      articleSlug: String(r.articleSlug),
-      articleTitle: String(r.articleTitle),
-      content: String(r.content),
-      createdAt: String(r.createdAt),
-    }));
-  } catch {
-    return [];
-  }
+  if (!javaReady()) return [];
+  return remoteAdminComments();
 }
 
 /** 删除评论（含一级回复），并回扣文章评论计数 */
@@ -1364,126 +1208,20 @@ function lastNDays(n: number): { d: string; label: string }[] {
 }
 
 export async function adminInsights(): Promise<AdminInsights> {
-  const pool = await getPool();
-  if (!pool) {
-    return {
-      days: lastNDays(DAYS_WINDOW).map((x) => ({ ...x, articles: 0, users: 0, comments: 0 })),
-      ink: { tipCount: 0, tipTotal: 0, authorGot: 0, topupCount: 0, topupTotal: 0, qaCount: 0 },
-      topArticles: [],
-      tags: [],
-      funnel: { paidArticles: 0, paywallViews: 0, unlocks: 0, bundles: 0, revenue: 0 },
-    };
-  }
-  try {
-    const axis = lastNDays(DAYS_WINDOW);
-    const idx = new Map(axis.map((a, i) => [a.d, i]));
-    const days = axis.map((x) => ({ ...x, articles: 0, users: 0, comments: 0 }));
+  // 演示模式仍然回"零值 + 完整 14 天轴"：这是没有池子时旧行为的一字复制，
+  // 轴在、图就画得出来，只是全贴着零——"图是空的"和"取数挂了"在运营眼里是两件事。
+  if (!javaReady()) return zeroInsights();
+  return remoteAdminInsights();
+}
 
-    const fill = async (sql: string, key: "articles" | "users" | "comments") => {
-      const [rows] = await pool.query(sql);
-      for (const r of rows as Record<string, unknown>[]) {
-        const i = idx.get(String(r.d));
-        if (i !== undefined) days[i][key] = Number(r.c);
-      }
-    };
-    await fill(
-      `SELECT DATE_FORMAT(created_at,'%Y-%m-%d') d, COUNT(*) c FROM articles
-       WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL ${DAYS_WINDOW - 1} DAY) GROUP BY d`,
-      "articles"
-    );
-    await fill(
-      `SELECT DATE_FORMAT(created_at,'%Y-%m-%d') d, COUNT(*) c FROM users
-       WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL ${DAYS_WINDOW - 1} DAY) GROUP BY d`,
-      "users"
-    );
-    await fill(
-      `SELECT DATE_FORMAT(created_at,'%Y-%m-%d') d, COUNT(*) c FROM comments
-       WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL ${DAYS_WINDOW - 1} DAY) GROUP BY d`,
-      "comments"
-    );
-
-    const [inkRows] = await pool.query(
-      `SELECT
-         (SELECT COUNT(*) FROM article_tips) AS tipCount,
-         (SELECT IFNULL(SUM(amount),0) FROM article_tips) AS tipTotal,
-         (SELECT COUNT(*) FROM topup_orders WHERE status='paid') AS topupCount,
-         (SELECT IFNULL(SUM(points),0) FROM topup_orders WHERE status='paid') AS topupTotal,
-         (SELECT COUNT(*) FROM agent_qa) AS qaCount`
-    );
-    const ir = ((inkRows as Record<string, unknown>[])[0] ?? {}) as Record<string, unknown>;
-    const tipTotal = Number(ir.tipTotal ?? 0);
-    const ink = {
-      tipCount: Number(ir.tipCount ?? 0),
-      tipTotal,
-      authorGot: Math.round(tipTotal * 0.9),
-      topupCount: Number(ir.topupCount ?? 0),
-      topupTotal: Number(ir.topupTotal ?? 0),
-      qaCount: Number(ir.qaCount ?? 0),
-    };
-
-    const [topRows] = await pool.query(
-      `SELECT a.slug, a.title, IFNULL(u.nickname,'佚名') AS author, a.read_count, a.like_count,
-              IFNULL((SELECT SUM(amount) FROM article_tips t WHERE t.article_id = a.id), 0) AS tipTotal
-       FROM articles a LEFT JOIN users u ON u.id = a.author_id
-       WHERE a.status='published' AND a.review_status='approved'
-       ORDER BY a.read_count DESC LIMIT 5`
-    );
-    const topArticles = (topRows as Record<string, unknown>[]).map((r) => ({
-      slug: String(r.slug),
-      title: String(r.title),
-      author: String(r.author),
-      readCount: Number(r.read_count),
-      likeCount: Number(r.like_count),
-      tipTotal: Number(r.tipTotal),
-    }));
-
-    const [tagRows] = await pool.query(
-      `SELECT tags FROM articles WHERE status='published' AND review_status='approved' AND tags IS NOT NULL`
-    );
-    const counter = new Map<string, number>();
-    for (const r of tagRows as Record<string, unknown>[]) {
-      const list = Array.isArray(r.tags) ? (r.tags as unknown[]).map(String) : [];
-      for (const t of list) counter.set(t, (counter.get(t) ?? 0) + 1);
-    }
-    const tags = [...counter.entries()]
-      .map(([tag, count]) => ({ tag, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 8);
-
-    // 全站付费转化漏斗（series_purchases 缺表时降级为单篇口径——老库可能还没补上这张表）
-    let funnel: AdminInsights["funnel"] = { paidArticles: 0, paywallViews: 0, unlocks: 0, bundles: 0, revenue: 0 };
-    try {
-      const [fRows] = await pool.query(
-        `SELECT
-           (SELECT COUNT(*) FROM articles WHERE status='published' AND review_status='approved' AND IFNULL(unlock_price,0)>0) AS paidArticles,
-           (SELECT IFNULL(SUM(IFNULL(paywall_views,0)),0) FROM articles WHERE IFNULL(unlock_price,0)>0 AND status <> 'deleted') AS paywallViews,
-           (SELECT COUNT(*) FROM article_purchases) AS unlocks,
-           (SELECT IFNULL(SUM(price),0) FROM article_purchases) AS unlockRevenue,
-           (SELECT COUNT(*) FROM series_purchases) AS bundles,
-           (SELECT IFNULL(SUM(price),0) FROM series_purchases) AS bundleRevenue`
-      );
-      const f = ((fRows as Record<string, unknown>[])[0] ?? {}) as Record<string, unknown>;
-      funnel = {
-        paidArticles: Number(f.paidArticles ?? 0),
-        paywallViews: Number(f.paywallViews ?? 0),
-        unlocks: Number(f.unlocks ?? 0),
-        bundles: Number(f.bundles ?? 0),
-        revenue: Number(f.unlockRevenue ?? 0) + Number(f.bundleRevenue ?? 0),
-      };
-    } catch {
-      /* 漏斗统计失败保底空数据 */
-    }
-
-    return { days, ink, topArticles, tags, funnel };
-  } catch {
-    return {
-      days: lastNDays(DAYS_WINDOW).map((x) => ({ ...x, articles: 0, users: 0, comments: 0 })),
-      ink: { tipCount: 0, tipTotal: 0, authorGot: 0, topupCount: 0, topupTotal: 0, qaCount: 0 },
-      topArticles: [],
-      tags: [],
-      funnel: { paidArticles: 0, paywallViews: 0, unlocks: 0, bundles: 0, revenue: 0 },
-    };
-  }
+function zeroInsights(): AdminInsights {
+  return {
+    days: lastNDays(DAYS_WINDOW).map((x) => ({ ...x, articles: 0, users: 0, comments: 0 })),
+    ink: { tipCount: 0, tipTotal: 0, authorGot: 0, topupCount: 0, topupTotal: 0, qaCount: 0 },
+    topArticles: [],
+    tags: [],
+    funnel: { paidArticles: 0, paywallViews: 0, unlocks: 0, bundles: 0, revenue: 0 },
+  };
 }
 
 /* ============================================================
