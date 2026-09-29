@@ -1,47 +1,47 @@
 #!/usr/bin/env node
-// 路由清单闸门：回答"今天到底能往 JAVA_ROUTES 里写哪些前缀"——而且是机器算出来的，不是人记的。
+// 第八道闸门（P7f-2 改版）：读者与渲染层点得到的每一个 /api 请求，必须有人在应答。
 //
-// 为什么需要它：middleware 的切流是**前缀级**的，一旦把 /api/series 写进 JAVA_ROUTES，
-// 该前缀下的每个方法都会换人应答。而两栈在同一 URL 上的方法集合与语义并不天然相同：
-// 历史上这里就踩过——Node 的 GET /api/series 是"我的专栏"（要登录），Java 的同一条是公开合集架，
-// 路径同名、语义不同，切了就把书房管理器打成 200 空列表，且不会有任何报错。
-// 对拍测不出这类差异（对拍只比"两边都有的路由"），所以单独一道：
-// 逐个 URL 模式核对方法集合，凡是"Node 有、Java 没有"的，整个前缀都不许切；
-// 机器算不出来的"同方法不同义"由人写进 SEMANTIC_CLASHES，让它挡住前缀而不是被人忘掉。
+// 为什么改版——这一段是这道闸门自己的历史，别删：
+//   原版算的是**两栈差分**：逐个 URL 模式核对"Node 有的方法 Java 是不是也有"，再算出
+//   "当前可以整体写进 JAVA_ROUTES 的最长前缀"。那个问题的前提是"切流还没切完"。
+//   P7f-2 把 app/api/** 删掉之后，"Node 有什么"这个集合恒等于空：
+//   缺口恒 0、方法集合恒等、可切前缀恒为 /api ——三条判据同时失去宾语。
+//   一道任何错误都无法让它红的闸门留着，只会伪装"还在守"。
+//   所以把它想证明的那个**从来没变过的命题**留下来，换一条算得出来的判据：
+//   **前端与渲染层实际发出的每个 /api URL，Java 侧必须有路由接得住。**
+//   "可安全切流前缀"那一整段随之退役——JAVA_ROUTES 这个开关本身也退役了（判据 §3），
+//   因为一个已经做不到"留空即回滚"的开关比没有开关更坏：它会让人以为还能回滚。
 //
-//   node scripts/route-inventory.mjs            列清单 + 给出可安全切流的前缀
+// 三条判据：
+//   §1 调用点覆盖（AST 扫 app/**（不含 app/api）、components/**、lib/**，方法未知的按 URL 比）
+//   §2 遗留 HTTP 面登记表：app/api 下的 route.ts 必须与登记表逐条相等——
+//      多一条 = 往已经拆掉的第二个后端里回填代码；少一条 = 删了没摘登记（棘轮只许显式转）。
+//   §3 中间件形状：/api/* 的改写不许再依赖任何路由名单。
+//
+//   node scripts/route-inventory.mjs            跑判定（退出码 0/1）
 //   node scripts/route-inventory.mjs --json     机器可读输出
+//
+// 用 TypeScript 的 AST 而不是正则：字面量可能藏在 JSX 属性里、模板串的 `${}` 里、
+// 也可能藏在被删文件的注释里（闸门 18 就栽过"注释骗过正则"）。
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 
+const ts = createRequire(import.meta.url)("typescript");
 const root = path.resolve(import.meta.dirname, "..");
 const JSON_ONLY = process.argv.includes("--json");
 
-/** Node App Router：app/api/articles/[slug]/route.ts → /api/articles/:slug */
-function nodeRoutes() {
-  const out = new Map();
-  const base = path.join(root, "app", "api");
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-        continue;
-      }
-      if (entry.name !== "route.ts" && entry.name !== "route.tsx") continue;
-      const rel = path.relative(base, full).split(path.sep).slice(0, -1);
-      const url = "/api" + rel.map((s) => (s.startsWith("[") ? "/:seg" : `/${s}`)).join("");
-      const src = fs.readFileSync(full, "utf8");
-      const methods = [...src.matchAll(/export\s+async\s+function\s+(GET|POST|PUT|PATCH|DELETE|HEAD)\b/g)]
-        .map((m) => m[1]);
-      out.set(url, new Set(methods));
-    }
-  };
-  walk(base);
-  return out;
+let pass = 0;
+let fail = 0;
+function check(cond, label, detail) {
+  if (cond) { pass++; console.log(`PASS  ${label}${detail ? "  — " + detail : ""}`); }
+  else { fail++; console.log(`FAIL  ${label}  — ${detail || "（无细节）"}`); }
+  return !!cond;
 }
 
-/** Spring：类上 @RequestMapping 前缀 + 方法上 @GetMapping("/x")。变量名 {slug} 归一成 :seg。 */
+/* ————————————————— Java 侧路由表 ————————————————— */
+
+/** Spring：类上 @RequestMapping 前缀 + 方法上 @GetMapping("/x")。路径变量 {slug} 归一成 :seg。 */
 function javaRoutes() {
   const out = new Map();
   const dir = path.join(root, "server", "src", "main", "java");
@@ -53,19 +53,15 @@ function javaRoutes() {
   const walk = (d) => {
     for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
       const full = path.join(d, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-        continue;
-      }
+      if (entry.isDirectory()) { walk(full); continue; }
       if (!entry.name.endsWith(".java")) continue;
       const src = fs.readFileSync(full, "utf8");
       if (!/@RestController/.test(src)) continue;
       const cls = (src.match(/@RequestMapping\(\s*(?:value\s*=\s*)?"([^"]*)"/) ?? [])[1] ?? "";
       // 三种写法都要认：@GetMapping、@GetMapping("/x")、@GetMapping({ "/x", "/y" })
       for (const m of src.matchAll(/@(Get|Post|Put|Patch|Delete)Mapping\b(?:\s*\(([^)]*)\))?/g)) {
-        const method = ANNO[m[1]];
         const sub = (m[2] ?? "").match(/"([^"]*)"/)?.[1] ?? "";
-        add(`${cls}${sub}`, method);
+        add(`${cls}${sub}`, ANNO[m[1]]);
       }
     }
   };
@@ -79,144 +75,248 @@ function normalize(url) {
   return cleaned.startsWith("/") ? cleaned : `/${cleaned}`;
 }
 
-const node = nodeRoutes();
 const java = javaRoutes();
+const javaWild = [...java.keys()].filter((k) => k.includes(":seg"));
 
 /**
- * Java 常把一个路径段声明成 `{provider}` 而 Node 用目录名写死（app/api/auth/github、
- * app/api/auth/gitee…）。归一之后 `/api/auth/:seg` 与 `/api/auth/github` 两个键永不相等，
- * 于是已迁完的 OAuth 会被这清单报成缺口——反过来更危险：真实冲突也可能被藏起来。
- * 所以查找前先做一次"字面段 ↔ 通配段"的匹配解析。
+ * 字面段 ↔ 通配段的匹配解析：Java 常把一个路径段声明成 `{provider}`，
+ * 而前端写的是 `/api/auth/github` 这样的字面量——不归一就会把已迁完的 OAuth 报成缺口。
  */
-const javaWild = [...java.keys()].filter((k) => k.includes(":seg"));
 function javaKeyFor(key) {
   if (java.has(key)) return key;
   const segs = key.split("/");
   return javaWild.find((w) => {
     const ws = w.split("/");
-    return ws.length === segs.length
-      && ws.every((s, i) => s === ":seg" || s === segs[i]);
-  }) ?? key;
+    return ws.length === segs.length && ws.every((s, i) => s === ":seg" || s === segs[i]);
+  }) ?? null;
 }
-const javaMethods = (key) => java.get(javaKeyFor(key)) ?? new Set();
 
-const nodeKeys = [...node.keys()].map(normalize);
-const javaKeys = new Set(java.keys());
-// 两栈都挂了端点的 URL 模式：方法集合齐了也不代表语义相同，对拍只覆盖这一批
-const overlap = [...javaKeys].filter((k) => nodeKeys.includes(k)).sort();
+/* ————————————————— 调用点：从 AST 里收 ————————————————— */
 
-// 每个 Node 路由：Java 侧同 URL 是否有同名方法
-const missing = [];
-for (const [url, methods] of node) {
-  const key = normalize(url);
-  const have = javaMethods(key);
-  for (const m of methods) {
-    if (!have.has(m)) missing.push({ key, method: m });
+/** 一个 /api 字面量 → URL 模式。模板串的 ${} 一律变成一个 :seg 段，query 与 hash 不参与比较。 */
+function urlOfNode(node) {
+  let raw = null;
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) raw = node.text;
+  else if (ts.isTemplateExpression(node)) raw = templateToPattern(node.getText());
+  if (!raw || !raw.startsWith("/api/")) return null;
+  // 只取路径：`/api/drafts?title=:seg` 比的是 /api/drafts 这条路由；
+  // 而 robots.ts 里那个当"前缀"用的 "/api/" 不是调用点，砍掉尾斜杠后就不成形态了。
+  const pathOnly = raw.split(/[?#]/)[0].replace(/\/+$/, "");
+  return /^\/api\/.+/.test(pathOnly) ? normalize(pathOnly) : null;
+}
+
+/** 把 `${...}` 换成 :seg。一层嵌套花括号以内都吃得下；真要吃不下就没匹配、判据会响，不会藏。 */
+function templateToPattern(text) {
+  return text.slice(1, -1).replace(/\$\{[^{}]*\}/g, ":seg")
+    .replace(/\$\{[^{}]*\{[^{}]*\}[^{}]*\}/g, ":seg");
+}
+
+/** 表达式里是否出现了某个名字的标识符（判断"URL 是形参转手进来的"） */
+function mentionsIdentifier(node, name) {
+  let found = false;
+  const visit = (n) => {
+    if (!found && ts.isIdentifier(n) && n.text === name) found = true;
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
+}
+
+function methodOfOptions(opts) {  if (!opts || !ts.isObjectLiteralExpression(opts)) return "GET";
+  for (const p of opts.properties) {
+    if (!ts.isPropertyAssignment(p) || p.name.getText() !== "method") continue;
+    const v = ts.isStringLiteral(p.initializer) ? p.initializer.text.toUpperCase() : "?";
+    return v;
   }
-}
-// Java 独有的端点（为 RSC 新增的聚合接口）——不阻碍切流，只是对拍覆盖不到
-const javaOnly = [...java.keys()].filter((k) => !nodeKeys.includes(k));
-
-// 同一 URL 两栈都有、但方法集合不同 → 该前缀切过去会改变行为
-const divergent = [];
-for (const [url, methods] of node) {
-  const key = javaKeyFor(normalize(url));
-  if (!javaKeys.has(key)) continue;
-  const have = java.get(key);
-  const onlyNode = [...methods].filter((m) => !have.has(m));
-  const onlyJava = [...have].filter((m) => !methods.has(m));
-  if (onlyNode.length || onlyJava.length) divergent.push({ key, onlyNode, onlyJava });
+  return "GET";
 }
 
 /**
- * 已知"同 URL 同方法、语义却不同"的冲突登记。
- *
- * <p>方法集合齐了不等于可以切：两边都能接这个请求，不代表回的是同一件事。这种差别机器算不出来，
- * 一旦被算成"可整体切流"，切过去就是把某个界面悄悄变成一份看着正常的错误数据且不报错。
- * 所以这类点必须由人写在这里，清单负责让它**挡住前缀**而不是被人忘掉。
- *
- * <p>当前为空。第一条登记的是 {@code GET /api/series}（Node=我的专栏 / Java=公开合集架），
- * 解法是把两件事拆成两条 URL：Node 的 GET 对齐成公开架、另开 {@code GET /api/series/mine}，
- * 前端改读新 URL，两栈同语义之后整前缀才切——过程写在闸门 6 与闸门 10 的断言里。
- * 登记着的时候它挡住过一次误切，这条机制就算回本了；清空不等于它可以被删掉。
+ * 收集一个源文件里的 /api 调用点。
+ * 四层规则，从"知道方法"到"只知道有这么个 URL"，宁多勿漏：
+ *   a) `fetch(字面量, {method})` —— 方法直接读字面量；
+ *   b) 本文件里"把参数转手给 fetch"的辅助函数（如 AdminConsole 的 post()、java-source 的 ask()），
+ *      调用它时传的字面量按该辅助函数里那份 options 的 method 记；
+ *   c) `<a href>` / `action=` / `src=` / `location.href =` —— 浏览器发的一定是 GET；
+ *   d) 兜底：以上都没认领、但以 /api/ 开头的字面量，方法记 "?"（只按 URL 比，不许藏）。
  */
-const SEMANTIC_CLASHES = [];
+function callSitesOf(file) {
+  const src = fs.readFileSync(path.join(root, file), "utf8");
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const hits = new Map();
+  const claimed = new Set();
+  const remember = (url, method, node) => {
+    if (!url) return false;
+    const pos = sf.getLineAndCharacterOfPosition(node.getStart());
+    const key = `${file}:${pos.line + 1} ${method} ${url}`;
+    if (!hits.has(key)) hits.set(key, { file, line: pos.line + 1, url, method });
+    return true;
+  };
 
-/** 可安全切流的前缀：该前缀下所有 Node 路由的每个方法都在 Java 里存在。 */
-function safePrefixes() {
-  const byPrefix = new Map();
-  for (const [url, methods] of node) {
-    const key = normalize(url);
-    const segs = key.split("/").filter(Boolean);
-    for (let i = 1; i <= segs.length; i++) {
-      const prefix = `/${segs.slice(0, i).join("/")}`;
-      if (!prefix.startsWith("/api")) continue;
-      const list = byPrefix.get(prefix) ?? [];
-      list.push({ key, methods: [...methods] });
-      byPrefix.set(prefix, list);
+  // —— b) 先找出"转手给 fetch"的本文件函数 ——
+  const helpers = new Map(); // name -> method
+  const isFetchCall = (n) => ts.isCallExpression(n) && ts.isIdentifier(n.expression)
+    && n.expression.text === "fetch";
+  const visitForHelpers = (node) => {
+    if ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)
+        || ts.isArrowFunction(node)) && node.body) {
+      const name = ts.isFunctionDeclaration(node) ? node.name?.text
+        : (ts.isVariableDeclaration(node.parent) ? node.parent.name.getText() : null);
+      const calls = [];
+      const collect = (n) => { if (isFetchCall(n)) calls.push(n); ts.forEachChild(n, collect); };
+      if (name && node.body !== sf) collect(node.body);
+      for (const call of calls) {
+        const arg0 = call.arguments[0];
+        if (!arg0) continue;
+        const names = node.parameters.map((p) => p.name.getText());
+        // 转手有两种：fetch(url, …) 与 fetch(`${base()}${url}`, …)，后者也得认
+        const passthrough = ts.isIdentifier(arg0)
+          ? names.includes(arg0.text)
+          : names.some((n) => mentionsIdentifier(arg0, n));
+        if (!passthrough) continue;
+        helpers.set(name, methodOfOptions(call.arguments[1]));
+        break;
+      }
     }
-  }
-  const safe = [];
-  for (const [prefix, routes] of byPrefix) {
-    const blocked = routes.flatMap((r) => r.methods
-      .filter((m) => !javaMethods(r.key).has(m))
-      .map((m) => `${m} ${r.key}`));
-    // 语义冲突按"URL 命中或位于该前缀之下"判：切 /api/series 当然会把 GET /api/series 一起带走
-    const clash = SEMANTIC_CLASHES.find((c) => prefix === c || prefix.startsWith(`${c}/`)
-      || routes.some((r) => r.key === c));
-    if (!blocked.length && !clash) safe.push({ prefix, count: routes.length });
-  }
-  return safe.sort((a, b) => b.count - a.count || a.prefix.localeCompare(b.prefix));
+    ts.forEachChild(node, visitForHelpers);
+  };
+  visitForHelpers(sf);
+
+  const walk = (node) => {
+    // a) 直接 fetch
+    if (isFetchCall(node)) {
+      const url = urlOfNode(node.arguments[0]);
+      if (url && remember(url, methodOfOptions(node.arguments[1]), node.arguments[0])) {
+        claimed.add(node.arguments[0].getStart());
+        return;                                     // 模板的内部不再单独看
+      }
+    }
+    // b) 转手给本文件的 fetch 辅助函数
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && helpers.has(node.expression.text)) {
+      for (const a of node.arguments) {
+        const url = urlOfNode(a);
+        if (url && remember(url, helpers.get(node.expression.text), a)) claimed.add(a.getStart());
+      }
+    }
+    // c) JSX 属性 与 location.href 赋值
+    if (ts.isJsxAttribute(node)) {
+      const name = node.name.getText();
+      const init = node.initializer;
+      if (["href", "action", "src"].includes(name) && init && ts.isStringLiteral(init)
+        && init.text.startsWith("/api/")) {
+        const url = normalize(init.text);
+        remember(url, "GET", init);
+        claimed.add(init.getStart());
+      }
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const left = node.left.getText();
+      if (/\bhref$/.test(left)) {
+        const url = urlOfNode(node.right);
+        if (url) {
+          remember(url, "GET", node.right);
+          claimed.add(node.right.getStart());
+        }
+      }
+    }
+    // 模板串里被 ${} 分走的那几段、以及任何没被上面认领的 /api 字面量 → d)
+    if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+      && !claimed.has(node.getStart())) {
+      const url = urlOfNode(node);
+      if (url) remember(url, "?", node);
+    }
+    ts.forEachChild(node, walk);
+  };
+  walk(sf);
+  return [...hits.values()];
 }
 
-/** 逐条已被 Java 完整覆盖的 URL 模式：这些可以直接按段通配写进 JAVA_ROUTES。 */
-const covered = [...node.entries()]
-  .filter(([url, methods]) => [...methods].every((m) => javaMethods(normalize(url)).has(m)))
-  .map(([url, methods]) => ({ url: normalize(url), methods: [...methods] }))
-  .sort((a, b) => a.url.localeCompare(b.url));
-
-const safe = safePrefixes();
-const longest = [];
-for (const entry of safe) {
-  if (!longest.some((x) => entry.prefix.startsWith(`${x.prefix}/`) || entry.prefix === x.prefix)) longest.push(entry);
+function listFiles(relDir, out = []) {
+  const abs = path.join(root, relDir);
+  if (!fs.existsSync(abs)) return out;
+  for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+    const full = path.join(abs, entry.name);
+    if (entry.isDirectory()) { listFiles(`${relDir}/${entry.name}`, out); continue; }
+    if (!/\.tsx?$/.test(entry.name)) continue;
+    out.push(path.relative(root, full).split(path.sep).join("/"));
+  }
+  return out;
 }
+
+// app/api/** 不参与：那些文件本身就是"待删的遗留 HTTP 面"（判据 §2 管它们），
+// 它们内部的 /api 字面量是 OAuth 的 redirect_uri，不是调用点。
+const SCAN = [...listFiles("app"), ...listFiles("components"), ...listFiles("lib")]
+  .filter((f) => !f.startsWith("app/api/"));
+const sites = SCAN.flatMap(callSitesOf).sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+
+/* ————————————————— §1 调用点覆盖 ————————————————— */
+
+const uncovered = [];
+for (const s of sites) {
+  const key = javaKeyFor(s.url);
+  const methods = key ? [...java.get(key)] : [];
+  if (!key) uncovered.push({ ...s, why: "Java 侧没有这条 URL 模式" });
+  else if (s.method !== "GET" && s.method !== "?" && !methods.includes(s.method)) {
+    uncovered.push({ ...s, why: `Java 侧该 URL 只有 [${methods.join(",")}]，没有 ${s.method}` });
+  }
+}
+
+/* ————————————————— §2 遗留 HTTP 面登记表 ————————————————— */
+
+/**
+ * 这张表在 P7f-2 之前登记着 58 个"仍由 Node 进程应答的 /api 路由文件"。
+ * 删除路由与"把这张表清空"必须是**同一个提交**——中间那一步这道闸门会红（"登记表里有文件
+ * 已经不存在"），那个红就是它在工作。现在是空表，但它不退役，改守反向：
+ * 谁再往 app/api 下建一个 route.ts，就是往已经拆掉的第二个后端里回填代码（闸门 18 同款）。
+ * 注意 app/feed.xml/route.ts 与 app/sitemap.ts 不算在内：它们是**页面**（喂给阅读器与
+ * 搜索引擎的），取数全部经 lib/data.ts → Java，也不在 /api 前缀下。
+ */
+const LEGACY_ROUTES = [];
+const onDisk = listFiles("app/api").filter((f) => f.endsWith("route.ts")).sort();
+
+/* ————————————————— §3 中间件形状 ————————————————— */
+
+const mw = fs.readFileSync(path.join(root, "middleware.ts"), "utf8");
+// 判的是"还读不读这个开关"，不是"文中有没有出现过这个词"——注释里还得留着一段话解释它为什么退役，
+// 拿字符串命中当判据会把那段说明也判成违规，那种红只会逼人删掉解释。
+const readsJavaRoutes = /process\.env\.JAVA_ROUTES/.test(mw);
+
+/* ————————————————— 输出 ————————————————— */
 
 if (JSON_ONLY) {
   console.log(JSON.stringify({
-    node: Object.fromEntries([...node].map(([k, v]) => [normalize(k), [...v]])),
-    java: Object.fromEntries(java),
-    missing,
-    javaOnly,
-    divergent,
-    overlap,
-    covered,
-    safePrefixes: longest.map((x) => x.prefix),
+    java: Object.fromEntries([...java].map(([k, v]) => [k, [...v]])),
+    sites, uncovered: uncovered.map((u) => `${u.file}:${u.line} ${u.method} ${u.url}`),
+    legacyOnDisk: onDisk, legacyRegister: LEGACY_ROUTES,
+    middlewareReadsJavaRoutes: readsJavaRoutes,
   }, null, 2));
-} else {
-  console.log(`Node 路由 ${node.size} 个 URL 模式，Java 端点 ${java.size} 个`);
-  console.log(`\n【Node 有、Java 没有】${missing.length} 条 —— 这些所在前缀不能整体切流：`);
-  for (const m of missing.sort((a, b) => a.key.localeCompare(b.key))) console.log(`   ${m.method.padEnd(6)} ${m.key}`);
-  console.log(`\n【同 URL 方法集合不同】${divergent.length} 处 —— 切过去会静默改变行为：`);
-  for (const d of divergent) {
-    console.log(`   ${d.key}  仅 Node: [${d.onlyNode.join(",")}]  仅 Java: [${d.onlyJava.join(",")}]`);
-  }
-  console.log(`\n【Java 独有】${javaOnly.length} 条（为 RSC 新增的聚合端点，Node 无对位，不参与对拍）：`);
-  for (const k of javaOnly.sort()) console.log(`   ${k}`);
-  console.log(`\n【两栈同 URL】${overlap.length} 条 —— 方法齐了不等于语义相同，`
-    + `逐条过 scripts/parity.mjs 才算等价（曾经咬过人的是 GET /api/series：Node 回"我的专栏"、`
-    + `Java 回公开合集架，同 URL 同方法却不同义，机器算不出来）：`);
-  for (const k of overlap) console.log(`   ${k}`);
-  console.log(`\n【已被 Java 完整覆盖的 URL 模式】${covered.length} 条 —— 这些可逐条写进 JAVA_ROUTES：`);
-  for (const c of covered) console.log(`   ${c.methods.join(",").padEnd(12)} ${c.url}`);
-  console.log(`\n【当前可安全整体切流的最长前缀】`);
-  for (const s of longest) console.log(`   ${s.prefix.padEnd(34)} 覆盖 ${s.count} 个 URL 模式`);
-  const held = SEMANTIC_CLASHES.filter((c) => nodeKeys.includes(c));
-  if (held.length) {
-    console.log(`   （另有 ${held.length} 处已登记的"同 URL 同方法但语义不同"，其所在前缀已被扣住：${held.join("、")}）`);
-  }
-  console.log(`\n判定：${missing.length ? "存在缺口 → 上面未列出的前缀一律不要整体切（可用段通配逐条切）" : "无缺口"}；`
-    + `清单由本脚本现算，改完任一侧路由都要重跑一次再决定切流范围。`);
+  process.exit(0);
 }
-// 这是清单不是判分：缺口数量是 P5/P6/P7 的进度条，退出码恒 0，
-// 免得在迁移完成前每次跑都红，反而没人看。
-process.exit(0);
+
+console.log(`Java 端点 ${java.size} 个 URL 模式；调用点 ${sites.length} 处`
+  + `（含方法未知的 ${sites.filter((s) => s.method === "?").length} 处，那些只按 URL 比）`);
+
+const missing = uncovered.length === 0;
+check(missing, "前端与渲染层点得到的每个 /api URL，Java 侧都有路由接得住",
+  missing ? `${sites.length} 处调用点全部命中（URL 模式 + 方法）`
+    : uncovered.slice(0, 8).map((u) => `${u.file}:${u.line} ${u.method} ${u.url} — ${u.why}`).join(" | ")
+      + (uncovered.length > 8 ? ` | …共 ${uncovered.length} 处` : ""));
+const known = [...new Set(sites.map((s) => s.url))].sort();
+console.log(`\n【调用点覆盖的 URL 模式】${known.length} 条：`);
+for (const k of known) console.log(`   ${k}`);
+
+const newFaces = onDisk.filter((f) => !LEGACY_ROUTES.includes(f));
+const gone = LEGACY_ROUTES.filter((f) => !onDisk.includes(f));
+check(newFaces.length === 0, "app/api 下不许出现登记表之外的 route.ts",
+  newFaces.length ? `新面孔：${newFaces.join(" ")}` : `登记表内 ${LEGACY_ROUTES.length} 条，一条不多`);
+check(gone.length === 0, "删掉的遗留路由必须同时从登记表里摘掉（棘轮只许显式转）",
+  gone.length ? `已经没有这些文件：${gone.slice(0, 6).join(" ")}${gone.length > 6 ? ` …共 ${gone.length} 条` : ""}`
+    : `登记表 ${LEGACY_ROUTES.length} 条与磁盘逐条相等`);
+
+check(!readsJavaRoutes, "middleware 不许再读 process.env.JAVA_ROUTES：/api/* 的改写不依赖任何名单",
+  readsJavaRoutes ? "文件里仍然读这个开关（一个做不到「留空即回滚」的开关比没有更坏）"
+    : "改写判定与路由名单已无关");
+
+console.log(`\n合计 ${pass + fail} 项，失败 ${fail} 项`);
+process.exit(fail ? 1 : 0);

@@ -41,31 +41,18 @@ function securityHeaders(): Record<string, string> {
 
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-// —— 渐进双轨切流：命中前缀的 /api/* 由 Java 后端应答，其余仍走 Node ——
-// 放在限流与 CSRF 之后：安全闸口始终在边缘生效，与"谁来处理这条请求"解耦。
-// JAVA_ROUTES 逗号分隔，每项是一条路径模式：
-//   · 普通前缀按**段**匹配（/api/articles 不会顺带命中 /api/articlesXYZ，但会命中 /api/articles/xxx）；
-//   · 段内的 * 匹配**恰好一段**，用于"同一资源下只有部分子路由已迁完"的场景，
-//     如 /api/articles/*/unlock —— 文章改删 / 点赞 / 举报还在 Node 时，
-//     只写 /api/articles 会把它们一起带走（Java 没这些路由 → 405，页面当场坏）。
-//   · 单独的 * 表示全量切流；清空 JAVA_ROUTES 即整体回滚到 Node，不需要改任何代码。
+// —— /api/* 一律由 Java 应答（P7f-2）——
+// 这里原来读 JAVA_ROUTES，逐条决定"哪些前缀已经切过去、哪些还留在 Node"。那是渐进迁移的起重机，
+// 而它的前提（Node 侧还有一套能应答的实现）已经随 app/api/** 一起删掉了。
+// 现在这个开关做不到它承诺的事：清空 JAVA_ROUTES 不再是"整体回滚到 Node"，而是"所有 /api 请求
+// 打到一堆不存在的路由上"。一个含义已经变掉的开关比没有开关更坏——它会让人以为还能回滚。
+// 所以整条退役。回滚方式退回工程手段：revert 这次删除、重启，见 README「切流与回滚」。
+// JAVA_BASE 没配时**明确 503**，不放行：页面渲染照旧走演示数据（那是产品承诺），
+// 但任何一次交互都不该被 404 伪装成"这个接口不存在"。
 const javaBase = (process.env.JAVA_BASE ?? "").replace(/\/+$/, "");
-const javaRoutes = (process.env.JAVA_ROUTES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-function toMatcher(entry: string): RegExp | null {
-  if (entry === "*") return null; // 全量切流，由调用方直接放行
-  const source = entry
-    .split("/")
-    .map((seg) => (seg === "*" ? "[^/]+" : seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
-    .join("/");
-  return new RegExp(`^${source}(?:/|$)`);
-}
-
-const javaMatchers = javaRoutes.map(toMatcher);
-
-function routedToJava(pathname: string): boolean {
-  if (!javaBase || !pathname.startsWith("/api/")) return false;
-  return javaMatchers.some((m) => m === null || m.test(pathname));
+function wantsJava(pathname: string): boolean {
+  return pathname.startsWith("/api/");
 }
 
 // —— 全站 API 滑窗限流（middleware edge 内存桶；故意不进 MySQL，理由见 README 闸门 17 一节） ——
@@ -141,7 +128,16 @@ export function middleware(req: NextRequest) {
   }
 
   const res = NextResponse.next();
-  if (routedToJava(pathname)) {
+  if (wantsJava(pathname)) {
+    if (!javaBase) {
+      // 503 而不是放它去撞一个 404：404 说的是"没有这个接口"，真相是"这台没配后端"。
+      const down = NextResponse.json(
+        { error: "后端未配置：这台实例的 JAVA_BASE 是空的，渲染层已不再自己应答 /api/*" },
+        { status: 503, headers: { ...securityHeaders(), "Cache-Control": "no-store" } }
+      );
+      down.headers.set("Retry-After", "30");
+      return down;
+    }
     const target = new URL(pathname + req.nextUrl.search, javaBase);
     // 把浏览器看到的 host/proto 显式传给 Java：Next 的 rewrite 会把请求的 Host 换成后端地址，
     // 于是 Java 自己算出来的 origin 是内网端口——导出的 Markdown 里每个链接都会变成

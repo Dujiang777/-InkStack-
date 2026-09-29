@@ -2,13 +2,14 @@ import { remoteCurrentUser } from "@/lib/java-source";
 ﻿import Link from "next/link";
 import StudioClient from "@/components/StudioClient";
 import { isStaff } from "@/lib/auth";
-import { dbEnabled } from "@/lib/db";
 
 // AI 创作台：稿纸编辑器 + AI 编辑部 + 发布台
 // ?edit=slug 进入编辑模式（书房「编辑」入口跳转而来）
 export default async function StudioPage({ searchParams }: { searchParams: Promise<{ edit?: string }> }) {
   const { edit } = await searchParams;
-  const user = dbEnabled() ? await remoteCurrentUser() : null;
+  // 身份判定不再看"连不连得上 MySQL"：remoteCurrentUser() 自己会分演示模式（没配后端 → 无身份）
+  // 与"配了却问不到"（抛出、页面 500），这里两种情况都不该由本页替它决定。
+  const user = await remoteCurrentUser();
   const points = user ? user.points : null;
   const editSlug = user ? (edit ?? null) : null;
 

@@ -398,13 +398,21 @@ export async function remoteSecurityOverview(): Promise<SecurityOverview> {
  * /api/auth/me（顺带两次 UPDATE 尝试）。cache() 只合流同一请求内，不跨请求缓存。
  */
 
+/**
+ * 当前登录者。**每个已登录页面都会走它一次**，所以演示模式必须在这里就答"没有身份"，
+ * 不能把 javaBase() 那句"没配后端"抛出去——那会让每一个页面 500，
+ * 而"clone 下来先跑起来看界面"是这套取数设计明写的前提（见 lib/data.ts 文件头）。
+ * 分工与 lib/data.ts 一致：`javaReady()` 为假 = 演示模式；为真却问不到 = 抛出、不静默回落。
+ */
 export const remoteCurrentUser = cache(async (): Promise<SessionUser | null> => {
+  if (!javaReady()) return null;
   const body = await ask<{ user: SessionUser | null }>("/api/auth/me");
   return body?.user ?? null;
 });
 
 /** 自己的活跃设备列表。键名沿用 Node 的 snake_case（组件类型就是这么写的）。 */
 export async function remoteSessions(): Promise<SessionRow[]> {
+  if (!javaReady()) return [];
   return askList<SessionRow>("/api/security/sessions", "sessions");
 }
 

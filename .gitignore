@@ -19,8 +19,10 @@ venv/
 # 日志
 *.log
 
-# 上传目录
-uploads/
+# 上传目录（必须锚到 /public/：不带斜杠的 uploads/ 会匹配任何层级的同名目录，
+# 当年 app/api/uploads/route.ts 就是这么被吞掉的——一个从没被跟踪过的源码文件，
+# git status / git rm 都不会提它，删 app/api 时它静静留在盘上）
+/public/uploads/
 
 # 开发期截图与临时留痕（可能含会话 Cookie / 测试账号口令，禁止提交）
 .wb-shots/

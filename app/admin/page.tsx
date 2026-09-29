@@ -1,4 +1,3 @@
-import { dbEnabled } from "@/lib/db";
 import {
   adminListArticles,
   adminListReview,
@@ -14,12 +13,14 @@ import { isStaff } from "@/lib/auth";
 import AdminConsole from "@/components/AdminConsole";
 
 // 运营台（完整版）：总览 / 审核 / 内容 / 用户 / 举报 / 日志 / 评论 / 资金
-// 权限：admin 与 developer（v17.1）；DB 未配置（演示模式）时展示演示数据预览
+// 权限：admin 与 developer（v17.1）；JAVA_BASE 未配置（演示模式）时展示演示数据预览
 export default async function AdminPage() {
   const user = await remoteCurrentUser();
-  const demoMode = !dbEnabled();
-  // "实时数据"这块牌子要配得上：MySQL 与 JAVA_BASE 缺任何一头，页面上就是兜底假数
+  // 演示模式的开关只剩 JAVA_BASE 一个。这里原先问的是"MySQL 连得上吗"（dbEnabled），
+  // 而页面早就不再自己连库了——问得到 Java 才有真数据，问不到就是兜底假数，
+  // 拿"另一个进程连不连得上数据库"当本页的口径，是在替一个不存在的东西背书。
   const live = javaReady();
+  const demoMode = !live;
 
   if (!demoMode && (!user || !isStaff(user.role))) {
     return (
@@ -63,7 +64,7 @@ export default async function AdminPage() {
       <div className="section-head">
         <h2>运营台 · InkStack Console</h2>
         <span className="admin-flag">
-          {demoMode ? "演示数据 · 未配置 MySQL" : live ? "实时数据" : "演示数据 · 未配置 JAVA_BASE"}
+          {live ? "实时数据" : "演示数据 · 未配置 JAVA_BASE"}
         </span>
       </div>
       <AdminConsole

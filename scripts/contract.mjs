@@ -2,15 +2,15 @@
 // 契约基线：把"旧实现应答长什么样"固化成仓库里的文件。
 //
 // 为什么要有这一道（P7f-1b）：闸门 1 的 parity 是**差分**闸门——它证明的是"Java 与 Node 一样"。
-// P7f 删掉 58 个 app/api/**/route.ts 之后对岸就没有了，`gate-executor` 会当场拒绝起跑（那是对的，
-// 拿 Java 比 Java 的全绿不说明任何事）。但那之后 Java 的读侧契约就再没人守：改一个字段名、
-// 少返回一个键、把 null 变成空串，都不会有任何闸门响。这一道补的就是那一格。
+// P7f-2 真的把 58 个 app/api 路由删了之后对岸就没有了，parity 随之退役（gate-executor 那套
+// "两侧同一个执行者就别起跑"从此恒成立）。那之后 Java 的读侧契约就再没人守：改一个字段名、
+// 少返回一个键、把 null 变成空串，都不会有任何闸门响。这一道补的就是那一格，它是那一道接班人。
 //
-//   node scripts/contract.mjs freeze              从 PARITY_NODE 取样，写 contract/<id>.json
 //   node scripts/contract.mjs check               拿 PARITY_JAVA 逐条重放
 //   …… --base=http://host:port                    指定站点
 //   …… --only=id1,id2                             只做这几条
 //   …… --list                                     只列用例表
+//   （freeze 已停用，理由见下面那个函数）
 //
 // 比的是**形状**为主、值只钉恒定的那几条，这一点必须说清楚，否则会误用：
 //   · 形状（键集 / 类型 / 可空性 / 数组元素形状 / 嵌套层级）是契约里会被人改坏的那一半，
@@ -21,10 +21,10 @@
 //   · 例外：确实恒定的值用 expect 钉住（套餐表的四档、providers 的三个布尔）。
 //     这几条是逐条确认过"不随数据变"的，不是顺手抄下来的应答。
 //
-// 出处是这个文件最要紧的一行：freeze 会记下应答方到底是谁。Node 还在的时候冻结，这份基线的
-// 意思是"Java 必须符合旧实现的形状"；等 Node 删了再 freeze，它的意思就退化成"Java 必须符合
-// Java 上次的样子"（自我回归，仍然有用，但**不再是换栈正确的证据**）。所以 freeze 探到应答方
-// 不是 node 时会显式警告，而不是安静通过。
+// 出处是这道闸门的命门：每条基线文件里都记着 `frozenFromExecutor`。这 30 条记的是 "node"，
+// 所以它们的意思是"Java 必须符合旧实现的形状"。哪天出现一份记着 "java" 的基线，它的意思就退化成
+// "Java 必须符合 Java 上次的样子"——自我回归，仍然能抓住重构手滑，但**不再是换栈正确的证据**。
+// 所以别去重新生成它们；check 也会把 frozenFromExecutor 印在表头上，让这件事看得见。
 import fs from "node:fs";
 import path from "node:path";
 import { executorOf } from "./gate-executor.mjs";
@@ -280,34 +280,20 @@ function fileFor(id) {
   return path.join(dir, `${id}.json`);
 }
 
+/**
+ * freeze 这个动词在 P7f-2 之后**没有宾语了**：基线的价值全在"它是旧实现答出来的"，
+ * 而 Node 那一侧已经不应答任何 /api 了。留着它只会让人以为还能补基线——从 Java 抄一份
+ * "基线"回去，等于让被测方给自己的考卷打分。所以这里只留一句拒绝，并说清该怎么做。
+ */
 async function freeze() {
-  const base = argOf("base", process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200");
-  const who = await executorOf(base);
-  if (who !== "node") {
-    console.log(
-      `⚠ ${base} 的应答方是 "${who}"，不是 node。\n` +
-      "  这样冻结出来的基线只说明「以后别自己变」，不说明「Java 与旧实现同形」。\n" +
-      "  要的是后者，请指向一台 JAVA_ROUTES 为空的 Node 实例再 freeze。\n"
-    );
-  }
-  fs.mkdirSync(dir, { recursive: true });
-  let n = 0;
-  for (const c of CASES) {
-    if (ONLY.length && !ONLY.includes(c.id)) continue;
-    const r = await fetchCase(base, c);
-    const body = {
-      id: c.id, method: "GET", path: c.path, as: c.as,
-      frozenAt: new Date().toISOString(), frozenFrom: base, frozenFromExecutor: who,
-      status: r.status,
-      shape: r.json === undefined ? { t: "text", sample: r.text.slice(0, 160) } : shapeOf(r.json),
-      ...(c.optional?.length ? { optional: c.optional } : {}),
-      ...(c.expect ? { expect: c.expect } : {}),
-    };
-    fs.writeFileSync(fileFor(c.id), JSON.stringify(body, null, 2) + "\n", "utf8");
-    console.log(`冻结  ${c.id.padEnd(22)} [${r.status}] ${c.as.padEnd(6)} ${c.path}`);
-    n++;
-  }
-  console.log(`\n共冻结 ${n} 条 → ${path.relative(root, dir)}/`);
+  console.error(
+    "freeze 已经停用：app/api/** 在 P7f-2 删掉之后，再也采样不到「旧实现的应答」了。\n" +
+    "  contract/ 里的 30 条基线是 Node 时代冻的历史，它们的作用到此是不可再生。\n" +
+    "  要新增用例：照需求**手写**一个 contract/<id>.json（status + shape + 钉住的 expect 值），\n" +
+    "  然后跑 `node scripts/contract.mjs check --only=<id>` 看 Java 答不答得对。\n" +
+    "  别从当前实现里抄——那只能证明它和它自己一致。"
+  );
+  process.exit(1);
 }
 
 async function check() {
@@ -325,7 +311,7 @@ async function check() {
     const c = as ? { ...c0, as } : c0;
     const file = fileFor(c0.id);
     if (!fs.existsSync(file)) {
-      console.log(`FAIL  ${c.id.padEnd(22)} — 没有基线文件，先跑 freeze`);
+      console.log(`FAIL  ${c.id.padEnd(22)} — 没有基线文件；freeze 已停用，请照需求手写 contract/<id>.json`);
       absent++; fail++;
       continue;
     }
@@ -360,6 +346,25 @@ async function check() {
       console.log(`PASS  ${c.id.padEnd(22)} [${r.status}]`);
     }
   }
+  // 基线的**出处**是这道闸门的命门：只有 Node 时代冻下来的才叫"旧实现的形状"。
+  // 这一项不是装饰——freeze 停用之后，谁手工补一份"从 Java 抄来的基线"，这道闸门就会
+  // 在还剩 29 条真基线的情况下把它一起算成绿。
+  const from = {};
+  for (const c of CASES) {
+    if (!fs.existsSync(fileFor(c.id))) continue;
+    const k = JSON.parse(fs.readFileSync(fileFor(c.id), "utf8")).frozenFromExecutor ?? "未记录";
+    from[k] = (from[k] ?? 0) + 1;
+  }
+  const strays = Object.entries(from).filter(([k]) => k !== "node")
+    .map(([k, n]) => `${k} ${n} 条`);
+  if (!strays.length) {
+    pass++;
+    console.log(`PASS  ${Object.values(from).reduce((a, b) => a + b, 0)} 条基线全部冻自 Node 时代（出处可查）`);
+  } else {
+    fail++;
+    console.log(`FAIL  有 ${strays.join("、")} 基线不是 Node 时代冻的`
+      + "——那种基线只证明\"以后别自己变\"，不证明\"与旧实现同形\"");
+  }
   console.log(`\n合计 ${pass + fail} 项（缺基线 ${absent}），失败 ${fail} 项`);
   console.log("注：这里守的是**形状 + 钉住的恒定值**。值随库里有什么而变，值的正确性由闸门 3/4/7/9/12"
     + "回库重算来管——那比「跟上周的快照自己跟自己比」强。");
@@ -371,6 +376,6 @@ else if (verb === "check") await check();
 else if (verb === "--list" || argv.includes("--list")) {
   for (const c of CASES) console.log(`${c.id.padEnd(22)} ${c.as.padEnd(6)} GET ${c.path}`);
 } else {
-  console.error("用法：node scripts/contract.mjs freeze|check [--base=…] [--only=id1,id2|--list]");
+  console.error("用法：node scripts/contract.mjs check [--base=…] [--only=id1,id2|--list]（freeze 已停用）");
   process.exit(2);
 }

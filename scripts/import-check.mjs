@@ -10,26 +10,44 @@
 //      **字节**再判，私网的七种写法（十进制 / 十六进制 / 八进制 / 短写 / 全角句号 / userinfo 掩护 /
 //      IPv4 映射）必须落到同一条拒绝上。
 //   2) 口径：那七条消毒正则、RFC 1123 的各家写法、DATETIME 的本地墙钟 + 毫秒四舍五入、
-//      同名判重、slug 撞号换号、20 条上限。闸门让**两栈各导一轮**再逐列比库，
-//      并且拿手推的期望产物断言「不是两栈一起错」。
+//      同名判重、slug 撞号换号、20 条上限。闸门让**两个入口各导一轮**再逐列比库，
+//      并且拿手推的期望产物断言「不是两边一起错」。
 //
 //   node scripts/import-check.mjs            跑完清场
 //   node scripts/import-check.mjs --keep     保留现场排查
 //
+// P7f-2 的改判（改的是名字与前提，一条判据都没减）：
+//   这个文件里的两个入口历史上叫 Node 与 Java。现在它们叫**经 Next 代理**（3298）与
+//   **直连 Java**（3198）——3298 那台已经不是"另一套实现"，它只是一个把 /api 转发过去的壳。
+//   于是"两轮产物逐字段相等"这句话的意思从"两套实现的口径一致"变成了
+//   **"一次导入经过 rewrite 之后，产物一个字都不许变"**。这仍然是有宾语的判据，而且比
+//   以前更贴生产：300KB 的 multipart、20 条 RSS、带中文的 slug、Cookie 与会话身份，
+//   全都要穿过那一层转发；Node 实现还在的时候，这一格是被"两套实现互相比"顺带盖住的，
+//   现在是它自己 standalone 地在守。**含义变了就必须改名**——留着 APROXY / 代理= 这些标签，
+//   下一个人会以为还存在一套可以对岸的 Node 实现。
+//   这一轮**一条判据都没删**：每条"两个入口都必须 400 同一个文案"本来就同时是绝对断言
+//   （状态码与文案都写死在闸门里，不是从对岸抄来的）。失去的只是那个更强的含义——
+//   "比出来的两份结果由两套独立实现各自产生"。所以现在守的是保真度；口径对不对由手推
+//   期望值那批判据守，那一半从来就不依赖对岸存在。
+//
 // 前提：
-//   ① 常规两栈已启动（Node 3200 / Java 3101），私网校验**开着**（默认即开）——第 1~3 节打这一对；
+//   ① 常规一对已启动（Next 3200 / Java 3101），私网校验**开着**（默认即开）——第 1~3 节打这一对；
 //   ② 另起一对「允许本机订阅源」的实例。不关黑名单就跑不通任何一次真实抓取，因为夹具必然落在
-//      127.0.0.1 上（与 Node 的 IMPORT_ALLOW_PRIVATE 同一个开关，两侧都认）：
-//        MSYS_NO_PATHCONV=1 NEXT_DIST_DIR=.next-importtest \
-//          IMPORT_ALLOW_PRIVATE=1 node node_modules/next/dist/bin/next dev -p 3298
+//      127.0.0.1 上。这个开关现在**只有一侧需要**：Node 那份 importer 连同 app/api/** 一起
+//      删掉了，黑名单判定整个住在 ImportService（env IMPORT_ALLOW_PRIVATE 或
+//      --inkstack.import.allow-private=true），3298 那台 Next 只是个转发壳：
 //        cd server && JAVA_HOME=<jdk17> mvn -o -s settings.xml spring-boot:run \
 //          -Dspring-boot.run.arguments="--server.port=3198 --inkstack.import.allow-private=true"
+//        JAVA_BASE=http://localhost:3198 NEXT_DIST_DIR=.next-importtest \
+//          node node_modules/next/dist/bin/next dev -p 3298
+//      （3298 的 JAVA_BASE 必须指到 3198，否则"经代理"那一轮打的其实是另一个后端。）
 //   ③ DATABASE_URL 指向**克隆库** inkstack_j：这道闸门会真建真删文章。
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { executorOf, isCrossStack } from "./gate-executor.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const env = Object.fromEntries(
@@ -38,8 +56,9 @@ const env = Object.fromEntries(
 );
 const NODE = process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200";
 const JAVA = process.env.PARITY_JAVA || env.PARITY_JAVA || "http://localhost:3101";
-const ANODE = process.env.IMPORT_NODE || "http://localhost:3298";
-const AJAVA = process.env.IMPORT_JAVA || "http://localhost:3198";
+/** 两个"允许本机订阅源"的入口：一个经 Next 代理，一个直连 Java（P7f-2 之前它们是两套实现）。 */
+const APROXY = process.env.IMPORT_PROXY || "http://localhost:3298";
+const ADIRECT = process.env.IMPORT_DIRECT || "http://localhost:3198";
 const KEEP = process.argv.includes("--keep");
 const FIXTURE_PORT = Number(process.env.IMPORT_FIXTURE_PORT || 4599);
 const FIX = `http://127.0.0.1:${FIXTURE_PORT}`;
@@ -113,7 +132,7 @@ async function login(base, email, password) {
   if (!cookie) throw new Error(`${base} 登录失败 ${res.status}`);
   return cookie;
 }
-/** 同一个请求打两栈，只要「同状态同文案」：黑名单只看结论，不看谁先拒。 */
+/** 同一个请求打两个入口，只要「同状态同文案」：黑名单只看结论，不看谁先拒。 */
 async function bothSame(url, cookie) {
   const [n, j] = await Promise.all([
     call(NODE, "POST", "/api/import", { url }, cookie),
@@ -125,8 +144,8 @@ async function refuse(label, url, cookie, wantStatus, wantError) {
   const r = await bothSame(url, cookie);
   return check(r.ok && r.n.status === wantStatus
     && (wantError === undefined || r.n.json?.error === wantError), label,
-    () => `node=${r.n.status}/${r.n.json?.error ?? r.n.text.slice(0, 46)}`
-      + ` java=${r.j.status}/${r.j.json?.error ?? r.j.text.slice(0, 46)}`);
+    () => `代理=${r.n.status}/${r.n.json?.error ?? r.n.text.slice(0, 46)}`
+      + ` 直连=${r.j.status}/${r.j.json?.error ?? r.j.text.slice(0, 46)}`);
 }
 
 /* ==================== 订阅源夹具 ==================== */
@@ -144,7 +163,7 @@ const HTML_BODY =
   + '<div onclick="boom()">按钮</div>'
   + '<a href="javascript:alert(1)">旧链接</a>'
   + '<a HREF=\'JAVASCRIPT:alert(2)\'>另一个</a>';
-/** 手推出来的期望产物：断言的是「两栈都得是这个」，不是「两栈一样就行」。 */
+/** 手推出来的期望产物：断言的是「两边都得是这个」，不是「两边一样就行」。 */
 const SANITIZED_BODY =
   '<p>第一段正文</p><img src="a.png"><div>按钮</div>'
   + '<a href="#">旧链接</a><a HREF="#">另一个</a>';
@@ -289,40 +308,74 @@ async function suit() {
   const writerId = await num("SELECT id FROM users WHERE email = ?", [env.INK_WRITER_EMAIL]);
   if (!writerId) throw new Error("缺少 INK_WRITER_EMAIL 账号");
   Object.assign(state, { writerId });
-  for (const [label, base] of [["Node", ANODE], ["Java", AJAVA]]) {
+  for (const [label, base] of [["经 Next 代理", APROXY], ["直连 Java", ADIRECT]]) {
     const up = await call(base, "GET", "/api/articles?limit=1");
     if (up.status !== 200) {
-      throw new Error(`未检测到「允许本机订阅源」的 ${label} 实例 ${base}（见本文件头部 ② 的启动命令）`);
+      throw new Error(`未检测到「允许本机订阅源」的 ${label}实例 ${base}（见本文件头部 ② 的启动命令）`);
     }
   }
+  // 起跑先把"这两个入口由谁应答"打出来：跨实现的那一半已经没法比了，这里不装绿也不判红。
+  const cross = await isCrossStack(APROXY, ADIRECT);
+  console.log(`入口探针：${APROXY} → ${await executorOf(APROXY)}，${ADIRECT} → ${await executorOf(ADIRECT)}；`
+    + (cross ? "两个不同的执行者，「两轮产物相等」是在比两套实现"
+      : "同一个执行者，「两轮产物相等」是在比\n  经 rewrite 与直连的保真度（口径本身由「手推期望值」那批判据守）"));
   const writer = await login(NODE, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
-  const writerA = await login(ANODE, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
+  const writerA = await login(APROXY, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
 
   /**
-   * 一次干净的导入：先清夹具行，只用**一个**栈导，再把库里的每一列抄回来。
+   * 一次干净的导入：先清夹具行，只用**一个**入口导，再把库里的每一列抄回来。
    *
-   * 两个栈往同一张表写，所以「比两栈产物」必须是各自独立的一轮——同一轮里读两次只是
-   * 把同一行读了两遍，连「Java 把正文写坏了」这种最该报的都报不出来。
+   * 两个入口往同一张表写，所以「比两轮产物」必须是各自独立的一轮——同一轮里读两次只是
+   * 把同一行读了两遍，连"正文被写坏"这种最该报的都报不出来（snapshot 先 wipeFixtures 再导）。
    */
   async function snapshot(base, url, form) {
     await wipeFixtures();
     const res = form !== undefined
       ? await call(base, "POST", "/api/import", form, writerA)
       : await call(base, "POST", "/api/import", { url }, writerA);
+    const t0 = Date.now();
     const rows = await many(
       `SELECT title, slug, summary, md_content, cover_label, tags, status, review_status,
               DATE_FORMAT(published_at,'%Y-%m-%d %H:%i:%s') AS publishedAt
          FROM articles WHERE author_id=? AND ${FIXTURES} ORDER BY title, slug`, [writerId]);
-    return { res, rows };
+    return { res, rows, t0 };
   }
-  /** 源里没有日期的条目落的是「导入那一刻」，比对时抹掉，否则两轮永远差几秒。 */
-  const VOLATILE = ["Gamma", "Kappa", "Slug Race", "未命名文章", "P5E md", "P5E Md", "Field", "Other"];
-  const scrub = (rows) => rows.map((r) => ({
+  /**
+   * 源里没有日期的条目，published_at 落的是「导入那一刻」——两轮各差几秒，那是**实现正确**
+   * 的表现，比对时必须抹掉。抹掉的方式经历过一次改版：原来是一份手抄的标题清单
+   * （Gamma / Kappa / Field…），/many 那 25 条没抄进去，于是「20 条上限」那条判据连着红
+   * 了一整个阶段——**手抄的清单会漏，而漏掉的那一条看起来像被测方的缺陷**。
+   * 现在按事实判：published_at 落在本轮导入窗口附近的就是"此刻"那一支。
+   * 窗口取 10 分钟，而所有带日期的夹具都在六天前，两者不可能撞车；
+   * "兜底成的确实是此刻"这句话另有判据在守（gamma.publishedAt 的格式与 Section 6 的精确比对）。
+   */
+  const FRESH_MS = 10 * 60_000;
+  // NULL **不算"此刻"**：兜底写空是要报出来的（Gamma 那条判据钉的就是这个），
+  // 把它抹成 <此刻> 等于给这一格开后门。
+  const isFresh = (r, snap) => !!r.publishedAt
+    && Math.abs(Date.parse(r.publishedAt.replace(" ", "T")) - snap.t0) < FRESH_MS;
+  const scrub = (snap) => snap.rows.map((r) => ({
     ...r,
-    publishedAt: VOLATILE.some((v) => r.title.includes(v)) ? "<此刻>" : r.publishedAt,
+    publishedAt: isFresh(r, snap) ? "<此刻>" : r.publishedAt,
   }));
   const same = (a, b) => JSON.stringify(scrub(a)) === JSON.stringify(scrub(b));
-  const dump = (rows) => JSON.stringify(scrub(rows)).slice(0, 420);
+  const dump = (snap) => JSON.stringify(scrub(snap)).slice(0, 420);
+  /**
+   * 红了必须说得出**差在哪一行的哪个字段**。只报"两堆 JSON 不相等"的判据等于把排查
+   * 工作整个丢给下一个人，而"逐字段比对"这种判据一旦报不出差在哪个字段，
+   * 最可能的下场就是被当成偶发红、然后被 --retries 掉。
+   */
+  const firstDiff = (a, b) => {
+    const keys = [...new Set([...Object.keys(a[0] ?? {}), ...Object.keys(b[0] ?? {})])];
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      for (const k of keys) {
+        const x = JSON.stringify(a[i]?.[k] ?? null);
+        const y = JSON.stringify(b[i]?.[k] ?? null);
+        if (x !== y) return `差在第 ${i + 1} 行 · ${k}：代理=${String(x).slice(0, 70)} 直连=${String(y).slice(0, 70)}`;
+      }
+    }
+    return "逐格扫不出差异（两堆行数为 " + a.length + " / " + b.length + "）";
+  };
   /**
    * mysql2 把 Date 绑进 SQL 时用的是**驱动本地时区**的墙钟，而目标列是 DATETIME(0)，
    * MySQL 对多出来的小数秒做四舍五入。所以期望值必须按同一口径算：先按本地格式化，
@@ -362,8 +415,8 @@ async function suit() {
       call(JAVA, "POST", "/api/import", body, cookie, opts),
     ]);
     check(n.status === want && j.status === want && n.json?.error === text && j.json?.error === text,
-      label, () => `node=${n.status}/${n.json?.error ?? n.text.slice(0, 46)}`
-        + ` java=${j.status}/${j.json?.error ?? j.text.slice(0, 46)}`);
+      label, () => `代理=${n.status}/${n.json?.error ?? n.text.slice(0, 46)}`
+        + ` 直连=${j.status}/${j.json?.error ?? j.text.slice(0, 46)}`);
   }
   const [noMdN, noMdJ] = await Promise.all([
     call(NODE, "POST", "/api/import", new FormData(), writer),
@@ -372,7 +425,7 @@ async function suit() {
   check(noMdN.status === 400 && noMdJ.status === 400
     && noMdN.json?.error === "未收到 .md 文件" && noMdJ.json?.error === noMdN.json?.error,
     "multipart 里没有 files 字段 → 400「未收到 .md 文件」",
-    () => `node=${noMdN.json?.error} java=${noMdJ.json?.error}`);
+    () => `代理=${noMdN.json?.error} 直连=${noMdJ.json?.error}`);
   const [noFileN, noFileJ] = await Promise.all([
     call(NODE, "POST", "/api/import", new FormData(), undefined),
     call(JAVA, "POST", "/api/import", new FormData(), undefined),
@@ -381,7 +434,7 @@ async function suit() {
     && noFileN.json?.error === noFileJ.json?.error
     && noFileN.json?.error === "登录后才能使用迁移工具（文章导入到你自己的账号）",
     "未登录传 Markdown → 与抓 RSS 同一条 401（先判登录，再判 Content-Type）",
-    () => `node=${noFileN.status}/${noFileN.json?.error} java=${noFileJ.status}/${noFileJ.json?.error}`);
+    () => `代理=${noFileN.status}/${noFileN.json?.error} 直连=${noFileJ.status}/${noFileJ.json?.error}`);
 
   /* ---------- 2 私网 / 环回黑名单 ---------- */
   console.log("\n## 2 SSRF 黑名单：字面私网、名字黑名单、DNS 失败（校验开着，两侧同码同文案）");
@@ -414,7 +467,7 @@ async function suit() {
   const subLocal = await bothSame("http://app.localhost:4599/rss2", writer);
   check(subLocal.ok && [PRIV, NAME, UNRESOLVED].includes(subLocal.n.json?.error),
     "子域 *.localhost 靠 DNS 解析结果兜住：两侧同结论且不放行",
-    () => `node=${subLocal.n.json?.error} java=${subLocal.j.json?.error}`);
+    () => `代理=${subLocal.n.json?.error} 直连=${subLocal.j.json?.error}`);
 
   /* ---------- 3 私网的七种写法 ---------- */
   console.log("\n## 3 同一个 127.0.0.1 的多种写法：归一化差一种，整条黑名单就失效");
@@ -461,25 +514,25 @@ async function suit() {
     ["15 秒超时", `${FIX}/slow`, "订阅源抓取超时（15s）"],
   ]) {
     const [n, j] = await Promise.all([
-      call(ANODE, "POST", "/api/import", { url }, writerA, { timeoutMs: 45_000 }),
-      call(AJAVA, "POST", "/api/import", { url }, writerA, { timeoutMs: 45_000 }),
+      call(APROXY, "POST", "/api/import", { url }, writerA, { timeoutMs: 45_000 }),
+      call(ADIRECT, "POST", "/api/import", { url }, writerA, { timeoutMs: 45_000 }),
     ]);
     check(n.status === 400 && j.status === 400 && n.json?.error === text && j.json?.error === text,
-      label, () => `node=${n.status}/${n.json?.error ?? n.text.slice(0, 46)}`
-        + ` java=${j.status}/${j.json?.error ?? j.text.slice(0, 46)}`);
+      label, () => `代理=${n.status}/${n.json?.error ?? n.text.slice(0, 46)}`
+        + ` 直连=${j.status}/${j.json?.error ?? j.text.slice(0, 46)}`);
   }
 
-  /* ---------- 5 两栈产物逐字段比对 ---------- */
-  console.log("\n## 5 RSS 产物：两栈各导一轮，再逐列比库");
-  const n5 = await snapshot(ANODE, `${FIX}/rss2`);
-  const j5 = await snapshot(AJAVA, `${FIX}/rss2`);
+  /* ---------- 5 两个入口的产物逐字段比对 ---------- */
+  console.log("\n## 5 RSS 产物：两个入口各导一轮，再逐列比库");
+  const n5 = await snapshot(APROXY, `${FIX}/rss2`);
+  const j5 = await snapshot(ADIRECT, `${FIX}/rss2`);
   check(n5.res.json?.imported === 7 && j5.res.json?.imported === 7,
     "八条 item 入库七条：空标题那条被丢掉且**不进 skipped**",
-    () => `node=${n5.res.json?.imported ?? n5.res.json?.error}`
-      + ` java=${j5.res.json?.imported ?? j5.res.json?.error}`);
-  check(n5.rows.length === 7 && j5.rows.length === 7 && same(n5.rows, j5.rows),
+    () => `代理=${n5.res.json?.imported ?? n5.res.json?.error}`
+      + ` 直连=${j5.res.json?.imported ?? j5.res.json?.error}`);
+  check(n5.rows.length === 7 && j5.rows.length === 7 && same(n5, j5),
     "七篇的 title / slug / summary / md_content / tags / status / review_status / published_at 全部逐字段相等",
-    () => dump(n5.rows) + "\n  vs " + dump(j5.rows));
+    () => dump(n5) + "\n  vs " + dump(j5));
   const alpha = n5.rows.find((r) => r.title.includes("Alpha"));
   if (check(!!alpha, "Alpha 那篇在")) {
     check(alpha.md_content === SANITIZED_BODY,
@@ -523,81 +576,83 @@ async function suit() {
     const gotN = n5.rows.find((r) => r.title.includes(who))?.publishedAt;
     const gotJ = j5.rows.find((r) => r.title.includes(who))?.publishedAt;
     check(gotN === want && gotJ === want, `${who}（${note}）→ 库内 ${want}`,
-      () => `node=${gotN} java=${gotJ}`);
+      () => `代理=${gotN} 直连=${gotJ}`);
   }
 
   /* ---------- 7 Atom、毫秒进位与逐跳重定向 ---------- */
   console.log("\n## 7 Atom 解析、毫秒进位与逐跳重定向");
-  const n7 = await snapshot(ANODE, `${FIX}/atom`);
-  const j7 = await snapshot(AJAVA, `${FIX}/atom`);
-  check(n7.res.json?.imported === 2 && j7.res.json?.imported === 2 && same(n7.rows, j7.rows),
-    "两条 entry 两栈各导一轮、逐字段相等",
-    () => `node=${n7.res.json?.imported ?? n7.res.json?.error}`
-      + ` java=${j7.res.json?.imported ?? j7.res.json?.error}`);
+  const n7 = await snapshot(APROXY, `${FIX}/atom`);
+  const j7 = await snapshot(ADIRECT, `${FIX}/atom`);
+  check(n7.res.json?.imported === 2 && j7.res.json?.imported === 2 && same(n7, j7),
+    "两条 entry 两个入口各导一轮、逐字段相等",
+    () => `代理=${n7.res.json?.imported ?? n7.res.json?.error}`
+      + ` 直连=${j7.res.json?.imported ?? j7.res.json?.error}`);
   const eta = n7.rows.find((r) => r.title.includes("Eta"));
   check(eta?.md_content === "<p>没有 content 时 summary 顶上</p>",
     "没有 content 时 summary 顶上（Atom 的第三种取值路径）", () => eta?.md_content);
   check(eta?.publishedAt === localSql("2026-09-23T08:00:00+08:00"),
-    "Atom 的 ISO 带偏移日期 → 与 Node 同一个瞬间", () => eta?.publishedAt);
+    "Atom 的 ISO 带偏移日期 → 落进手推的那个瞬间（期望值由 localSql 独立算出）",
+      () => eta?.publishedAt);
   const theta = n7.rows.find((r) => r.title.includes("Theta"));
   const wantTheta = localSql("2026-09-23T08:00:00.700Z");
   check(theta?.publishedAt === wantTheta
     && j7.rows.find((r) => r.title.includes("Theta"))?.publishedAt === wantTheta,
     "毫秒 .700 → DATETIME(0) 四舍五入进一秒，两侧同口径",
-    () => `node=${theta?.publishedAt} java=${j7.rows.find((r) => r.title.includes("Theta"))?.publishedAt}`
+    () => `代理=${theta?.publishedAt} 直连=${j7.rows.find((r) => r.title.includes("Theta"))?.publishedAt}`
       + ` 期望=${wantTheta}`);
-  const n8 = await snapshot(ANODE, `${FIX}/hop1`);
-  const j8 = await snapshot(AJAVA, `${FIX}/hop1`);
+  const n8 = await snapshot(APROXY, `${FIX}/hop1`);
+  const j8 = await snapshot(ADIRECT, `${FIX}/hop1`);
   check(n8.res.status === 200 && j8.res.status === 200 && n8.res.json?.source === "rss"
-    && same(n8.rows, j8.rows),
+    && same(n8, j8),
     "三跳链条走完正常导入：redirect 是手动的，链子本身要能落库",
-    () => `node=${n8.res.status}/${n8.res.json?.imported ?? n8.res.json?.error}`
-      + ` java=${j8.res.status}/${j8.res.json?.imported ?? j8.res.json?.error}`);
-  const n9 = await snapshot(ANODE, `${FIX}/spacey`);
-  const j9 = await snapshot(AJAVA, `${FIX}/spacey`);
-  check(n9.res.json?.imported === 1 && j9.res.json?.imported === 1 && same(n9.rows, j9.rows),
+    () => `代理=${n8.res.status}/${n8.res.json?.imported ?? n8.res.json?.error}`
+      + ` 直连=${j8.res.status}/${j8.res.json?.imported ?? j8.res.json?.error}`);
+  const n9 = await snapshot(APROXY, `${FIX}/spacey`);
+  const j9 = await snapshot(ADIRECT, `${FIX}/spacey`);
+  check(n9.res.json?.imported === 1 && j9.res.json?.imported === 1 && same(n9, j9),
     "Location 里有裸空格 → 两侧都跟着跳到同一条路径（WHATWG 会 percent-encode）",
-    () => `node=${n9.res.json?.imported ?? n9.res.json?.error}`
-      + ` java=${j9.res.json?.imported ?? j9.res.json?.error}`);
+    () => `代理=${n9.res.json?.imported ?? n9.res.json?.error}`
+      + ` 直连=${j9.res.json?.imported ?? j9.res.json?.error}`);
 
   /* ---------- 8 入库规则 ---------- */
   console.log("\n## 8 入库：同名判重、slug 撞号换号、20 条上限与并发");
-  const seeded = await snapshot(ANODE, `${FIX}/rss2`);
+  const seeded = await snapshot(APROXY, `${FIX}/rss2`);
   check(seeded.res.json?.imported === 7, "先把七篇夹具导进来，作为判重与撞号的现场",
     () => `${seeded.res.json?.imported ?? seeded.res.json?.error}`);
-  const reN = await call(ANODE, "POST", "/api/import", { url: `${FIX}/rss2` }, writerA);
-  const reJ = await call(AJAVA, "POST", "/api/import", { url: `${FIX}/rss2` }, writerA);
+  const reN = await call(APROXY, "POST", "/api/import", { url: `${FIX}/rss2` }, writerA);
+  const reJ = await call(ADIRECT, "POST", "/api/import", { url: `${FIX}/rss2` }, writerA);
   check(reN.json?.imported === 0 && reJ.json?.imported === 0
     && reN.json?.skipped?.length === 7 && reJ.json?.skipped?.length === 7
     && JSON.stringify(reN.json?.skipped) === JSON.stringify(reJ.json?.skipped)
     && reN.json?.skipped.every((s) => s.reason === "你的账号下已有同名文章"),
     "同一份源再导一次：七条全部「已有同名文章」，skipped 连顺序与键序都一致",
-    () => `node=${JSON.stringify(reN.json?.skipped?.[0])} java=${JSON.stringify(reJ.json?.skipped?.[0])}`);
+    () => `代理=${JSON.stringify(reN.json?.skipped?.[0])} 直连=${JSON.stringify(reJ.json?.skipped?.[0])}`);
   await wipeFixtures();
-  const manyN = await snapshot(ANODE, `${FIX}/many`);
+  const manyN = await snapshot(APROXY, `${FIX}/many`);
   await wipeFixtures();
-  const manyJ = await snapshot(AJAVA, `${FIX}/many`);
+  const manyJ = await snapshot(ADIRECT, `${FIX}/many`);
   check(manyN.res.json?.imported === 20 && manyJ.res.json?.imported === 20
-    && manyN.rows.length === 20 && manyJ.rows.length === 20 && same(manyN.rows, manyJ.rows),
-    "25 条只导前 20 条，且两栈导出的 20 条逐字段相同",
-    () => `node=${manyN.res.json?.imported}/${manyN.rows.length}`
-      + ` java=${manyJ.res.json?.imported}/${manyJ.rows.length}`);
+    && manyN.rows.length === 20 && manyJ.rows.length === 20 && same(manyN, manyJ),
+    "25 条只导前 20 条，且两个入口各自导出的 20 条逐字段相同",
+    () => `代理=${manyN.res.json?.imported}/${manyN.rows.length}`
+      + ` 直连=${manyJ.res.json?.imported}/${manyJ.rows.length}`
+      + ` ｜${firstDiff(scrub(manyN), scrub(manyJ))}`);
   await wipeFixtures();
   await conn.query(
     `INSERT INTO articles (author_id, slug, title, md_content, summary, tags, status, review_status)
      VALUES (?, ?, ?, '占位', '', '["迁移"]', 'published', 'approved')`,
     [writerId, `p5e-slug-race-${MARK}`, `占位·不参与夹具清理 ${MARK}`]);
-  const raceN = await snapshot(ANODE, `${FIX}/slugrace`);
-  const raceJ = await snapshot(AJAVA, `${FIX}/slugrace`);
+  const raceN = await snapshot(APROXY, `${FIX}/slugrace`);
+  const raceJ = await snapshot(ADIRECT, `${FIX}/slugrace`);
   check(raceN.res.json?.imported === 1 && raceN.rows.some((r) => r.slug === `p5e-slug-race-${MARK}-2`)
     && raceJ.rows.some((r) => r.slug === `p5e-slug-race-${MARK}-2`),
     "标题不同但 slug 撞唯一键 → 换号重试到 base-2，而不是「入库失败」",
-    () => `node=${raceN.rows.map((r) => r.slug).join(",")} java=${raceJ.rows.map((r) => r.slug).join(",")}`);
+    () => `代理=${raceN.rows.map((r) => r.slug).join(",")} 直连=${raceJ.rows.map((r) => r.slug).join(",")}`);
   check(await num("SELECT COUNT(*) FROM articles WHERE slug = ?", [`p5e-slug-race-${MARK}`]) === 1,
     "换号重试没有覆盖占位那篇：base slug 仍然只有一行");
   await wipeFixtures();
   const conc = await Promise.all(Array.from({ length: 8 }, () =>
-    call(ANODE, "POST", "/api/import", { url: `${FIX}/same-name` }, writerA)));
+    call(APROXY, "POST", "/api/import", { url: `${FIX}/same-name` }, writerA)));
   const concRows = await many("SELECT slug FROM articles WHERE author_id=? AND title LIKE ?",
     [writerId, "中文同名并发稿%"]);
   check(conc.every((r) => r.status === 200),
@@ -621,13 +676,13 @@ async function suit() {
     ["P5E-md-bad.exe", "MZ\u0000\u0003"],
     ["P5E-md-empty.md", "  \n\t "],
   ];
-  const n10 = await snapshot(ANODE, "", mdForm(MD_ENTRIES));
-  const j10 = await snapshot(AJAVA, "", mdForm(MD_ENTRIES));
+  const n10 = await snapshot(APROXY, "", mdForm(MD_ENTRIES));
+  const j10 = await snapshot(ADIRECT, "", mdForm(MD_ENTRIES));
   check(n10.res.json?.imported === 2 && j10.res.json?.imported === 2
     && JSON.stringify(n10.res.json?.skipped) === JSON.stringify(j10.res.json?.skipped)
-    && same(n10.rows, j10.rows),
+    && same(n10, j10),
     "四个文件：两篇入库、.exe 与空正文各自跳过，skipped 与产物逐字一致",
-    () => `node=${JSON.stringify(n10.res.json?.skipped)} java=${JSON.stringify(j10.res.json?.skipped)}`);
+    () => `代理=${JSON.stringify(n10.res.json?.skipped)} 直连=${JSON.stringify(j10.res.json?.skipped)}`);
   check(n10.res.json?.skipped?.[0]?.title === "P5E-md-bad.exe"
     && n10.res.json?.skipped?.[0]?.reason === "仅支持 .md/.markdown/.txt 且单文件 ≤300KB",
     "__SKIP__ 哨兵回吐原始文件名（slice(8)）而不是整串",
@@ -647,21 +702,21 @@ async function suit() {
   check(mdTwo?.title === `p5e md two ${MARK} file name`,
     "无一级标题时用文件名兜底：去扩展名、-/_ 换成空格", () => mdTwo?.title);
   const [bigN, bigJ] = await Promise.all([
-    call(ANODE, "POST", "/api/import", mdForm([["P5E-md-huge.md", "x".repeat(300_001)]]), writerA),
-    call(AJAVA, "POST", "/api/import", mdForm([["P5E-md-huge.md", "x".repeat(300_001)]]), writerA),
+    call(APROXY, "POST", "/api/import", mdForm([["P5E-md-huge.md", "x".repeat(300_001)]]), writerA),
+    call(ADIRECT, "POST", "/api/import", mdForm([["P5E-md-huge.md", "x".repeat(300_001)]]), writerA),
   ]);
   check(bigN.json?.skipped?.[0]?.reason === "仅支持 .md/.markdown/.txt 且单文件 ≤300KB"
     && JSON.stringify(bigN.json) === JSON.stringify(bigJ.json) && bigN.json?.imported === 0,
     "单文件超 300KB → 走文件类型那条文案跳过，不是 413",
-    () => `node=${JSON.stringify(bigN.json?.skipped)} java=${JSON.stringify(bigJ.json?.skipped)}`);
+    () => `代理=${JSON.stringify(bigN.json?.skipped)} 直连=${JSON.stringify(bigJ.json?.skipped)}`);
   const tooMany = Array.from({ length: 21 }, (_, i) => [`P5E-many-${i}.md`, `# P5E Many F ${i}\n\n正文`]);
   const [tmN, tmJ] = await Promise.all([
-    call(ANODE, "POST", "/api/import", mdForm(tooMany), writerA),
-    call(AJAVA, "POST", "/api/import", mdForm(tooMany), writerA),
+    call(APROXY, "POST", "/api/import", mdForm(tooMany), writerA),
+    call(ADIRECT, "POST", "/api/import", mdForm(tooMany), writerA),
   ]);
   check(tmN.status === 400 && tmJ.status === 400
     && tmN.json?.error === "一次最多导入 20 个文件" && tmJ.json?.error === tmN.json?.error,
-    "21 个文件 → 整单拒绝（不是收下 20 个）", () => `node=${tmN.json?.error} java=${tmJ.json?.error}`);
+    "21 个文件 → 整单拒绝（不是收下 20 个）", () => `代理=${tmN.json?.error} 直连=${tmJ.json?.error}`);
   const MIXED = [
     [`P5E-field-${MARK}.md`, `# P5E Field Only ${MARK}\n\n正文`, "files", "text/markdown"],
   ];
@@ -673,38 +728,38 @@ async function suit() {
     return fd;
   };
   await wipeFixtures();
-  const mxN = await call(ANODE, "POST", "/api/import", mixedForm(), writerA);
+  const mxN = await call(APROXY, "POST", "/api/import", mixedForm(), writerA);
   await wipeFixtures();
-  const mxJ = await call(AJAVA, "POST", "/api/import", mixedForm(), writerA);
+  const mxJ = await call(ADIRECT, "POST", "/api/import", mixedForm(), writerA);
   check(mxN.json?.imported === 1 && mxJ.json?.imported === 1,
     "只收 files 字段下的真文件：同名字段的普通值、别的字段名的文件都不算",
-    () => `node=${mxN.json?.imported ?? mxN.json?.error} java=${mxJ.json?.imported ?? mxJ.json?.error}`);
+    () => `代理=${mxN.json?.imported ?? mxN.json?.error} 直连=${mxJ.json?.imported ?? mxJ.json?.error}`);
   await wipeFixtures();
-  const untitledN = await snapshot(ANODE, "", mdForm([[".md", "正文没有标题"]] ));
-  const untitledJ = await snapshot(AJAVA, "", mdForm([[".md", "正文没有标题"]])) ;
+  const untitledN = await snapshot(APROXY, "", mdForm([[".md", "正文没有标题"]] ));
+  const untitledJ = await snapshot(ADIRECT, "", mdForm([[".md", "正文没有标题"]])) ;
   check(untitledN.res.json?.imported === 1 && untitledJ.res.json?.imported === 1
     && untitledN.rows[0]?.title === "未命名文章" && untitledJ.rows[0]?.title === "未命名文章",
     "文件名为 .md 且无一级标题 → 兜底「未命名文章」",
-    () => `node=${JSON.stringify(untitledN.rows[0]?.title)} java=${JSON.stringify(untitledJ.rows[0]?.title)}`);
+    () => `代理=${JSON.stringify(untitledN.rows[0]?.title)} 直连=${JSON.stringify(untitledJ.rows[0]?.title)}`);
 
   /* ---------- 10 跨栈互认 ---------- */
-  console.log("\n## 10 一侧导入、另一侧读得懂");
+  console.log("\n## 10 一个入口导入、另一个入口读得懂");
   await wipeFixtures();
-  const viaJava = await call(AJAVA, "POST", "/api/import", { url: `${FIX}/rss2` }, writerA);
+  const imported = await call(ADIRECT, "POST", "/api/import", { url: `${FIX}/rss2` }, writerA);
   const slugRow = await only("SELECT slug FROM articles WHERE author_id=? AND title LIKE ?",
     [writerId, "P5E Alpha%"]);
-  if (check(viaJava.status === 200 && !!slugRow, "Java 导一轮并且查得到 slug",
-    () => `${viaJava.status}/${slugRow?.slug}`)) {
+  if (check(imported.status === 200 && !!slugRow, "直连入口导一轮并且查得到 slug",
+    () => `${imported.status}/${slugRow?.slug}`)) {
     const [rN, rJ] = await Promise.all([
-      call(ANODE, "GET", `/api/articles/${encodeURIComponent(slugRow.slug)}`, undefined, writerA),
-      call(AJAVA, "GET", `/api/articles/${encodeURIComponent(slugRow.slug)}`, undefined, writerA),
+      call(APROXY, "GET", `/api/articles/${encodeURIComponent(slugRow.slug)}`, undefined, writerA),
+      call(ADIRECT, "GET", `/api/articles/${encodeURIComponent(slugRow.slug)}`, undefined, writerA),
     ]);
     check(rN.status === rJ.status
       && (rN.json?.article?.md ?? null) === (rJ.json?.article?.md ?? null) && !!rN.json?.article?.md
       && rN.json?.article?.title === "P5E Alpha " + MARK,
-      "Java 写进去的消毒正文，Node 的读接口原样读回",
-      () => `node=${rN.status}/${rN.json?.article?.md?.slice(0, 26)}`
-        + ` java=${rJ.status}/${rJ.json?.article?.md?.slice(0, 26)}`);
+      "直连入口写进去的消毒正文，经代理的读接口原样读回（读侧不许再消毒一遍、也不许改一个字）",
+      () => `代理=${rN.status}/${rN.json?.article?.md?.slice(0, 26)}`
+        + ` 直连=${rJ.status}/${rJ.json?.article?.md?.slice(0, 26)}`);
   }
   /**
    * 逐跳复校只有这一种跑法：首跳必须是**公网**地址，才能把"第二跳重新校验"这条路走到。
@@ -720,7 +775,7 @@ async function suit() {
     } else {
       check(r.ok && r.n.json?.error === PRIV,
         "公网首跳 302 到环回 → 第二跳被同一套校验拒掉",
-        () => `node=${r.n.json?.error ?? r.n.text.slice(0, 60)} java=${r.j.json?.error ?? r.j.text.slice(0, 60)}`);
+        () => `代理=${r.n.json?.error ?? r.n.text.slice(0, 60)} 直连=${r.j.json?.error ?? r.j.text.slice(0, 60)}`);
     }
   } else {
     skipped("公网首跳 302 到环回的逐跳复校", "IMPORT_PUBLIC_PROBE=0 显式关掉");

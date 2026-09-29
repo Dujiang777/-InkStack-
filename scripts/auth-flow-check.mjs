@@ -1,16 +1,26 @@
 #!/usr/bin/env node
-// P1b 跨栈认证流程闸门：验证码与会话必须"一侧签发、另一侧消费"才算真互通。
+// P1b 认证流程闸门：验证码与会话必须"一侧签发、另一侧消费"，整条生命周期跑通才算成立。
 //
-// 为什么不能只做同栈自测：两栈共用同一张 email_codes / sessions 表，
-// 但哈希口径各写各的（sha256(`${email}::${code}`)、token_hash、FROM_UNIXTIME 时效）。
-// 任何一处细节走岔，同栈测试照样全绿——只有交叉使用才会暴露。
+// P7f-2 之前这里的骨头是**两套实现互认**：两栈共用同一张 email_codes / sessions 表，
+// 但哈希口径各写各的（sha256(`${email}::${code}`)、token_hash、FROM_UNIXTIME 时效），
+// 任何一处走岔，同栈测试照样全绿——只有交叉使用才会暴露。
+// 现在只有一套实现了，那个宾语没了。剩下的可证的两件，脚本起跑先把落在哪一档打出来：
+//   · 两个 HTTP 入口（经 Next middleware rewrite 的那个、直连 Java 的那个）背后是同一本账，
+//     且 rewrite 不吞 Set-Cookie / 请求体 / 会话头。这一条在 P7f-2 之后**更**吃紧而不是更松：
+//     Node 侧再没有兜底实现，rewrite 掉了什么，用户就是丢了什么。
+//   · 注册→登录→二因子→改密→吊销每一步的**绝对**行为（该 401 的 401、备份码一次一毁、
+//     吊销即刻生效）。这类判据跟对岸在不在没关系，一条都没减。
+// 已经不由这一道证明的：口令哈希跨实现互认（只剩一个哈希器）、TOTP 两份实现口径一致
+// （只剩 Java 一份——脚本自己那份 RFC 6238 保留，它现在是"脚本 vs 被测方"的第三方对照）。
 //
 //   node scripts/auth-flow-check.mjs
 //
-// 依赖 dev 降级通道：SMTP 未配置时两栈都会在应答里回显 devCode。
-// 配了 SMTP 就把脚本停在这里，绝不去真人邮箱里捞码。
+// 依赖 dev 降级通道：SMTP 未配置时实例会在应答里回显 devCode（跑法见 README 闸门 5 一节，
+// 要另起一对临时实例）。配了 SMTP 就每条都停在"取不到码"上判红——那是环境前提不满足，
+// 不是流程坏了，但绝不判绿：拿不到码就没法证明注册链，红着比绿着诚实。
 import fs from "node:fs";
 import path from "node:path";
+import { executorOf, isCrossStack } from "./gate-executor.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const env = Object.fromEntries(
@@ -20,6 +30,19 @@ const env = Object.fromEntries(
 // 地址优先级：shell 环境变量 > .env > 默认。写反了会出现"以为在打临时实例、其实在打真 SMTP"。
 const NODE = process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200";
 const JAVA = process.env.PARITY_JAVA || env.PARITY_JAVA || "http://localhost:3101";
+
+// 两个入口的名字必须在跑第一条用例之前就定下来，后面每一条 label 都从这里取名。
+// 跨栈时它们是 Node / Java；同一执行者时它们只是两个端口——那时候把 label 写成"Java 消费
+// Node 签发的码"，读的人会以为存在过两套实现的互认。**一条绿的 label 不能提它没有的宾语。**
+const cross = await isCrossStack(NODE, JAVA);
+const portOf = (u) => (u.match(/:(\d+)/) ?? [, ""])[1];
+const A = cross ? "Node" : `入口${portOf(NODE)}`;
+const B = cross ? "Java" : `入口${portOf(JAVA)}`;
+console.log(`起跑环境：${NODE} → ${await executorOf(NODE)} 应答，${JAVA} → ${await executorOf(JAVA)} 应答`);
+console.log(cross
+  ? "判定：两个不同的执行者，下面的「A 签发 → B 消费」是真正的跨实现互认。"
+  : "判定：同一执行者。下面的每一条只是「两个 HTTP 入口共用一本账」+ 每步的绝对行为，不是跨实现互认；"
+    + "那半件事的接班人是闸门 1′（重放 contract/ 里冻结的旧实现形状）。");
 
 let pass = 0;
 let fail = 0;
@@ -67,34 +90,34 @@ const PW = "Migrate2026x";
 const PW_NEW = "Migrate2026y";
 const stamp = Date.now();
 
-// —— 1. Node 签发 → Java 消费（注册）——
+// —— 1. ${A} 签发 → ${B} 消费（注册）——
 const e1 = `p1b-node-issue-${stamp}@inkstack.dev`;
 created.push(e1);
 const c1 = await devCode(NODE, e1, "register");
-if (c1.error) bad("Node 签发注册码", c1.error);
+if (c1.error) bad(`${A} 签发注册码`, c1.error);
 else {
   const r = await post(JAVA, "/api/auth/register",
-    { nickname: "跨栈一号", email: e1, password: PW, code: c1.code });
-  if (r.status === 200 && r.json?.ok && r.cookie) ok("Node 签发 → Java 注册", `user.id=${r.json.user?.id}`);
-  else bad("Node 签发 → Java 注册", `${r.status} ${r.text.slice(0, 120)}`);
+    { nickname: "认证链一号", email: e1, password: PW, code: c1.code });
+  if (r.status === 200 && r.json?.ok && r.cookie) ok(`${A} 签发 → ${B} 注册`, `user.id=${r.json.user?.id}`);
+  else bad(`${A} 签发 → ${B} 注册`, `${r.status} ${r.text.slice(0, 120)}`);
 }
 
-// —— 2. Java 签发 → Node 消费（注册）——
+// —— 2. ${B} 签发 → ${A} 消费（注册）——
 const e2 = `p1b-java-issue-${stamp}@inkstack.dev`;
 created.push(e2);
 const c2 = await devCode(JAVA, e2, "register");
-if (c2.error) bad("Java 签发注册码", c2.error);
+if (c2.error) bad(`${B} 签发注册码`, c2.error);
 else {
   const r = await post(NODE, "/api/auth/register",
-    { nickname: "跨栈二号", email: e2, password: PW, code: c2.code });
-  if (r.status === 200 && r.json?.ok) ok("Java 签发 → Node 注册", `user.id=${r.json.user?.id}`);
-  else bad("Java 签发 → Node 注册", `${r.status} ${r.text.slice(0, 120)}`);
+    { nickname: "认证链二号", email: e2, password: PW, code: c2.code });
+  if (r.status === 200 && r.json?.ok) ok(`${B} 签发 → ${A} 注册`, `user.id=${r.json.user?.id}`);
+  else bad(`${B} 签发 → ${A} 注册`, `${r.status} ${r.text.slice(0, 120)}`);
 }
 
 // —— 3. 一码两吃必须失败（消费是条件删除，不是"比对后删"）——
 if (c2.code) {
   const again = await post(NODE, "/api/auth/register",
-    { nickname: "跨栈二号", email: e2, password: PW, code: c2.code });
+    { nickname: "认证链二号", email: e2, password: PW, code: c2.code });
   if (again.status === 400 && /已被使用|请先获取/.test(again.json?.error ?? "")) {
     ok("重复消费同一枚码被拒", again.json.error);
   } else {
@@ -102,11 +125,15 @@ if (c2.code) {
   }
 }
 
-// —— 4. Java 注册的账号，两栈都能登录（口令哈希互认）——
-for (const [who, base] of [["node", NODE], ["java", JAVA]]) {
+// —— 4. 一侧注册的账号，另一侧入口能登录 ——
+// 骨头原本是"Node 建的号 Java 要能登"。现在两个端口背后是同一个执行者，跑两遍只是把同一个
+// 问题问两次。仍然两遍：成本几乎为零，而且万一将来有人把某条链路重新指回 Node，这里会立刻看见。
+// 代价是 label 必须跟着 cross 变——同一份代码在两种环境下守的不是同一件事，名字得如实。
+for (const [who, base] of [[A, NODE], [B, JAVA]]) {
   const r = await post(base, "/api/auth/login", { email: e1, password: PW });
-  if (r.status === 200 && r.json?.ok && r.cookie) ok(`Java 建的号可在 ${who} 登录`, `uid=${r.json.user?.id}`);
-  else bad(`Java 建的号可在 ${who} 登录`, `${r.status} ${r.text.slice(0, 120)}`);
+  const label = `建的号可在 ${who} 登录` + (cross ? "（跨实现口令哈希互认）" : "（同执行者，非跨实现证明）");
+  if (r.status === 200 && r.json?.ok && r.cookie) ok(label, `uid=${r.json.user?.id}`);
+  else bad(label, `${r.status} ${r.text.slice(0, 120)}`);
 }
 
 // —— 5. 假码注册：错误码要消耗尝试次数，且不得泄露邮箱是否存在 ——
@@ -118,38 +145,38 @@ if (wrong.status === 400 && /验证码|过期|获取/.test(wrong.json?.error ?? 
   bad("假码注册停在验证码分支", `${wrong.status} ${wrong.text.slice(0, 120)}`);
 }
 
-// —— 6. 重置：Node 签发 reset 码 → Java 消费改密 → 旧密码两栈都失效、新密码两栈都有效 ——
-// 重置前先攥一枚真实 Cookie：重置的语义就是"全部设备立即下线"，它必须在两栈同时失效。
+// —— 6. 重置：${A} 签发 reset 码 → ${B} 消费改密 → 旧密码两侧都失效、新密码两侧都有效 ——
+// 重置前先攥一枚真实 Cookie：重置的语义就是"全部设备立即下线"，它必须在两个入口同时失效。
 const preReset = await post(NODE, "/api/auth/login", { email: e1, password: PW });
 if (!preReset.cookie) bad("重置前取得会话 Cookie", `${preReset.status} ${preReset.text.slice(0, 120)}`);
 else ok("重置前取得会话 Cookie");
 
 const c6 = await devCode(NODE, e1, "reset");
-if (c6.error) bad("Node 签发重置码", c6.error);
+if (c6.error) bad(`${A} 签发重置码`, c6.error);
 else {
   const r = await post(JAVA, "/api/auth/reset", { email: e1, code: c6.code, password: PW_NEW });
-  if (r.status === 200 && r.json?.ok) ok("Node 签发 → Java 重置密码", r.json.hint);
-  else bad("Node 签发 → Java 重置密码", `${r.status} ${r.text.slice(0, 120)}`);
+  if (r.status === 200 && r.json?.ok) ok(`${A} 签发 → ${B} 重置密码`, r.json.hint);
+  else bad(`${A} 签发 → ${B} 重置密码`, `${r.status} ${r.text.slice(0, 120)}`);
 }
 const oldPw = await post(NODE, "/api/auth/login", { email: e1, password: PW });
-if (oldPw.status === 401) ok("重置后旧密码失效（Node 侧确认）");
+if (oldPw.status === 401) ok(`重置后旧密码失效（${A} 侧确认）`);
 else bad("重置后旧密码失效", `仍是 ${oldPw.status}`);
 const newPwJava = await post(JAVA, "/api/auth/login", { email: e1, password: PW_NEW });
-if (newPwJava.status === 200 && newPwJava.json?.ok) ok("新密码在 Java 侧可登录");
-else bad("新密码在 Java 侧可登录", `${newPwJava.status} ${newPwJava.text.slice(0, 120)}`);
+if (newPwJava.status === 200 && newPwJava.json?.ok) ok(`新密码在 ${B} 侧可登录`);
+else bad(`新密码在 ${B} 侧可登录`, `${newPwJava.status} ${newPwJava.text.slice(0, 120)}`);
 
-// —— 7. 重置前那枚 Cookie 在两栈都立即失效（sessions 吊销跨栈生效）——
+// —— 7. 重置前那枚 Cookie 在两个入口都立即失效（sessions 吊销两侧同可见）——
 if (preReset.cookie) {
-  for (const [who, base] of [["node", NODE], ["java", JAVA]]) {
+  for (const [who, base] of [[A, NODE], [B, JAVA]]) {
     const me = await fetch(base + "/api/auth/me", { headers: { cookie: preReset.cookie } }).then((r) => r.json());
-    if (me.user == null) ok(`重置前 Cookie 在 ${who} 已失效`);
-    else bad(`重置前 Cookie 在 ${who} 已失效`, `仍认得 uid=${me.user.id}`);
+    if (me.user == null) ok(`重置前签发的 Cookie 在 ${who} 已失效`);
+    else bad(`重置前签发的 Cookie 在 ${who} 已失效`, `仍认得 uid=${me.user.id}`);
   }
 }
 
 /**
  * RFC 6238 当前码：HMAC-SHA1 / 30 秒步长 / 6 位，动态截断取低 31 位。
- * 脚本自己实现一份是刻意的：拿某一侧的实现当既真值，就永远测不出另一侧的 base32 或截断写错。
+ * 脚本自己实现一份是刻意的：拿被测方的实现当既真值，就永远测不出它的 base32 或截断写错。
  */
 async function totpNow(secretB32) {
   const { createHmac } = await import("node:crypto");
@@ -173,18 +200,18 @@ async function totpNow(secretB32) {
   return String(bin % 1_000_000).padStart(6, "0");
 }
 
-// —— 8. 两步验证全生命周期跨栈：Node 生成密钥 → Java 校验并开启 → 两栈都要二因子 → 备份码可用且一次一毁 → Node 关闭 ——
+// —— 8. 两步验证全生命周期：一侧生成密钥 → 另一侧校验并开启 → 两侧都要二因子 → 备份码一次一毁 → 一侧关闭 ——
 const PW3 = "Migrate2026z";
 const login1 = await post(NODE, "/api/auth/login", { email: e1, password: PW_NEW });
 const stage = await post(NODE, "/api/security/2fa", {}, login1.cookie);
 const secret = stage.json?.secret;
-if (!secret || !/^[A-Z2-7]{32}$/.test(secret)) bad("Node 生成 TOTP 密钥", `${stage.status} ${stage.text.slice(0, 100)}`);
-else ok("Node 生成 TOTP 密钥", `base32 ${secret.length} 位`);
+if (!secret || !/^[A-Z2-7]{32}$/.test(secret)) bad(`${A} 生成 TOTP 密钥`, `${stage.status} ${stage.text.slice(0, 100)}`);
+else ok(`${A} 生成 TOTP 密钥`, `base32 ${secret.length} 位`);
 
 let backup = null;
 let enabled = false;
 if (!secret) {
-  bad("Java 校验 Node 生成的密钥并开启", "前置密钥没拿到，后续 2FA 用例全部未跑");
+  bad(`${B} 校验 ${A} 生成的密钥并开启`, "前置密钥没拿到，后续 2FA 用例全部未跑");
 } else {
   const code = await totpNow(secret);
   // 注意是 PUT：POST 那一支是"重新生成密钥"，用错方法会把整段测试变成假通过
@@ -195,55 +222,55 @@ if (!secret) {
   // （而且会级联：2FA 其实已经开启，后面的登录用例全部变成 401 请先登录）。
   enabled = on.status === 200 && Array.isArray(backup) && backup.length === 10
     && backup.every((c) => /^[A-Z0-9]{1,4}-[A-Z0-9]{0,4}$/.test(c));
-  if (enabled) ok("Java 校验 Node 生成的密钥并开启", `备份码 ${backup[0]}…共 10 枚`);
-  else bad("Java 校验 Node 生成的密钥并开启", `${on.status} ${on.text.slice(0, 120)}`);
+  if (enabled) ok(`${B} 校验 ${A} 生成的密钥并开启`, `备份码 ${backup[0]}…共 10 枚`);
+  else bad(`${B} 校验 ${A} 生成的密钥并开启`, `${on.status} ${on.text.slice(0, 120)}`);
 }
 
 if (enabled) {
   const needCode = await post(NODE, "/api/auth/login", { email: e1, password: PW_NEW });
-  if (needCode.json?.need2fa === true) ok("开启后 Node 登录要求二因子");
-  else bad("开启后 Node 登录要求二因子", JSON.stringify(needCode.json).slice(0, 120));
+  if (needCode.json?.need2fa === true) ok(`开启后 ${A} 登录要求二因子`);
+  else bad(`开启后 ${A} 登录要求二因子`, JSON.stringify(needCode.json).slice(0, 120));
   const noCode = await post(JAVA, "/api/auth/login", { email: e1, password: PW_NEW });
-  if (noCode.json?.need2fa === true) ok("开启后 Java 登录同样要求二因子");
-  else bad("开启后 Java 登录同样要求二因子", JSON.stringify(noCode.json).slice(0, 120));
+  if (noCode.json?.need2fa === true) ok(`开启后 ${B} 登录同样要求二因子`);
+  else bad(`开启后 ${B} 登录同样要求二因子`, JSON.stringify(noCode.json).slice(0, 120));
 
   const javaLogin = await post(JAVA, "/api/auth/login",
     { email: e1, password: PW_NEW, totp: await totpNow(secret) });
-  if (javaLogin.status === 200 && javaLogin.json?.ok) ok("Java 登录接受同一个 TOTP 码");
-  else bad("Java 登录接受同一个 TOTP 码", `${javaLogin.status} ${javaLogin.text.slice(0, 120)}`);
+  if (javaLogin.status === 200 && javaLogin.json?.ok) ok(`${B} 登录接受脚本自算的同一个 TOTP 码`);
+  else bad(`${B} 登录接受脚本自算的同一个 TOTP 码`, `${javaLogin.status} ${javaLogin.text.slice(0, 120)}`);
 
   const viaBackup = await post(NODE, "/api/auth/login", { email: e1, password: PW_NEW, totp: backup[0] });
-  if (viaBackup.status === 200 && viaBackup.json?.ok) ok("备份码在 Node 侧可登录");
-  else bad("备份码在 Node 侧可登录", `${viaBackup.status} ${viaBackup.text.slice(0, 120)}`);
+  if (viaBackup.status === 200 && viaBackup.json?.ok) ok(`备份码在 ${A} 侧可登录`);
+  else bad(`备份码在 ${A} 侧可登录`, `${viaBackup.status} ${viaBackup.text.slice(0, 120)}`);
   const burnJava = await post(JAVA, "/api/auth/login", { email: e1, password: PW_NEW, totp: backup[1] });
   const burnAgain = await post(JAVA, "/api/auth/login", { email: e1, password: PW_NEW, totp: backup[1] });
   if (burnJava.status === 200 && burnAgain.status === 401) {
-    ok("备份码一次一毁（Java 侧）", burnAgain.json?.error);
-  } else bad("备份码一次一毁（Java 侧）", `首次 ${burnJava.status} / 二次 ${burnAgain.status}`);
+    ok(`备份码一次一毁（${B} 侧）`, burnAgain.json?.error);
+  } else bad(`备份码一次一毁（${B} 侧）`, `首次 ${burnJava.status} / 二次 ${burnAgain.status}`);
 }
 
 if (enabled) {
-  // 跨栈关闭：Java 开的，由 Node 关——两栈对 totp_* 三列的读写必须互通
+  // 跨入口关闭：${B} 开的，由 ${A} 关——totp_* 三列的读写必须在两个入口都算数
   const off = await send("DELETE", NODE, "/api/security/2fa",
     { password: PW_NEW, code: await totpNow(secret) }, login1.cookie);
-  if (off.status === 200 && off.json?.ok) ok("Node 关闭 Java 开启的两步验证");
-  else bad("Node 关闭 Java 开启的两步验证", `${off.status} ${off.text.slice(0, 120)}`);
+  if (off.status === 200 && off.json?.ok) ok(`${A} 关闭 ${B} 开启的两步验证`);
+  else bad(`${A} 关闭 ${B} 开启的两步验证`, `${off.status} ${off.text.slice(0, 120)}`);
   const after = await post(JAVA, "/api/auth/login", { email: e1, password: PW_NEW });
-  if (after.status === 200 && after.json?.ok && !after.json.need2fa) ok("关闭后 Java 登录不再要二因子");
-  else bad("关闭后 Java 登录不再要二因子", JSON.stringify(after.json).slice(0, 120));
+  if (after.status === 200 && after.json?.ok && !after.json.need2fa) ok(`关闭后 ${B} 登录不再要二因子`);
+  else bad(`关闭后 ${B} 登录不再要二因子`, JSON.stringify(after.json).slice(0, 120));
 }
 
-// —— 9. 改密：保留当前会话、下线其他设备（跨栈看得到吊销）——
+// —— 9. 改密：保留当前会话、下线其他设备（另一侧入口看得到吊销）——
 const keepMe = await post(JAVA, "/api/auth/login", { email: e1, password: PW_NEW });
 const other = await post(NODE, "/api/auth/login", { email: e1, password: PW_NEW });
 const changed = await post(JAVA, "/api/security/password",
   { oldPassword: PW_NEW, newPassword: PW3 }, keepMe.cookie);
 if (changed.status === 200 && changed.json?.ok && changed.json.revoked >= 1) {
-  ok("Java 改密并下线其他设备", `revoked=${changed.json.revoked}`);
-} else bad("Java 改密并下线其他设备", `${changed.status} ${changed.text.slice(0, 140)}`);
+  ok(`${B} 改密并下线其他设备`, `revoked=${changed.json.revoked}`);
+} else bad(`${B} 改密并下线其他设备`, `${changed.status} ${changed.text.slice(0, 140)}`);
 const stillOn = await fetch(NODE + "/api/auth/me", { headers: { cookie: keepMe.cookie ?? "" } }).then((r) => r.json());
-if (stillOn.user?.id) ok("改密后当前会话在 Node 仍有效");
-else bad("改密后当前会话在 Node 仍有效", JSON.stringify(stillOn).slice(0, 120));
+if (stillOn.user?.id) ok(`改密后当前会话在 ${A} 仍有效`);
+else bad(`改密后当前会话在 ${A} 仍有效`, JSON.stringify(stillOn).slice(0, 120));
 const kicked = await fetch(JAVA + "/api/auth/me", { headers: { cookie: other.cookie ?? "" } }).then((r) => r.json());
 if (kicked.user == null) ok("改密前另一台设备的会话已下线");
 else bad("改密前另一台设备的会话已下线", `仍认得 uid=${kicked.user.id}`);

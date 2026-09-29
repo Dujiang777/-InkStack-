@@ -1,6 +1,7 @@
-// 链接审核策略：白名单域名直接放行，其余提交审核
-// P0：默认白名单（代码/文档/社区站）+ links 表（pending/approved/rejected）
-import { getPool } from "./db";
+// 外链判定策略：白名单域名直接放行，其余在页面上标成"需审核"。
+// P7f-2 起这一层**只剩判定**：默认白名单（代码/文档/社区站）+ 问 Java 要库里 approved 的那批。
+// "提交审核"那条写路径（原来是本文件里一句 INSERT INTO link_whitelist）随 app/api/links 一起删了，
+// 现在由 Java 的 `POST /api/links` 应答——渲染层不留任何写库的退路。
 import { javaReady, remoteAllowedDomains } from "./java-source";
 
 const DEFAULT_ALLOW = [
@@ -36,21 +37,4 @@ export async function allowedDomains(): Promise<Set<string>> {
   if (!javaReady()) return set;   // 演示模式：只有默认清单，与 Node "拿不到池子" 那一支一字同
   for (const d of await remoteAllowedDomains()) set.add(String(d).toLowerCase());
   return set;
-}
-
-/** 外链提交审核（P0：自动入库为 pending，admin 在运营台批准） */
-export async function submitLinkForReview(url: string, note = ""): Promise<void> {
-  const domain = extractDomain(url);
-  if (!domain) return;
-  const pool = await getPool();
-  if (!pool) return;
-  try {
-    await pool.query(
-      `INSERT INTO link_whitelist (domain, url, note, status) VALUES (?, ?, ?, 'pending')
-       ON DUPLICATE KEY UPDATE url = VALUES(url)`,
-      [domain, url.slice(0, 500), note.slice(0, 200)]
-    );
-  } catch {
-    /* 静默：审核库不可用时不阻塞发布 */
-  }
 }

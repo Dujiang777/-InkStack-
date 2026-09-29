@@ -7,15 +7,18 @@
 //   3) "改价"与"扣回点墨"这类动作账面必须与余额同源，扣不得就明说扣不得。
 //   4) 导出与原文是把**全文**交出去的口子：付费墙与作者判定少判一句就是可无限拉全文的洞；
 //      导出的绝对链接还必须落在浏览器看到的那个地址上（不能被 rewrite 换成后端端口）。
-//   5) 跨栈互认：Node 种的评论 Java 删得掉、Node 提的举报 Java 处理得了。
+//   5) 两个入口互认：一个入口种的评论，另一个入口删得掉；一个入口提的举报，另一个处理得了。
+//      （P7f-2 之前这条叫"跨栈互认"，比的是两套实现读得懂彼此写的行；现在两个入口背后是同一套
+//      实现，它守的降格成"经 rewrite 写进去的行，直连也看得见"——仍然是一条真判据，只是弱一档，
+//      名字必须跟着降。）
 //
 //   node scripts/admin-check.mjs          跑完把夹具与涉事账号复原
 //   node scripts/admin-check.mjs --keep   保留现场
 //
-// 前提：两栈已启动（Node 3200 / Java 3101），DATABASE_URL 指向**克隆库** inkstack_j。
-// 经代理那两条需要切流实例在线：
-//   NEXT_DIST_DIR=.next-cutover JAVA_ROUTES=…/api/articles/*/raw,…/api/articles/*/export \
-//     node node_modules/next/dist/bin/next dev -p 3400
+// 前提：一对入口已启动（Next 3200 → Java 3101），DATABASE_URL 指向**克隆库** inkstack_j。
+//   两个入口各打一遍：PARITY_NODE 是经 rewrite 的那一侧，PARITY_JAVA 是直连那一侧。
+//   这一道不再需要第三台"切流实例"（原来那台 :3400 的宾语已经不存在，见导出那一条的注释）。
+//   跑批量用例建议抬边缘闸档位：EDGE_API_LIMIT=100000（本闸门一轮几十发、全来自同一个回环地址）。
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -27,7 +30,6 @@ const env = Object.fromEntries(
 );
 const NODE = process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200";
 const JAVA = process.env.PARITY_JAVA || env.PARITY_JAVA || "http://localhost:3101";
-const PROXY = process.env.PROXY_BASE || "http://localhost:3400";
 const KEEP = process.argv.includes("--keep");
 
 const TAG = "P5c 运营台夹具";
@@ -288,15 +290,20 @@ async function suit() {
   check(words > 0 && words === MD.replace(/[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/g, "").length,
     "frontmatter 的字数按\"去掉所有空白\"算", `words=${words}`);
   try {
-    const viaProxy = await call(PROXY, "GET", `/api/articles/${artSlug}/export`, undefined, writer, true);
-    const direct = await call(NODE, "GET", `/api/articles/${artSlug}/export`, undefined, writer, true);
+    // P7f-2 改判：这里原本要**再起第三台实例**（PROXY_BASE，默认 :3400 那台"整前缀切流"演练实例）
+    // 跟 Node 的导出比。那台实例的宾语没了——现在每一台 Next 都是切流实例，而 Node 不再应答 /api，
+    // 于是"3400 连不上"变成一条 permanent 红（本闸门第一轮的 1 项失败就是它，不是回归）。
+    // 判据换用已有的两个入口，一句没少：经代理那一轮的绝对链接必须落在**浏览器看到的地址**上、
+    // 不得出现后端地址，且两轮正文归一（各自 origin → <ORIGIN>）后逐字相等。
+    const viaProxy = await call(NODE, "GET", `/api/articles/${artSlug}/export`, undefined, writer, true);
+    const direct = await call(JAVA, "GET", `/api/articles/${artSlug}/export`, undefined, writer, true);
     check(viaProxy.java === true && viaProxy.status === 200
-      && !/localhost:3101/.test(viaProxy.text)
-      && norm(viaProxy.text, PROXY) === norm(direct.text, NODE),
-      "经代理导出：链接落在浏览器看到的地址上，绝不泄漏后端端口，正文与 Node 归一后逐字一致",
-      (viaProxy.text.match(/^url: .*/m) ?? [""])[0]);
+      && !viaProxy.text.includes(JAVA)
+      && norm(viaProxy.text, NODE) === norm(direct.text, JAVA),
+      "经代理导出：链接落在浏览器看到的地址上（不泄漏后端地址），正文与直连那一轮归一后逐字一致",
+      (viaProxy.text.match(/^url: .*/m) ?? ["应答里连 url: 行都没有"])[0]);
   } catch (down) {
-    check(false, "经代理导出可比对（切流实例未在线？）", String(down?.message ?? down));
+    check(false, "经代理导出可比对（两个入口都连得上吗）", String(down?.message ?? down));
   }
 
   /* ---------- 5 内容管理 ---------- */

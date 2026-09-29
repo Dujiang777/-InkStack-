@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 切流路径闸门：证明"浏览器只跟 Next 说话、Next 把 /api/auth/* 转给 Java"这条链路真的通。
+// 切流路径闸门：证明"浏览器只跟 Next 说话、Next 把 /api/* 转给 Java"这条链路真的通。
 //
 // 为什么单独一道：前面所有对拍都是直连两栈，走的是各自的 URL；而真实部署里浏览器只见
 // 到 Next 的地址，认证请求要靠 middleware 的 rewrite 转发。这条路上会丢东西的三样是
@@ -8,12 +8,16 @@
 // 的唯一硬证据。
 //
 //   node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
-//                     [--keep=/api/articles] [--keep-render] [--money] [--community] [--admin] [--study] [--import]
+//                     [--money] [--community] [--admin] [--study] [--import] [--ai]
 //
-// --keep  声明"这一次必须仍由 Node 应答"的前缀：切流范围变了，这个负断言也要跟着换，
-//         否则"未切流"的断言会在切到 /api/articles 那一档时自己打自己。
-// --keep-render  JAVA_ROUTES=/api（整前缀全切）时用这个代替 --keep：改断页面与 /feed.xml、
-//         /sitemap.xml 仍由 Next 渲染，不被 rewrite 顺走。
+// 负断言的形状（P7f-2 改判，别改回去）：这一道原本有两种跑法——按前缀切流那一档用 `--keep`
+// 指一个"名单外的 /api 前缀"证明它没被顺走，整前缀那一档用 `--keep-render` 把负断言改指渲染层。
+// app/api/** 删掉之后第一种跑法**没有落点**了：不存在任何由 Node 应答的 /api 前缀，
+// 那条断言只能恒红或者恒真，两者都不叫判据。所以现在只剩一种形状、也不需要开关：
+//   ① /api/* 的每一个入口都落在 Java；② /api 之外的（页面、feed、sitemap）仍由 Next 出；
+//   ③ /apiXYZ/* 这类相似前缀没被顺走（抓 startsWith("/api/") 退化成 startsWith("/api")）。
+// 传 --keep / --keep-render 会被直接拒绝起跑：那两个开关的宾语已经不存在，
+// 静默忽略只会让人以为"我按老办法跑过了这一道"。
 // --money 追加资金写链路经代理的证据（P4）。只挑不改账的用例：
 //         已签到用户的 POST /api/checkin → already；非法档位的 POST tip → 400。
 // --community 追加社区互动经代理的证据（P5）：未登录/参数非法/只读三类，同样一笔数据都不改。
@@ -26,7 +30,8 @@
 //        就会扣墨，所以它同时断言"切流实例没接上游"，接上就判红，不拿用户的墨水去赌配置。
 //        问答那条还盯一件别处测不到的事：rewrite 之后 NDJSON 必须仍然**逐块**到达，
 //        代理一旦攒成一坨，前端就从打字机变成"等十几秒再整篇砸脸"，功能没坏而体验全毁。
-//        ⚠ 该实例必须以 DEEPSEEK_API_KEY= AGENT_SERVICE_URL= 起，且 JAVA_ROUTES 含 /api/agent/ask。
+//        ⚠ 该实例必须以 DEEPSEEK_API_KEY= AGENT_SERVICE_URL= 起（P7f-2 起没有"要不要把这条
+//        切过去"的开关——/api/* 恒切，所以这两个变量一空，整台实例的 AI 面就都在 demo 档）。
 import fs from "node:fs";
 import path from "node:path";
 
@@ -40,9 +45,15 @@ const arg = (name, dflt) => {
   return hit ? hit.slice(name.length + 3) : dflt;
 };
 const base = arg("base", process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200");
-const KEEP_PREFIX = arg("keep", "/api/articles");
-/** 切到整前缀 /api 时用这个：已经没有"未切流的 /api 前缀"可指，负断言改指渲染层本身。 */
-const KEEP_RENDER = process.argv.includes("--keep-render");
+// 那两个开关的宾语随 app/api/** 一起没了。拒绝起跑而不是忽略：一个"传了没反应"的开关
+// 会让下一个人以为自己按老姿势跑过了这一道，那比少跑一道更糟。
+const RETIRED_FLAGS = process.argv.filter((a) => a === "--keep-render" || a.startsWith("--keep="));
+if (RETIRED_FLAGS.length) {
+  console.error("--keep / --keep-render 已随 P7f-2 退役：Node 侧不再应答任何 /api，");
+  console.error('  "名单外前缀仍由 Node 应答"这句没有宾语了。负断言现在恒指渲染层与 /apiXYZ，去掉这两个参数即可。');
+  console.error(`  （命中的已退役参数：${RETIRED_FLAGS.join(" ")}）`);
+  process.exit(2);
+}
 const MONEY = process.argv.includes("--money");
 const COMMUNITY = process.argv.includes("--community");
 const ADMIN = process.argv.includes("--admin");
@@ -111,26 +122,15 @@ const routed = await call("GET", "/api/auth/providers");
 if (routed.status === 200 && routed.backend === "inkstack-java") ok("/api/auth/providers 经 Next 转给 Java");
 else bad("/api/auth/providers 经 Next 转给 Java", `${routed.status} backend=${routed.backend || "无"}`);
 
-// 2) 负断言必须跟着切流范围走，否则它会自己打自己：
-//    段通配那一档还有"名单外的 /api 前缀"可指，整前缀切到 /api 时已经没有了——
-//    那一档该验的换成"名单上的确实全切"+"不属于 /api/ 的没被顺走"。
+// 2) 负断言（P7f-2 之后只剩这一种形状）：/api/* 确实全落在 Java，而 /api 之外的不许被顺走。
 //    后一条抓的是 matcher 从 startsWith("/api/") 退化成 startsWith("/api")：
 //    那样 /apiXYZ 会被转给 Java，Java 回 404 但带 x-backend，正好落在这条判据上。
-if (KEEP_RENDER) {
-  const cut = await call("GET", "/api/articles");
-  if (cut.backend === "inkstack-java") ok("整前缀切流：/api/articles 已落在 Java");
-  else bad("整前缀切流：/api/articles 已落在 Java", `backend=${cut.backend || "无"}`);
-  const outside = await call("GET", "/apiXYZ/articles");
-  if (outside.backend === "") ok("/api 之外的前缀未被整前缀切流顺走（/apiXYZ/*）", `status=${outside.status}`);
-  else bad("/api 之外的前缀未被整前缀切流顺走", `backend=${outside.backend}`);
-} else {
-  const kept = await call("GET", KEEP_PREFIX);
-  if (kept.backend === "") ok(`${KEEP_PREFIX} 仍在 Node 应答`);
-  else bad(`${KEEP_PREFIX} 仍在 Node 应答`, `backend=${kept.backend}`);
-  const sneaky = await call("GET", `${KEEP_PREFIX}XYZ`);
-  if (sneaky.backend === "") ok(`前缀相似路径未被错开（${KEEP_PREFIX}XYZ）`);
-  else bad("前缀相似路径未被错开", `backend=${sneaky.backend}`);
-}
+const cut = await call("GET", "/api/articles");
+if (cut.backend === "inkstack-java") ok("/api/articles 已落在 Java");
+else bad("/api/articles 已落在 Java", `backend=${cut.backend || "无"}`);
+const outside = await call("GET", "/apiXYZ/articles");
+if (outside.backend === "") ok("/api 之外的相似前缀未被顺走（/apiXYZ/*）", `status=${outside.status}`);
+else bad("/api 之外的相似前缀未被顺走", `backend=${outside.backend}`);
 
 // 3) POST 体要穿过 rewrite，Set-Cookie 要能被浏览器收下
 const creds = [env.INK_TEST_EMAIL, env.INK_TEST_PASSWORD];
@@ -148,20 +148,13 @@ if (!cookie) {
   if (me.json?.user?.email === creds[0]) ok("/api/auth/me 认得这枚 Cookie", `uid=${me.json.user.id}`);
   else bad("/api/auth/me 认得这枚 Cookie", `${me.status} ${me.text.slice(0, 90)}`);
 
-  // 4) 未切流的东西不得被顺走：段通配那一档查的是"/api/articles/* 里没在名单上的分支仍在 Node"，
-  //    整前缀切到 /api 时已经没有这样的前缀，这条负断言就改指渲染层——页面与两个非 /api 出口
-  //    必须仍由 Next 自己出（应答里绝不可能出现 x-backend）。P7f 删掉 Node 路由后，
-  //    "web 只剩渲染"这句成不成立，看的就是这一条。
-  if (KEEP_RENDER) {
-    for (const p of ["/", "/hot", "/archive", "/feed.xml", "/sitemap.xml"]) {
-      const r = await call("GET", p, { cookie });
-      if (r.backend === "" && r.status === 200) ok(`${p} 仍由 Next 渲染（没被 rewrite 顺走）`, `status=${r.status}`);
-      else bad(`${p} 仍由 Next 渲染（没被 rewrite 顺走）`, `backend=${r.backend || "无"} status=${r.status}`);
-    }
-  } else {
-    const keepWrite = await call("PUT", `${KEEP_PREFIX}/__cutover_probe__`, { body: {}, cookie });
-    if (keepWrite.backend === "") ok(`未切流前缀的写仍由 Node 应答（${KEEP_PREFIX}/*）`, `status=${keepWrite.status}`);
-    else bad("未切流前缀的写归属", `backend=${keepWrite.backend}`);
+  // 4) 不属于 /api 的东西不得被顺走：页面与两个非 /api 出口必须仍由 Next 自己出
+  //    （应答里绝不可能出现 x-backend）。app/api/** 删掉之后，
+  //    "web 只剩渲染"这句成不成立，看的就是这一条——它现在是这一道里唯一的归属负断言。
+  for (const p of ["/", "/hot", "/archive", "/feed.xml", "/sitemap.xml"]) {
+    const r = await call("GET", p, { cookie });
+    if (r.backend === "" && r.status === 200) ok(`${p} 仍由 Next 渲染（没被 rewrite 顺走）`, `status=${r.status}`);
+    else bad(`${p} 仍由 Next 渲染（没被 rewrite 顺走）`, `backend=${r.backend || "无"} status=${r.status}`);
   }
 
   const out = await call("POST", "/api/auth/logout", { body: {}, cookie });
@@ -358,7 +351,9 @@ if (STUDY) {
     bad("multipart 上传经 rewrite 完整到达 Java", String(down?.message ?? down));
   }
   if (uploaded) {
-    // 经代理上传的图要能从**另一个栈**读到：两栈共用同一个 public/uploads 才算真接通
+    // 经代理上传的图要能从**读的那一侧**原样读回：Next 的静态服务与 Java 的写盘落在同一个
+    // public/uploads 才算这条链路真通——rewrite 把请求囫囵送过去了、文件却落在另一个目录，
+    // 表现正是"上传成功、帖子里图裂"。
     const sibling = await fetch(`${base}${uploaded}`, { method: "GET" });
     const onDisk = path.join(root, "public", "uploads", path.basename(uploaded));
     if (sibling.status === 200 && fs.existsSync(onDisk)) {

@@ -1,8 +1,12 @@
-# 墨栈 InkStack · Java 换栈版（渐进双轨进行中）
+# 墨栈 InkStack · Java 换栈版（双轨已收口：Node 侧不再有后端）
 
 > 博主有 AI 分身、读者能和文章对话、创作能变现、平台自己会运营。
 > 本仓库是 [Next.js 单体版 inkstack](https://gitee.com/du-jiangjiang/inkstack) 的**后端换栈工作副本**：
-> 后端逐模块迁到 **Spring Boot 全家桶**，前端 Next.js 原样保留，两套后端在同一份数据库上并行运行、逐接口对拍验证。
+> 后端逐模块迁到 **Spring Boot 全家桶**，前端 Next.js 原样保留。
+> **P7f-2 之后双轨已经收口**：58 个 Node 路由与那份遗留读 SQL 已删除，`/api/*` 恒由 Java 应答，
+> 渲染层进程内没有一句 MySQL。上面那句"两套后端并行运行、逐接口对拍"描述的是**过程**，
+> 那个过程已经走完；对岸的实现、以及以它为宾语的两道闸门（1 对拍、2 会话互通）都退役了，
+> 接班会写明在"质量闸门"一节。
 
 | | |
 |---|---|
@@ -12,6 +16,8 @@
 **为什么是"双轨"而不是一次重写**：原项目已有线上站点在跑，换栈必须做到每个模块都能与旧实现
 逐字段比对、并且改一个环境变量就能回滚。所以这里的形态是——Java 先把某一类接口实现到与 Node
 完全等价，对拍 diff 归零后再切流量，切完再动下一类。任一时刻站点都是可用的。
+**双轨期结束，这套做法留下的东西是 20 道闸门与 `contract/` 里冻住的旧实现形状**；
+回滚现在是一段 `git revert` 的距离，不再是一个环境变量（理由写在"演示模式与回滚"一节）。
 
 ---
 
@@ -47,10 +53,11 @@
 | P7f-1e′ | 判据拓宽：闸门 18 从"只看 `lib/data.ts` 的导出符号"改成"渲染层可达集合里任何直接执行 SQL 的函数" | ✅ | 清零第二天就又被推翻，而且这次红得更彻底：登记表说 0，实际有 **8 条**。原因是**判据的边界当初就是照方便画的**——第一版从 `page.tsx` 出发只收集"`from '@/lib/data'` 进来的那些符号"，于是两类东西天生看不见：① 页面文件**自己**写的 `pool.query`（`app/admin`、`app/me`、`app/points`、`app/security` 四个页面各有一处到三处）；② 经 `lib/auth.ts`、`lib/points.ts`、`lib/link-policy.ts`、`components/*` 这些**别的模块**摸到的库。<br>现在按一般化模型重算：全仓 `app`/`lib`/`components` 的顶层函数都成为节点（`文件#函数`），跨文件边靠导入表（含**默认导出的 `default` 别名**——页面组件清一色默认导出，只记本名的话最后一跳会断），**JSX 标签视为一次调用**（`<GateProbe />` 不是 `CallExpression`），`export default` 的三种写法各自钉住；`lib/db.ts` 作为管道排除、`app/api/**` 与 `lib/data-legacy.ts` 作为"待删的遗留 HTTP 面"排除。测得 渲染入口 24 / 可达节点 204 / **直连 MySQL 8 条**，其中 `getCurrentUser` 被 **14 个**渲染入口共同走到（旧版把归属报成"首个发现者"，已改成迭代到不动点）。<br>反证四条：① 往一个新页面注入页面内 `pool.query` → 报为登记表之外的新面孔、退出码 1；② 同一页只写 `<GateProbe />`、SQL 藏在组件里 → 也被抓到；③ **关掉 JSX 那条规则再跑**，第 ② 条消失而第 ① 条还在（证明这条规则有独有战果，不是顺手加的）；④ 登记表塞一个已无 SQL 的名字 → 报"已经没有本地 SQL"、退出码 1。<br>登记的 8 条里有一条根本**不是读**：`app/points/page.tsx` 在渲染时调 `grantDailyQuota`，一句 `UPDATE users` + 一条流水。"纯渲染层"这句话从此按 8 条重算，**P7f-2 的开工条件改回未成立**（迁完这 8 条为 P7f-1f） |
 | P7f-1f-a | 四个页面就地 SQL 迁到 Java：`GET /api/admin/overview`、`/api/me/profile`、`/api/me/points`、`/api/security/overview` | ✅ | 这八条里最隐蔽的四条——SQL 直接写在 `page.tsx` 里，连 `lib/data.ts` 都不经过。搬走之后 `app/{admin,me,points,security}/page.tsx` 不再 import `getPool`（棘轮 **8→4**，登记表里每条都写着"该给 Java 补哪个端点"）。三处口径是刻意合并的：**连签只剩一条定义**（`CheckinService.streak()`，与 `GET /api/checkin`、签到发墨同源；Node 的页面那句 `>= CURDATE() - INTERVAL 60 DAY` 是实现上的截断而非规则，连签超过 60 天时页面会与签到组件自相矛盾）；**印文留空回退昵称首字**这条默认值收进 Java，与 `PATCH /api/me/profile` 写库那条同式（分叉的表现是"保存后预览对，刷新就变"）；`/api/security/overview` 只查页面要的四列，`totp_enabled` 单独一条窄读而不是复用 `byIdForSecurity`（那一行带 `password_hash` 与 `totp_secret`，用不到的秘密不该搬进内存）。<br>闸门 19 从 **156 扩到 226 项**：新增这四条读的回库复算（九项计数按**九句各自查**而不是抄实现那句九子查询、`'%m-%d %H:%i'` 的格式化在 JS 里重做一遍、留痕按 `id` 逐条、流水按 `id DESC` 全序逐元素），运营台总览同样过 401/401/403 三道门禁。反证注入六处口径错误（`pending` 数错表、问答时间格式、注册日格式、流水改 `id ASC`、2FA 恒真、"今日已发"写成"往日已发"）→ **精确红 16 项**，复原即 226/226。<br>两处"证人自己站不住"是反证抓出来的：① 第一版夹具把 `avatar_text` 置 NULL，被数据库直接拒掉——`users` 表这四列全 `NOT NULL`，回退支路真正可达的是**空串**那一支；改置空串后"印文回退昵称首字"第一次被证明走到了，同时如实记下 `COALESCE(...)` 与 `"—"` 那两条默认值**结构上不可达**（只有整行不存在才触发，本闸门不造）。② 新加的渲染判据第一版写成"四个计数里在 DOM 找到至少一个"，注入兜底假数 `128/342/…` 后**照样绿**（库里 `users` 恰好是 8，页面上别处也有 8）；改成按 DOM 顺序逐格比八格后，同一条注入立刻红。<br>另有一处**红要归因**：运营台闸门那条"驳回通知作者的文案与链接精确"连续红两次，不是冷编译——Node 的 `app/api/admin/articles` 里 `notify()` 不 await，接口 200 时站内信还在飞行，判据读一次就判负等于把闸门的调度竞态当成被测方的缺陷。改成 `waitRow()` 等到上限再判（Java 侧同步发信，白等一轮），65/65 稳定绿。<br>闸门 4 从 34 项扩到 **50 项**（新增 §5b：四个页面的读数必须落到 DOM 上——八格逐个、注册日、余额位在 `p-balance` 里、留痕按 `audit-tag` 数、且整页不得出现 `Invalid Date`）；`skipped()` 从此记第三态而不是混进 PASS。回归：页面 50/50（`:3200` 与 `/api` 整切实例各一次）、闸门 19 直连 Java 226/226、运营台 65/65、创作台 51/51、资金 100/100、契约 30/30、互通 8/8、切流代理 21/21、路由盘点无缺口（Java 独有涨到 35 条）、Java 单测全绿、`tsc` 零错 |
 | P7f-1f-b | 渲染层最后 4 条交还 Java：闸门 18 清零，而且**这一次是复验过的** | ✅ | `getCurrentUser` → `remoteCurrentUser()`（走 `GET /api/auth/me`，外面包一层 `cache()` 合流同一渲染里报头与页面那两次调用）；`listSessions` → `GET /api/security/sessions`（Java 那条早就在应答同一份数据，只是把 Node 的 `pool.query` 换成问它）；`allowedDomains` → 新建 `GET /api/links/allowed-domains`（与运营台的 `GET /api/links` 是两件事：那条是审核队列、非运营 403，这条只回答"这个域名能不能直接点开"、游客渲染也要用所以必须公开，且只回 `domain` 一列）；`grantDailyQuota` **整条摘掉**——`/api/auth/me` 里本来就在发同一份额度，页面不该再发第二次。落点：13 个 `page.tsx` + `components/Masthead.tsx` 换调用点，棘轮 **4→0**。<br>两处**故意与 Node 不同**要写明：① `allowedDomains` 失败口径原来是 `catch` 之后静默用默认清单（表现是"链接又灰了，没人说是取数挂了"），现在抛出、页面 500，`DEFAULT_ALLOW` 仍留在 Next 侧（那是展示层的默认审美不是库里的数据）；② `lib/auth.ts` 那组服务器端会话校验**保留不迁**，因为它只服务 `app/api/**` 那 44 条遗留路由——路由的身份判定也借道 Java 的话，回滚就变成"Java 挂了谁也进不来"。这 44 条路由在 P7f-2 一起删，这一组跟着退场。<br>**口径合并的收获**：每日 30 滴从今往后整站只有 `PointsService.grantDailyQuota` 一处发（经 `/api/auth/me`），"访问任意页自动入仓"那句文案第一次字面成立（原来只有 `/points` 会发）。<br>闸门 19 新增 §⑩（**226→284 项**）：会话五个字段逐个复算 + "换一个人问就换一个人的 id"、设备列表按 `last_seen_at` 复算且"本机有且只有一台"由闸门自己算 `sha256(令牌)` 判定、放行清单用**三行夹具**（approved 大写 / pending / rejected）当宾语——这份库的 `approved` 恰好是 0 条，没有夹具的话"过滤掉了未放行域名"又是一条空对空。§⑩.4 是这一族里唯一的**写**判据：把当天置成未发，一次 `GET /api/auth/me` 必须 +30 且落一条流水，同日再问必须一分不加，然后按余额/发放日/流水 id 三项精确回滚。闸门 4 新增 §5c（**50→64 项**）：书房页印的昵称与墨仓数必须是**这个人**的（三人成对互不串、游客谁的都看不到），以及"只渲染一次首页，今日 30 滴就已入仓"——打端点会发不等于打页面会发，页面里那句调用删掉之后这一格只有渲染层能钉。<br>反证 6 个变异、各红各的宾语：Java 侧 ① 去掉 `status='approved'` → 红在清单那三条；② `current` 恒真 → 红在设备列表六条；③ `findActive` 不再看 `revoked`/时效 → 红在"签有效但库里已吊销仍是游客"那一条；④ `/api/auth/me` 不发额度 → 红在 §⑩.4 五条**和**闸门 4 的 5c.2 三条。Next 侧 ⑤ `remoteCurrentUser` 把失败吞成 `null` → 闸门 4 **30 项红**（"全站安静地变游客"这个失败模式第一次有机器看见）；⑥ 把 `/study` 改回 `getCurrentUser()` → 闸门 18 立刻报"登记表之外出现 1 条"。<br>⚠ 顺带抓到一处**该写下来的限制**：做变异 ⑥ 时那台早已编译过 `/study` 的 dev 实例照样渲染出正确答案（Next dev 只在页面模块自身变化时重编译，而 `lib/auth.ts` 自己就是一条能用的取数路）。所以闸门 18 守的是**源码形状**，不是运行时形状——它的宾语是仓库，不是某台进程。<br>回归：闸门 19 直连 Java 284/284（12 项如实 SKIP）、页面 64/64、棘轮 0、契约 30/30、互通 8/8、资金 100/100、社区 108/108、创作台 51/51、运营台 65/65、书房 117/117、限流 18/18、路由盘点无缺口、对拍打 `/api/auth/me`+`/api/security/sessions`+`/api/links` 零不一致、Java 单测 20 项全绿、`tsc` 零错 |
-| P7f-2 | 删除 58 个 `app/api/**/route.ts` 与 `lib/data-legacy.ts`，`/api` 整前缀落地 | ⏳ 开工条件已成立 | 开工条件不是"路由都切过去了"，而是"渲染层不再自己摸库"。闸门 18 现在读 0，且这个 0 是被 6 个变异反证过的（不是"没有匹配到"的那种 0）。删完之后 `lib/auth.ts` 那组服务器端会话校验、`link-policy`/`avatar` 之外的 10 个 api-only 模块一起退场，闸门 1/2/8/17 里那些**失去对岸**的差分判据要逐条改判或退役——一道没有宾语的判据留着只会伪装成"还在守" |
-| P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL | ⏳ | 只差 P7f-2 一步：渲染层已经不再自己摸 MySQL（闸门 18 读 0 且反证过），剩下的全是"待删的遗留 HTTP 面"。契约基线 1′ 在线、`/api` 整前缀演练已通过，这两样不用再等 |
+| P7f-2 | 删掉 58 个 `app/api/**/route.ts` 与 `lib/data-legacy.ts`，`/api` 整前缀落地：Node 侧**不再应答任何 HTTP** | ✅ | **删了什么**：57 个被跟踪的 `app/api/**/route.ts` + 1 个从没被跟踪过的（`.gitignore` 里不锚根的 `uploads/` 把 `app/api/uploads/route.ts` 吞了，`git rm` 不提它、`git status` 也不提它，删完按盘上复验才发现——见下面那条教训）；`lib/` 里 13 个模块整体退场（`data-legacy` / `db` / `audit` / `importer` / `mailer` / `notify` / `points` / `pwned` / `rag` / `rate-limit` / `topup` / `totp` / `verify-code`），`lib/auth.ts` 缩成三个纯类型与一个 `isStaff`（会话校验的判定整个交还 Java），`lib/link-policy.ts` 只剩判定不再写库；`scripts/parity.mjs` 与 `scripts/interop-check.mjs` 随之删除。**合计 72 个文件、6243 行**。`middleware.ts` 里 `JAVA_ROUTES` 的解析整段去掉：`/api/` 恒转发，没配 `JAVA_BASE` 就 503 + Retry-After（不放行去撞一个说"没有这个接口"的 404）。<br>**判据跟着逐条改判**（一道没有宾语的判据留着只会伪装成"还在守"）：闸门 1 与 2 退役，接班人在 README 里点名（1′ + 19 §⑩ + 4 §5c + 6）；1′ 的 `freeze` 改成**拒绝写入**并新增第 31 项"30 条基线全部冻自 node"（出处立成判据，因为删掉 Node 之后再冻结，同一份文件的意思会从"符合旧实现"悄悄变成"符合它自己上次"）；8 整个改版（三条判据：107 处调用点全覆盖 / `app/api` 登记表守反向 / middleware 不许再读名单，**三条各自注射反证过**——假 URL 与假方法各红一次、建一个 `app/api/ping/route.ts` 红"新面孔"、往 middleware 补一句读开关红第三条）；17 的"两个入口"从两套实现改成经代理与直连，前置那一条**翻了面**（从前要求 Node 端口不带 `x-backend`，现在要求两个入口都带），§⑤ 反而更硬（`lib/rate-limit.ts` 存在本身就是红）；6 的 `--keep` / `--keep-render` 直接**拒绝起跑**（退出码 2，静默忽略会让下一个人以为自己按老姿势跑过了这一道）；5 与 13、14 的判据文案全部改名，5 与 14 开跑先自报每个入口由谁应答——**同一份代码在两种环境下守的不是同一件事，label 必须如实**。<br>**新立闸门 20（演示模式）**：这一档从来没有实例在跑，所以从来没有闸门看过它一眼，而 P7f-1f-b 那个回归（`remoteCurrentUser` 少一句 `javaReady()` 守卫 → 没配后端的实例每个页面 500）正好藏在里面。它自己起一台 `JAVA_BASE=""` 的实例，先证"这台真的没后端"，再断言 23 个页面渲染得出来、渲染的是 `demo-data`、运营台自报"这是演示数据"。反证：删掉那句守卫 → **29 项红 22 项**。<br>**两处红都归了因，没有一处被叫成偶发**：① 闸门 11 那条"经代理导出"红在**第三台实例连不上**（它要 `PROXY_BASE=:3400` 那台演练实例——宾语已经不存在，于是恒红），改判成"经代理那一轮与直连那一轮归一后逐字相等，且不泄漏后端地址"，65/65；② 闸门 13 那条"20 条上限"红在**抹平"导入时刻"的是一份手抄标题清单**，`/many` 那 25 条没抄进去——手抄的清单会漏，而漏掉的那一条看起来像被测方的缺陷。改成按导入窗口判定（`NULL` 刻意不算"此刻"，否则给兜底写空开后门），并把 `firstDiff` 补进 detail（红了要说得出差在第几行哪个字段）。反证：把窗口收成 0 → 立刻红在 `published_at`。<br>回归（克隆库 `inkstack_j`）：`tsc` 零错、闸门 18 读 **0**、8 **4/4**、1′ **31/31**、3 付费墙与 3′ 检索防泄漏全绿（差分项如实记 —）、4 **64/64**（1 项无宾语 SKIP）、19 **282/282**（14 项 SKIP：窗口内有并列或该账号无数据）、5 **25/25**、6 **68/68 零 SKIP**（含逐帧 NDJSON 与 multipart 穿 rewrite）、7 **94 + 6 恒 SKIP**、9 **103 + 5 恒 SKIP**、10 **51/51**、11 **65/65**、12 **117/117**、13 **100/100**、14 **63/63**、15 **20/20**、16 **18/18**、20 **29/29**、`mvn test` 全绿、Java 端点 **87 个 URL 模式**。<br>**这一行不许说过头话的地方**：跨实现互认那一半**不再是可证的事**（口令哈希、TOTP 口径、两套 JSON 序列化风格——只剩一份实现，没有对岸可对）。剩下的机器证据是形状（1′）、回库复算（19）、DOM（4）与保真度（6/13/14/17），它们盖住的是"别改坏"，不是"当初抄得对" |
+| P7 | 收尾：web 退化为纯渲染层，删除 Node 侧 SQL 与 Node 侧 HTTP 面 | ✅ | 两半都齐了：渲染层进程内 MySQL **0 条**（闸门 18，且这个 0 被 6 个变异反证过），Node 侧 `/api` 实现**整体不存在**（58 个路由 + 13 个 lib 模块已删，`app/api/` 目录不在盘上，闸门 8 §2 从此守反向）。**剩下的不是换栈活儿**：`articles.agent_qa_count` 从来不回填（文章页那句"分身已回答 N 次"恒停在种子值，见缺口一节）、`agent_qa` 流水缺 `asker_id`（问答成就恒不推进）——两条都是功能缺陷，与栈无关，各自要动前端请求契约 |
 
-当前由 Java 应答的接口（`JAVA_ROUTES` 留空时**全部仍由 Node 应答**，行为与原版一致）：
+下面这份清单是 **Java 侧当前应答的全部端点**（`/api/*` 恒由它应答，没有"哪一部分还在 Node"这回事了；
+闸门 8 §1 会从渲染层与组件里的 107 个调用点反查这张表有没有漏接）：
 
 - 认证：`POST /api/auth/login|logout|register|send-code|reset` · `GET /api/auth/me|providers`
   · `GET /api/auth/{github,gitee,qq}` 与三家 `/{p}/callback` · `GET /api/auth/github/status`
@@ -62,13 +69,13 @@
 - 内容：`GET /api/articles` · `GET /api/articles/{slug}` · `GET /api/search`
 - 墨水经济：`POST /api/articles/{slug}/unlock|tip|boost` · `POST /api/series/{id}/bundle`
   · `GET|POST /api/checkin` · `POST /api/me/badge-claim` · `GET|POST /api/topup/orders`
-  · `POST /api/topup/pay`（这一组只能按段通配逐条切，见"切流与回滚"）
+  · `POST /api/topup/pay`（这一组当年是按段通配逐条切过来的，现在整前缀都在这张表上）
 - 社区互动：`GET|POST /api/articles/{slug}/comments` · `POST /api/articles/{slug}/like|bookmark|report|paywall-view`
   · `POST /api/comments/{id}/like|report` · `POST /api/users/{id}/follow` · `GET /api/notifications`
   · `POST /api/notifications/read`
 - 创作台：`POST /api/articles` · `PUT|DELETE /api/articles/{slug}` · `GET /api/articles/{slug}/raw`
-  · `GET /api/articles/{slug}/export`（至此 `/api/articles` **整前缀**在 Java 上方法集合已齐，
-  闸门 8 现算出的可整体切流前缀包含它）
+  · `GET /api/articles/{slug}/export`（`/api/articles` 这个前缀下 Node 与 Java 的方法集合
+  当年不齐，正是闸门 8 改版后要防的那类事：切过去不报错，只是把书房管理器打成 200 空列表）
 - 运营台：`POST /api/admin/articles|comments|reports|users`（内容管理与审核、删评论连带回复、
   举报三种处置、封禁与点墨增减；`setRole` 两栈都只认 developer，admin 也一样 403）
   · **`GET /api/admin/articles|review|users|reports|actions|orders|comments|insights|overview`**
@@ -92,8 +99,8 @@
   整前缀这才切得动，见闸门 8 与闸门 10 §7.5）
 - 迁移工具：`POST /api/import`（RSS 用 JSON、Markdown 用 multipart，同一个 URL 两种体）
   —— 全平台唯一一处"由用户给地址、服务端替他联网"的入口，SSRF 防护见闸门 13
-- AI 面：`POST /api/ai/write` · `POST /api/agent/ask` · `GET /api/agent/status`。P6b 之后
-  `/api/agent` 与 `/api/ai` 两个前缀都**整前缀安全**（闸门 8 现算，判定已从"存在缺口"翻成"无缺口"）。
+- AI 面：`POST /api/ai/write` · `POST /api/agent/ask` · `GET /api/agent/status`。这两个前缀
+  从"整前缀安全"（闸门 8 当年的判定）走到了"只有这一份实现"。
   问答是 NDJSON 流式，切过去之后仍然逐块吐帧（闸门 6 有一项专门盯这个：代理把响应攒成一坨，
   功能不坏但前端从打字机变成"等十几秒再整篇砸脸"）
 - 只读聚合（为 RSC 分流新增）：`/api/articles/{slug}/comments|tips|saved|series-nav`、
@@ -426,6 +433,32 @@
   进程内的"写成红字反而安全——它在缺口存在时绿。P7e 把它改成"Node 记一次之后 Java 侧剩余少一次"，
   缺口没补上就会红。规则：**已知缺口要以"会红的断言"的形式活着**，补掉的那一刻它必须反转，
   否则"我们修好了"只是一句没有证据的话。
+- **一条判据若它的前提被所有在跑的实例共享，它就没在守另一半**（P7f-2 立闸门 20 的起因）：
+  P7f-1f-b 把渲染层最后四条进程内 MySQL 迁走时，`remoteCurrentUser` 少了一句
+  `if (!javaReady()) return null`。所有在跑的实例都配着 `JAVA_BASE`，于是"没配后端"那一档
+  从来没有被任何闸门访问过——`javaBase()` 直接抛，"clone 下来跑起来看界面"这条产品承诺
+  当场变成"每个页面 500"。补的闸门必须**自己起一台那个前提不成立的实例**（`JAVA_BASE=""`），
+  而不是在现有实例上加一条断言。反证：删掉那句守卫，那道闸门 29 项红 22 项。
+- **退役一道闸门，要当场写下接班人是谁**（P7f-2 收掉闸门 1 与 2 时立的规矩）：
+  只写"已删除"，下一个人分不清这是"少了一道"还是"换了一种守法"。所以 README 里那两段
+  各自点名：1（对拍）→ 1′ + 19 的 §⑩ + 4 的 §5c；2（会话互通）→ 6（Cookie 不被 rewrite 吞）
+  + 19 的 §⑩（会话到底算不算有效）。顺带把契约基线的**出处**立成判据：`freeze` 现在直接拒绝
+  写入，`check` 里多一项"30 条基线全部冻自 node"——因为 Node 删了之后再冻结，同一份文件的
+  意思会从"必须符合旧实现"悄悄变成"必须符合它自己上次的样子"，而读的人分不清这两者。
+- **删除的安全证据要在删之前立**：闸门 8 §1（每个 `/api` 调用点都有 Java 路由接得住）是
+  在 `app/api/**` **还在盘上**的时候跑绿的——那时"Node 能答"与"Java 也能答"两件事同时可测。
+  删完之后再补这条判据，就只剩"Java 有这条路由"半句，另一半永远证不了，而表现一模一样的
+  404 要等到用户点上去才看得见。
+- **一个已经做不到的开关，比没有开关更坏**：`JAVA_ROUTES` 当年的承诺是"留空即整套回滚"。
+  Node 侧没有 /api 实现之后，留空得到的是一堆 404，不是回滚——这个开关还活着，但它守的
+  是一件已经不存在的事，读文档的人会以为回滚是一条配置的距离。所以整条删掉，回滚退回工程
+  手段（`git revert` 那一系列提交）；闸门 6 的 `--keep` / `--keep-render` 同理，
+  **传进来直接拒绝起跑**，而不是静默忽略——静默忽略会让下一个人以为自己按老姿势跑过了这一道。
+- **`git` 说删干净了，不等于盘上干净**：`git rm -r app/api` 之后 `app/api/uploads/route.ts`
+  还在原地，因为 `.gitignore` 里那条不锚根的 `uploads/` 把它吞了——**一个从未被跟踪过的源码文件**，
+  `git status`、`git rm`、`git ls-files` 三处都不会提它。教训两条：删目录之后按盘上残留复验
+  （`ls`/`find`，不是 `git status`）；忽略样式要锚根（`/public/uploads/`），
+  不锚根的目录名会命中任意层级，而它盖住的东西往往正是最不该被盖住的那一个。
 
 另一个已知缺口在流式超时：Node 的透传通道用 `AbortSignal.timeout(60_000)`，信号能在一次 read
 正卡着时把它打断；Java 的 `InputStream` 只能在两块数据之间判 deadline，遇到"60 秒一个字节都不来"
@@ -438,23 +471,26 @@
 `question` / `author` / `about`，`about` 是标题不是 id），要动前端与请求契约，双轨期两栈还得一起改，
 所以单独记一条，不像 `asker_id` 那样顺手就能补。
 
-页面侧（Server Component 进程内取数，不经 HTTP）的**读路径**只剩一条路：`lib/data.ts` 里
+页面侧（Server Component 进程内取数，不经 HTTP）的**读路径只剩一条**：`lib/data.ts` 里
 41 条 remote 调用——列表 / 详情 / 评论 / 打赏 / 收藏 / 专栏导航 / 关注关系 / 我的专栏 / 搜索 / 话题页 /
 作者主页 / 专栏架 / 专栏落地页 / 漫游记 / 个人中心六类足迹 / 创作台四组看板 / 全站统计与作者榜 /
 关注动态流 / 成就墙 / 专栏题名建议 / 运营台八张表（后十四处是 P7f-1d 与 P7f-1e 补的，见闸门 19）——
-现在都是"配了 `JAVA_BASE` 就问 Java，没配就渲染 `lib/demo-data.ts` 的演示数据"。
-另有八处**不经过 `lib/data.ts`**、直接住在 `lib/java-source.ts` 里由页面自己调：P7f-1f-a 那四条
+外加八处**不经过 `lib/data.ts`**、直接住在 `lib/java-source.ts` 里由页面自己调的：P7f-1f-a 那四条
 （运营台总览 / 账号资料 / 墨水账户 / 安全中心，它们的 SQL 原本就写在 `page.tsx` 里）与 P7f-1f-b
 那四条（`remoteCurrentUser` 会话解析、`remoteSessions` 设备列表、`remoteAllowedDomains` 外链白名单，
 以及每日 30 滴——那一条不再有任何 Node 侧函数，它兑现的就是 `GET /api/auth/me` 里那次发放）。
 `remoteCurrentUser` 是这一族里最重的一个：**每个已登录页面**都要走它（报头一次、页面一次，
 `cache()` 把它们合成一次渲染内的一问）。
-`DATA_VIA_JAVA` 与 `x-data-source` 随之退役：**只剩一条路之后，"报的是哪条路"这个问题不再存在，
-而一个含义会变的信号比没有信号更坏**。
-Node 侧那份读 SQL 没有直接删，它整体住在 `lib/data-legacy.ts`，只服务还没切走的 `app/api/**`
-（对拍类闸门还在替那些路由把关，见 P7e′ 那一行）；P7f 删路由时它一起删，那时它是死代码。
+两档口径写死在这里：配了 `JAVA_BASE` 就问 Java，问不到就**抛**、页面 500，绝不静默回落成演示数据；
+没配就只用 `lib/demo-data.ts`——那是"clone 下来先跑起来看界面"的产品承诺，不是故障。
+**后一档以前从来没有实例在跑，所以从来没有闸门看过它一眼**，P7f-2 起由闸门 20 守着。
+
+`DATA_VIA_JAVA` 与 `x-data-source` 已在 P7e′ 退役；`JAVA_ROUTES` 与整份 `lib/data-legacy.ts`
+（Node 侧那套读 SQL）、`lib/db.ts` 以及 10 个只服务 `app/api/**` 的模块在 P7f-2 退役——
+路由删掉之后它们是死代码，而"这一发走的是哪条路"这个问题在只剩一条路之后不再存在。
+**一个含义会变的信号比没有信号更坏。**
 `listHot` / `listRelated` / RSS / sitemap 不另设开关：它们是 `listArticles` 下游的纯 JS 组装，
-上游一条路，下游就一条路；排序口径收进 `rankHot()` 一个函数，页面侧与遗留侧共用它。
+上游一条路，下游就一条路；排序口径收进 `rankHot()` 一个函数，全站只有这一处定义。
 
 **"页面侧只剩一条路"这句话曾经说过头了，它由闸门 18 机器订正、补齐却比订正慢了两步**：
 订正那天（P7f-1c）算出来 `lib/data.ts` 里被页面调用的函数**有 14 个在 Next 进程内直连 MySQL**——
@@ -477,26 +513,29 @@ Node 侧那份读 SQL 没有直接删，它整体住在 `lib/data-legacy.ts`，�
 
 ```
 浏览器
-  │  同域、同一枚 ink_session Cookie
+  │  同域、同一枚 ink_session Cookie（浏览器从不直连 Java）
   ▼
-Next.js 15 (App Router)  :3100
-  ├─ 页面（Server Component）…… lib/data.ts
-  │      ├─ 读路径 41 条 remote 调用 ──HTTP（转发 Cookie）──▶ Spring Boot :3101
-  │      │    （JAVA_BASE 没配则只渲染 lib/demo-data.ts 的演示数据；配了就不回落，挂了即 500）
-  │      ├─ 八个页面另有一条自己直问 Java 的读（P7f-1f-a）：admin / me / points / security
-  │      │    └─ GET /api/admin/overview · /api/me/profile · /api/me/points · /api/security/overview
-  │      └─ 全站共用的三条（P7f-1f-b）也走同一根管子：身份 / 设备列表 / 外链白名单
-  │           └─ GET /api/auth/me（每个已登录页面一次，顺带 last_seen 节流写与每日 30 滴的发放）
-  │              · /api/security/sessions · /api/links/allowed-domains
-  ├─ 闸门 18 数的是**渲染层可达集合里任何直接执行 SQL 的函数**：现在 **0 条**，登记表已清空。
-  │      这个 0 是复验过的（把 /study 改回进程内 getCurrentUser 立刻红），P7f-2 的开工条件由此成立
-  ├─ /api/*  ── 未切流 ──────────→ Node Route Handler → lib/data-legacy.ts（遗留读 SQL）→ MySQL
-  └─ /api/*  ── JAVA_ROUTES 命中 ─rewrite─▶ Spring Boot :3101 → MySQL（同一库）
-                                                ├─ MyBatis-Plus 手写 SQL
-                                                └─ 智能体引擎（Spring AI + 文章检索工具）→ OpenAI 兼容端点
-（原 agent-service/ (Python FastAPI + AgentScope) :8100 已在 P6c 移除，引擎收进 Java 进程内）
-（页面取数与 Node 路由读 SQL 在 P7e′ 分家：前者只剩 Java，后者集中在 data-legacy，随 P7f 一起删
- —— 到 P7f-1f-b，"页面只渲染"这句第一次完整成立：渲染层进程内已经没有一句 MySQL）
+Next.js 15 (App Router)  :3100  —— 只做两件事：渲染 + 边缘闸口
+  ├─ 页面（Server Component）…… lib/data.ts / lib/java-source.ts
+  │      └─ 每一条读都是一句 remote 调用 ──HTTP（转发 Cookie）──▶ Spring Boot :3101
+  │           · 41 条列表/详情读 + 八个页面各自那条自问的读（admin / me / points / security…）
+  │           · 全站共用三条：GET /api/auth/me（每个已登录页面一次，顺带 last_seen 节流写
+  │             与每日 30 滴的发放）、/api/security/sessions、/api/links/allowed-domains
+  │           · JAVA_BASE 没配 → 只渲染 lib/demo-data.ts 的演示数据（这一档由闸门 20 守着）；
+  │             配了就不回落，挂了即 500——"Java 挂了"不许伪装成"站点正常"
+  ├─ /api/*  ── middleware rewrite ─────────────▶ Spring Boot :3101 → MySQL（同一库）
+  │           · **没有路由名单**：`startsWith("/api/")` 一条判定，配了后端就全切
+  │           · JAVA_BASE 没配 → 503 + Retry-After，而不是放它去撞一个 404
+  └─ 安全闸口（限流 / CSRF / 安全响应头）留在这里，与"谁来处理请求"解耦
+      └─ 闸门 18 数渲染层可达集合里直接执行 SQL 的函数：**0 条**
+
+（这里不再有"Node Route Handler → lib/data-legacy.ts"那一支：58 个 app/api/**/route.ts、
+ 那份遗留读 SQL、以及为它服务的 11 个 api-only 模块在 P7f-2 一起删掉了。
+ Node 的 agent-service（Python FastAPI + AgentScope）早在 P6c 就移除，引擎收进 Java 进程内。）
+
+Spring Boot :3101  —— 唯一的后端
+   ├─ MyBatis-Plus 手写 SQL（87 个 URL 模式）
+   └─ 智能体引擎（Spring AI + 文章检索工具）→ OpenAI 兼容端点
 ```
 
 安全闸口（限流、CSRF、安全响应头）留在 Next 边缘中间件里，**与"谁来处理请求"解耦**——
@@ -528,24 +567,25 @@ HMAC 签名 Cookie + 数据库会话表双保险、TOTP 两步验证（手写 RF
 
 ## 🧪 质量闸门（本仓库的核心方法）
 
-换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过二十道机器闸门：
+换栈最大的风险是"看起来一样，其实不一样"。所以每个模块都必须过机器闸门——编号到 20，
+其中 **1（对拍）与 2（会话互通）已在 P7f-2 随它们的宾语一起退役**，接班的是 1′（契约基线）、
+19 的 §⑩ 与 20（演示模式）。每道闸门下面都写清了它守什么、怎么反证、以及**它现在不能守什么**：
 
 ```bash
-# 1) 对拍：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
-#    只打两栈都存在的 HTTP 路由；为 Java 新增的聚合端点（/api/users/{id}/relation、
-#    /api/articles/{slug}/tips|saved|series-nav、/api/series/mine）Node 侧没有对位路由，
-#    它们的形状契约由闸门 4 在渲染层验，用 1 打会得到 node=404 的假失败。
-node scripts/parity.mjs /api/articles /api/articles/pgvector-gou-yong
-node scripts/parity.mjs --login /api/auth/me          # 带登录态
-node scripts/parity.mjs "/api/search?q=then" /api/checkin /api/topup/orders
-#   目标必须挑"两栈都挂了同方法"的 URL：打一个 Node 没有 GET 的路径（如 /api/series/{id}）
-#   会得到 node=405 java=200 的假失败——那是切流缺口，该由闸门 8 报，不该由对拍报。
+# 1) 对拍（P7f-2 退役，脚本已删）：同一请求打两栈，递归比键集 / 类型 / 数组顺序。
+#    它的宾语是"两套实现"。删掉 app/api/** 之后 Node 不再应答任何 /api，这一跑就是
+#    拿 Java 比 Java——满屏绿却不说明任何事，比红灯危险。
+#    退役不等于"少了一道"：它当年守的那一格由 1′（重放冻结下来的旧实现形状）、
+#    19 的 §⑩（会话/设备/放行清单回库复算）、4 的 §5c（身份真的落到 DOM 上）三道接手，
+#    三道都不依赖对岸存在。要看它本来的样子：git show P7f-1f-b:scripts/parity.mjs
+#    （历史上它的目标必须挑"两栈都挂了同方法"的 URL：打一个 Node 没有 GET 的路径如
+#    /api/series/{id} 会得到 node=405 java=200 的假失败——那是切流缺口，该由闸门 8 报。）
 
 # 1′) 契约基线：闸门 1 的接班人，Node 路由删掉之后仍然在的那道。
 #     contract/ 里每条是一个接口"应答长什么样"的冻结形状，check 拿活应答逐条重放。
-node scripts/contract.mjs freeze            # 从 PARITY_NODE 取样（Node 还在的时候做一次）
-node scripts/contract.mjs check             # 打 PARITY_JAVA 重放
+node scripts/contract.mjs check             # 打 PARITY_JAVA 重放（P7f-2 之后的日常跑法）
 node scripts/contract.mjs check --as=writer --only=article-paid-guest   # 反证跑法：必须红
+node scripts/contract.mjs freeze            # 已经停用：它只会拒绝起跑，原因见下面 ⚠
 #   为什么不是"把应答录下来逐字节比"：值会随时间变（重力排序的先后、views、相对时间、
 #   加热还在不在有效期），录值的基线会在第三天红给空气。所以基线守的是**形状**——
 #   键集 / 类型 / 可空性 / 数组元素形状 / 嵌套层级，这些才是会被一次重构改坏的东西。
@@ -555,16 +595,18 @@ node scripts/contract.mjs check --as=writer --only=article-paid-guest   # 反证
 #   （bool→bool、string→string），纯形状比对会对一次裸奔的解密说 PASS。
 #   反证跑过三条：拿作者身份重放游客的基线 → 红在三条钉住的值上；把基线里一个键删掉 /
 #   把一个类型改成 number → 红并精确指到 comments.[*].id 与 .nickname；复原即绿。
-#   ⚠ 基线的**出处**记在文件里（frozenFromExecutor）。Node 还在时冻结，它的意思是
-#     "Java 必须符合旧实现的形状"；Node 删了之后再 freeze，意思退化成"Java 必须符合 Java
-#     上次的样子"——仍然有用（防自我回归），但不再是换栈正确的证据，所以 freeze 探到
-#     应答方不是 node 时会先警告。
+#   ⚠ 基线的**出处**记在每一份文件里（frozenFromExecutor）。这 30 条记的都是 "node"，
+#     所以它们的意思是"Java 必须符合旧实现的形状"；check 除重放之外还多一项判据：
+#     **30 条出处全部是 node**（31 项里的第 31 项）。为什么要把出处立成判据：Node 删了
+#     之后再 freeze，基线意思就退化成"Java 必须符合 Java 上次的样子"——防自我回归仍然有用，
+#     但它不再是换栈正确的证据，而读的人分不清这两者。所以 freeze 现在直接拒绝写入
+#     （不是警告一声照样覆盖），要加用例得照需求手写一份 JSON 并自标出处。
 
-# 2) 会话互通：两侧各自登录，要求对方后端用自己的完整校验链认下这枚 Cookie
-node scripts/interop-check.mjs
-#   PASS  Node→Java：Java 认下对方签发的会话
-#   PASS  Node→Java：登出后 Java 立即失效（sessions 吊销跨栈生效）
-#   …… 合计 8 项，失败 0 项
+# 2) 会话互通（P7f-2 退役，脚本已删）：两侧各自登录，要求对方后端用自己的完整校验链
+#    认下这枚 Cookie。8 项里有 6 项的主语是"另一侧"——那个主语没了。
+#    剩下的两半各有人接：Cookie 经 rewrite 不被丢 → 闸门 6；"这枚会话到底算不算有效"
+#    → 闸门 19 的 §⑩（签有效但库里已吊销 / 已过期 / uid 不匹配，三种姿势回库复算）。
+#    git show P7f-1f-b:scripts/interop-check.mjs
 
 # 3) 正确性专项：对拍只能证明"一致"，证明不了"都对"
 node scripts/paywall-probe.mjs bo-20260911-1
@@ -632,37 +674,43 @@ node scripts/page-check.mjs
 #     现在每个读函数就是一句 remote 调用，读代码即读映射；要守的是新规矩：
 #     **加一个页面取数点，就给这一道补一条能命中它的断言**，而不是再加一个开关。
 
-# 5) 跨栈认证流程：验证码与会话必须"一侧签发、另一侧消费"才算互通。
-#    同栈自测永远发现不了哈希口径或时效写岔——只有交叉使用会暴露。
+# 5) 认证流程闸门：验证码与会话必须"一侧签发、另一侧消费"，整条生命周期跑通才算成立。
 node scripts/auth-flow-check.mjs
-#   Node 签发→Java 注册 / Java 签发→Node 注册 / 一码两吃被拒 / 假码停在验码分支 /
-#   Node 生成密钥→Java 校验开启→两栈都要二因子→备份码一次一毁→Node 关闭 /
-#   改密保留当前会话并下线其他设备（跨栈可见）…… 25 项
-#   ⚠ 本仓库 .env 里 SMTP 是**真实配置**，直连跑会真发信（注册成功即发欢迎邮件）。
+#   一侧签发→另一侧注册 / 一码两吃被拒 / 假码停在验码分支 / 一侧生成密钥→另一侧校验开启
+#   →两侧都要二因子→备份码一次一毁→另一侧关闭 / 改密保留当前会话并下线其他设备…… 25 项
+#   ⚠ P7f-2 的改判：这道原本的骨头是"两套实现互认"（两栈共用 email_codes / sessions 表，
+#     哈希口径各写各的，只有交叉使用才暴露走岔）。现在只剩一套实现，脚本**开跑先自报**
+#     落在哪一档（executorOf 探两个端口由谁应答），于是同一条用例在两种环境下名字不同：
+#     跨栈时叫"Node 签发 → Java 注册"，同一执行者时叫"入口3299 签发 → 入口3199 注册"。
+#     这不是修辞：一条听起来像跨实现验证的绿，冒充的是它没有的那个宾语。
+#     已经不由这道证明的两件事：口令哈希跨实现互认（只剩一个哈希器）、TOTP 两份实现口径
+#     一致（只剩 Java 一份；脚本自己那份 RFC 6238 留着，它现在是"脚本 vs 被测方"的对照）。
+#   ⚠ 本仓库 .env 里 SMTP 是**真实配置**，直连跑会真发信（每发一次 send-code 就真出一封邮件）。
 #     必须另起一对"邮件降级"临时实例，跑完即停：
-MSYS_NO_PATHCONV=1 SMTP_HOST="" NEXT_DIST_DIR=.next-mailtest \
-  JAVA_BASE=http://localhost:3199 JAVA_ROUTES=/api/auth \
+SERVER_PORT=3199 SMTP_HOST="" mvn -f server/pom.xml spring-boot:run &
+JAVA_BASE=http://localhost:3199 NEXT_DIST_DIR=.next-mailtest \
   node node_modules/next/dist/bin/next dev -p 3299 &
-SERVER_PORT=3199 INKSTACK_MAIL_HOST="" mvn -f server/pom.xml spring-boot:run &
 PARITY_NODE=http://localhost:3299 PARITY_JAVA=http://localhost:3199 \
   node scripts/auth-flow-check.mjs
-#   两个坑：① MSYS 会把 "/api/auth" 改写成 "D:/Git/api/auth"，切流前缀必须带
-#     MSYS_NO_PATHCONV=1；② 临时实例会改写 next-env.d.ts / tsconfig.json 指向
-#     .next-mailtest，提交前记得 revert 这两个文件。
+#   SMTP_HOST 一空，Java 侧就走 dev 降级通道（打印 + 在应答里回显 devCode），脚本才拿得到码；
+#   拿不到码时它每条都停在"取不到码"上判红——那是环境前提不满足，但绝不判绿。
+#   临时实例若用了 NEXT_DIST_DIR，会改写 next-env.d.ts / tsconfig.json 指过去，提交前记得 revert。
 
-# 6) 切流代理路径：浏览器只见 Next 地址，认证请求靠 middleware rewrite 转发。
-#    会在这条路上丢东西的三样是 Set-Cookie、请求体、边缘安全闸口——直连两栈都测不出来。
+# 6) 切流代理路径：浏览器只见 Next 地址，/api/* 全靠 middleware rewrite 转发。
+#    会在这条路上丢东西的三样是 Set-Cookie、请求体、边缘安全闸口——直连测不出来。
 node scripts/proxy-cutover-check.mjs --base=http://localhost:3299
+#   加 --money / --community / --admin / --study / --import / --ai 逐面追加经代理的证据，
+#   每一面都只挑"不改账、不扣墨、不问真上游"的入口（AI 那一面若发现实例接上了真 key 直接判红）。
 #   X-Backend: inkstack-java 由 Java 过滤器打上，是"这条请求确实落在 Java"的唯一硬证据；
-#   同时反向断言 /api/articles 与 /api/articlesXYZ 仍由 Node 应答（切流不能过宽），
 #   并断言跨站 Origin 的写请求在边缘就 403（安全闸口不随切流下沉）。
-#   --keep=/api/xxx  切流范围变了要跟着改：负断言的宾语是"名单外的前缀"，硬编码会让它自己打自己。
-#   --keep-render    整前缀切流（JAVA_ROUTES=/api）时用这个替 --keep：此时已经没有"名单外的
-#                    /api 前缀"，负断言改指两处——① / 、/hot、/archive、/feed.xml、/sitemap.xml
-#                    必须仍由 Next 渲染（rewrite 只挂 /api/，不能把渲染层一起顺走）；
-#                    ② /apiXYZ/* 必须没被转发（抓的是 startsWith("/api/") 退化成 startsWith("/api")，
-#                    那种写法下 Java 会回一个带 x-backend 的 404，正落在这条上）。
-#                    演练命令：JAVA_ROUTES=/api EDGE_API_LIMIT=100000 next dev -p 3400
+#   ⚠ P7f-2 的改判：这道原来有两种跑法——`--keep=<前缀>` 指一个"名单外的 /api 前缀"证明它
+#     没被顺走，或 `--keep-render` 把负断言改指渲染层。app/api/** 删掉之后第一种**没有落点**：
+#     不存在由 Node 应答的 /api 前缀，那条断言只能恒红或恒真，两者都不叫判据。所以现在只剩
+#     一种形状、也不需要开关：① /api/* 每个入口都落在 Java；② / 、/hot、/archive、/feed.xml、
+#     /sitemap.xml 仍由 Next 出；③ /apiXYZ/* 没被顺走（抓 startsWith("/api/") 退化成
+#     startsWith("/api") 那种写法——Java 会回一个带 x-backend 的 404，正落在这条上）。
+#     传 --keep / --keep-render 会被拒绝起跑（退出码 2）：静默忽略两个失效开关，会让下一个人
+#     以为自己按老姿势跑过了这一道。
 
 # 7) 资金闸门：对拍只能比"读到的东西"，钱要的三件它表达不了——
 #    ① 同一笔写一侧执行、另一侧看得懂（已购/已打包/已签/已付 的幂等分支跨栈一致）；
@@ -676,19 +724,40 @@ node scripts/money-check.mjs
 #   这一道闸门抓到的真 bug：六路并发签到 Java 返回 500——同主键并发插入 InnoDB 未必给
 #   DuplicateKey，也可能给死锁回滚，Spring 翻译出的就不是 DataIntegrityViolationException。
 #   Node 侧同样有这个洞（dev 模式编译串行化掩盖了它），两侧一并补了"锁冲突重试三次"。
-#   ⚠ NODE 侧整前缀切走之后（PARITY_NODE 指向 JAVA_ROUTES=/api 的实例）：六处
-#     「并发：确实两栈各答了一半」记 SKIP 而非 PASS——它断的是并发**来自两个进程**，
+#   ⚠ P7f-2 之后 PARITY_NODE 与 PARITY_JAVA 背后是同一个执行者（middleware 见 /api/ 就转发），
+#     所以六处「并发：确实两栈各答了一半」**恒记 SKIP** 而非 PASS——它断的是并发来自两个进程，
 #     单栈时这个前提没了（"只一路成交"可能只是一把进程内锁的功劳，也可能真是行锁，
-#     这一跑不再能区分）。其余判据一条不少。反证过：PARITY_NODE 打真 Node 时 100/100 零 SKIP。
+#     这一跑不再能区分）。其余判据一条不少。这不是把红改成灰蒙过去：那道判据由 gate-executor
+#     的 isCrossStack 探出来，**谁把某条链路重新指回另一套实现，它就自动翻回 PASS**，
+#     不需要人记着去改脚本。P7f-1 演练时反证过：打真 Node 的那一档 100/100 零 SKIP。
 
-# 8) 路由清单：切流是**前缀级**的，而两栈在同一 URL 上的方法集合并不天然相同——
-#    Node 的 GET /api/series 是"我的专栏"（要登录），Java 的是公开合集架。
-#    切了就把书房管理器打成 200 空列表，且不会有任何报错，对拍也测不出（只比两边都有的路由）。
-node scripts/route-inventory.mjs          # 列缺口 + 算出当前可整体切流的最长前缀
+# 8) 路由盘点（P7f-2 改版）：前端与渲染层点得到的每一个 /api URL，Java 侧必须有路由接得住。
+node scripts/route-inventory.mjs          # 三条判据，红就退出码 1
 node scripts/route-inventory.mjs --json   # 机器可读
-#   退出码恒 0：这是进度条不是判分。改完任一侧路由都要重跑一次再决定切流范围。
-#   比对前会把 Java 的 `{provider}` 这类通配段与 Node 的字面目录（app/api/auth/github）对上，
-#   否则已迁完的 OAuth 会被报成三条缺口——清单一旦开始说谎，就没人在切流前查它了。
+#   为什么改版：原版算的是**两栈差分**——逐个 URL 模式核对"Node 有的方法 Java 是不是也有"，
+#   再算出"当前可以整体写进 JAVA_ROUTES 的最长前缀"。那个问题的前提是"切流还没切完"。
+#   app/api/** 删掉之后"Node 有什么"这个集合恒等于空：缺口恒 0、方法集合恒等、可切前缀恒为
+#   /api——三条判据同时失去宾语。**一道任何错误都无法让它红的闸门留着，只会伪装"还在守"。**
+#   所以把它想证明的那个从来没变过的命题留下，换一条算得出来的判据。现在三条：
+#     §1 调用点覆盖：AST 扫 app/**（不含 app/api）、components/**、lib/**，收出 107 处调用点，
+#        逐个要求 Java 有同 URL 同方法的路由（方法认不出来的按 URL 比，不许藏）。
+#        四层规则：fetch(字面量,{method}) / 本文件里"把参数转手给 fetch"的辅助函数（post()、
+#        ask() 那一类）/ JSX 的 href·action·src 与 location.href=（浏览器一定发 GET）/ 兜底 "?"。
+#     §2 遗留 HTTP 面登记表：app/api 下的 route.ts 必须与 LEGACY_ROUTES 逐条相等。
+#        删路由与清空这张表是同一个提交——中间那一步会红，那个红就是它在工作。
+#        现在是空表，但它改守反向：谁再往 app/api 下建一个 route.ts，就是往已拆掉的
+#        第二个后端里回填代码（闸门 18 同款）。
+#     §3 middleware 不许再读 process.env.JAVA_ROUTES：/api/* 的改写与任何名单无关。
+#   三条都反证过：加一处 fetch("/api/nope/nothing") 与 fetch("/api/articles",{method:"DELETE"})
+#   → §1 两条分别红在"没有这条 URL 模式"与"该 URL 只有 [GET,POST]"；建一个 app/api/ping/route.ts
+#   → §2 报"新面孔"；往 middleware 里补一句 process.env.JAVA_ROUTES 的读取 → §3 红。复原即全绿。
+#   ⚠ §3 判的是"还读不读这个开关"（正则钉 process\.env\.JAVA_ROUTES），不是"文中有没有出现过
+#     这个词"——注释里还得留一段话解释它为什么退役，拿字符串命中当判据会把那段说明也判成违规，
+#     那种红只会逼人删掉解释。
+#   ⚠ 比对前会把 Java 的 `{provider}` 这类通配段与字面目录（原 app/api/auth/github）对上，
+#     否则已迁完的 OAuth 会被报成缺口——清单一旦开始说谎，就没人再信它。
+#   ⚠ 用 TypeScript 的 AST 而不是正则：字面量藏在 JSX 属性里、模板串的 ${} 里、
+#     或者藏在注释里（闸门 18 就栽过"注释骗过正则"）。
 
 # 9) 社区互动闸门：评论/点赞/收藏/关注/举报/站内信这六条链路，各有对拍表达不了的洞——
 #    奖励日上限"拒了不能吞额度"、举报防重靠的是锁而不是唯一键、并发 toggle 后计数要与关系行守恒。
@@ -863,28 +932,33 @@ node scripts/schema-check.mjs
 ```
 
 ```bash
-# 17) 限流共享：登录 / 改密 / 2FA / 发码的失败计数必须是两栈共用的同一本账。
+# 17) 限流共享：登录 / 改密 / 2FA / 发码的失败计数只有一本账，哪个入口来的都记在这本上。
 node scripts/rate-limit-check.mjs
-#   · 这道闸门不是对拍，对拍抓不到它。限流的行为是"第 6 次要拒绝"，而两栈各算各的时
-#     第 11 次仍然放行——**单看任何一栈的日志都完全正常**，两边还各自报出"看着一样"的
-#     剩余次数。所以判据只能是跨栈的：一侧记的数另一侧立刻看得见、一侧清零另一侧跟着解锁。
-#   · 开跑先自证"两侧真的是两个执行者"：拿 x-backend 验打到 Node 端口的那次登录确实由
-#     Node 应答。/api/auth 若已整前缀切走，"跨栈累计"就退化成同一个执行者自己跟自己比、
-#     必然满屏全绿——闸门直接停并给出改法（这与闸门 1/3 开跑读 x-backend 是同一类防线）。
-#   · ①max=5 的桶按 node·node·java·node·java 交替记：每次的"还可尝试 N 次"都必须精确，
-#     第 5 次当场就锁（先记再判），随后 Node 侧 429、行数是 5、两栈 Retry-After 相差 ≤3 秒、
+#   · 这道闸门不是对拍，对拍抓不到它。限流的行为是"第 6 次要拒绝"，而双轨期两栈各算各的，
+#     同一 IP 在 Node 记 5 次、在 Java 也记 5 次，两边都觉得自己没锁，第 11 次仍然放行——
+#     **单看任何一栈的日志都完全正常**。所以判据只能是"换个入口接着记"：一侧记的数另一侧
+#     立刻看得见、一侧清零另一侧跟着解锁。
+#   · P7f-2 之后这里的"两个入口" = **经 Next middleware 代理** 与 **直连 Java**，不再是两套
+#     实现。命题从来没变（计数只有一条路径），变的是反例还能不能存在：现在只剩"有人往进程里
+#     塞回一个内存桶"这一种走法，而 §⑤ 钉的正是它。开跑前置也跟着翻了面：从前要求
+#     "打到 Node 端口那一发**不许**带 x-backend"（带了说明对岸被切走、这道闸门的宾语没了），
+#     现在要求**两个入口都带** x-backend——这不再是防线，而是这一跑成立的前提。
+#   · ①max=5 的桶按两个入口交替记：每次的"还可尝试 N 次"都必须精确，
+#     第 5 次当场就锁（先记再判），随后另一个入口 429、行数是 5、两入口 Retry-After 相差 ≤3 秒、
 #     被锁期间的请求不再往账本里加行（否则被锁的人会越锁越久）。
 #   · ②窗口判定用的是数据库的钟：把该桶的行推到 16 分钟前 → 必须解锁，且命中时顺手 prune
 #     掉这 5 条旧行（只剩刚记的 1 条）。反证跑过：只推 3 分钟仍然 429，说明这条不是
 #     "只要 UPDATE 一下就变绿"；把表改名后登录照旧 401 而不是 500，说明库挂了是放行不是锁死。
-#   · ③成功登录的清零跨栈有效（Node 记的两次失败由 Java 的成功登录抹掉）。
-#   · ④同一张表容得下不同上限：send-code 的 max=10 同样跨栈记账。这段刻意用"已注册邮箱 +
-#     purpose=register"打——两栈都在记完次数之后才判重复，于是每次都 409 且一封邮件都不发，
+#   · ③成功登录的清零跨两个入口（一个入口记的失败，另一个入口登录成功要能抹掉）。
+#   · ④同一张表容得下不同上限：send-code 的 max=10 同样共用记账。这一段刻意用"已注册邮箱 +
+#     purpose=register"打——两个入口都在记完次数之后才判重复，于是每次都 409 且一封邮件都不发，
 #     闸门还额外查了 email_codes 行数没变（"闸门不打真邮件通道"这条纪律也要有证据）。
 #   · ⑤边缘闸（120 次/分/IP）**故意**留在进程内存：它每个请求都要过一次，搬进库等于给每个
 #     请求加一次写，DoS 刹车就变成 DoS 放大器。所以 30 个请求之后必须一条 api:* 行都没有。
-#     同段还静态钉住两栈都没留内存桶兜底——留一条退路就等于下次改动时悄悄退回去。
-#   · ⑥是反向围栏：什么都不带时两栈解出的 ip 本来就不同（Next 注入自己看到的 socket 对端、
+#     同段还钉住"计数只有一条路径"：`lib/rate-limit.ts` **存在本身就是红**（P7f-2 之前这条
+#     读的是那个文件的源码，现在那个文件已随 Node 的 /api 实现一起删掉，判据反而更硬），
+#     而 Java 的 LoginGuard 里不许出现 ConcurrentHashMap——留一条内存退路，下次改动就会退回去。
+#   · ⑥是反向围栏：什么都不带时两个入口解出的 ip 本来就不同（Next 注入自己看到的 socket 对端、
 #     Tomcat 落 local），同一个客户端会落进两个桶。生产由 nginx 写 x-real-ip + TRUST_PROXY=1
 #     让两侧同源；哪天兜底被对齐，这条就该变红，提醒把它翻成正向断言。
 #   · 共 18 项。⚠ 计数落在库里就不再随进程重启而清零：连跑或换实例重跑时，
@@ -898,6 +972,10 @@ node scripts/page-sql-inventory.mjs --verbose
 #     **JSX 标签按一次调用算**（`<AdminConsole />` 不是 CallExpression），
 #     只要可达路径上出现 getPool / pool.query / beginTransaction 就算"还在 Next 进程里摸 MySQL"。
 #     lib/db.ts 是管道、app/api/** 与 lib/data-legacy.ts 是待删的遗留 HTTP 面，两者都排除在计数外。
+#     ⚠ 这三条排除在 P7f-2 之后**已经没有宾语**（三个路径都不存在了），但规则留着并说清为什么：
+#     它们不是"过滤掉一些噪音"，而是"如果谁把这些文件重建回来，它们仍然不算渲染层的债"。
+#     一条永不命中的排除不会造成假绿（它只会少算，而少算的对象压根不存在），
+#     而删掉这条排除会让"重建 app/api"变成红——那时候它是会响的。
 #   · 为什么差分闸门抓不到它：这些读**从来没有 HTTP 面**。运营台是 Server Component 直调
 #     lib/data.ts，/api/admin/* 那四条路由只有 POST（写侧）。没有对等可请求面，对拍、契约基线、
 #     路由盘点三道就都没有它们的位置——三道全绿而"页面只剩一条取数路"这句话是错的。
@@ -977,73 +1055,82 @@ node scripts/pagereads-check.mjs
 #     做反证时留了一条操作教训：**备份清单要从变异清单来**，不是从"我记得动过哪几个文件"来——
 #     那一轮四个变异动到两个 mapper，备份却只按四个控制器收，最后靠 `git diff --stat` 归零才敢确认复原。
 #     开跑先问 DATABASE()，连到真库 inkstack 会警告。
-#   · 也可以改打切流实例验代理路径：`PARITY_JAVA=http://localhost:3400 node scripts/pagereads-check.mjs`
+#   · 也可以改打切流实例验代理路径：`PARITY_JAVA=http://localhost:3299 node scripts/pagereads-check.mjs`
 #     → 同样全绿，说明这些读经 Next rewrite 到 Java 与直连 Java 答得一模一样。
+
+# 20) 演示模式：JAVA_BASE 为空的那一档必须"渲染得出来"，而不是把站点变成一堆 500。
+node scripts/demo-mode-check.mjs          # 自己起一台 3399 的临时实例，跑完即停（约 40s）
+#   · 这一道是 P7f-2 新立的，起因是 P7f-1f-b 我自己交出去的一个回归：迁渲染层最后四条
+#     进程内 MySQL 时，`remoteCurrentUser` 少写了一句 `if (!javaReady()) return null`。
+#     配了 JAVA_BASE 的实例上它一字不错、所有闸门全绿；而"clone 下来先跑起来看界面"这条
+#     产品承诺走的正是**没配 JAVA_BASE** 的那一档，`javaBase()` 直接抛，于是每个页面 500。
+#     **一条判据若它的前提被所有在跑的实例共享，它就没在守另一半。**
+#   · §0 先自证"我打到的这台真的在演示模式"（/api/* 回 503 且不带 x-backend）——这条不成立
+#     时后面每一条绿都不说明任何事。§1 二十三个页面（含四个需要身份的页在游客态）必须
+#     200 或 3xx，且页面上不许漏出取数异常的文本。§2 渲染出来的必须是 lib/demo-data.ts
+#     的内容（标记从那份文件现读，不抄进脚本）、身份页走的必须是游客分支、
+#     而运营台必须**自报"这是演示数据"**——兜底假数最坏的不是假，是没说自己假。
+#   · 反证跑过：删掉 `remoteCurrentUser` 那句守卫 → **29 项红 22 项**（每个页面 500，
+#     且"漏出异常文本"逐条命中）。另一侧也红过一次，而且是判据太宽：第一版关键词表里有
+#     裸的 "JAVA_BASE"，于是正常状态下 /admin 就红——页眉那句"演示数据 · 未配置 JAVA_BASE"
+#     是产品故意写给人看的。判据太宽和太窄一样会骗人。
+#   · ⚠ 起实例这件事本身是这一道的一部分：Windows 下 `child.kill` 只杀得到 next 那个外壳，
+#     端口由它的子进程占着，所以清理走 `taskkill /T /F`；实例用独立 `NEXT_DIST_DIR`，
+#     与 3200 那台开发实例不抢 manifest。
 ```
 
-切流与回滚：
+演示模式与回滚：P7f-2 之后一台实例只有一条路
 
 ```bash
 # .env
-JAVA_BASE=http://localhost:3101
-JAVA_ROUTES=/api/articles            # 逗号分隔前缀；* 为全切；留空即整套回滚
+JAVA_BASE=http://localhost:3101   # 非空 = 有后端；留空 = 演示模式（页面渲染 lib/demo-data.ts）
 ```
 
-前缀太粗时可用**段通配**逐条切：条目里的 `*` 只匹配一个路径段，其余字符按字面转义，
-命中判断仍是 `^前缀(?:/|$)`。所以 `/api/articles/*/unlock` 只把解锁这一个动作交给 Java，
-同前缀下尚未迁完的分支继续留在 Node——P4 的资金端点就是这样切走的。
+`JAVA_ROUTES` 已经不存在了。原来那套"逗号分隔前缀、留空即整套回滚"随 `app/api/**` 一起退役——
+Node 侧没有任何能应答 /api 的实现之后，清空那个开关得到的是一堆 404，而不是"回滚到 Node"。
+**一个含义已经变掉的开关比没有开关更坏**：它会让人以为还能回滚。于是回滚现在是工程手段——
+`git revert` P7f-2 那一系列删除提交并重启（回回来的不只是路由文件，还有读 `JAVA_ROUTES`
+的那版 middleware），不是一个配置项。
 
-**P7f-1 之后这一段已经可以整前缀切：`JAVA_ROUTES=/api`。** 闸门 8 现算的结论是
-58 个 URL 模式全部被 Java 覆盖、方法集合零差异、语义冲突登记表为空。
-上一版这里罗列的二十来条段通配是有意的历史形态——那时 `--keep=/api/articles` 那条
-"没在名单里的前缀不得被带走"的负断言需要一个落点；整前缀切走之后那个落点不存在了，
-所以闸门 6 改用 `--keep-render` 把负断言改指渲染层（见上面闸门 6 的说明）。
+middleware 对 `/api/` 的判定收成一句 `pathname.startsWith("/api/")`，两档：
 
-演练用的"已切流"实例（第二个 dev 实例必须给独立 distDir；`EDGE_API_LIMIT` 见闸门 7/9 那段）：
+- 配了 `JAVA_BASE` → rewrite 到它，并把浏览器看到的 host/proto 显式写进
+  `x-forwarded-host` / `x-forwarded-proto`。Next 的 rewrite 会覆写 `Host`，不补这两句的
+  表现是"导出的 Markdown 里每个绝对链接都变成 `http://localhost:3101/...`"——
+  接口全 200、没有任何报错，只有用户下载到的文件是坏的。
+- 没配 → `/api/*` 一律 **503 + Retry-After**，不放行去撞一个 404：404 说的是"没有这个接口"，
+  真相是"这台没配后端"。页面照常渲染演示数据。这一档由闸门 20 守着。
+
+日常跑写侧/代理类闸门要的那对临时实例（邮件降级 + AI 不接上游，跑完即停）：
 
 ```bash
-MSYS_NO_PATHCONV=1 NEXT_DIST_DIR=.next-cutover \
-JAVA_ROUTES=/api EDGE_API_LIMIT=100000 \
-  node node_modules/next/dist/bin/next dev -p 3400
+SERVER_PORT=3199 SMTP_HOST="" DEEPSEEK_API_KEY="" AGENT_SERVICE_URL="" \
+  mvn -f server/pom.xml spring-boot:run &
+JAVA_BASE=http://localhost:3199 NEXT_DIST_DIR=.next-cutover EDGE_API_LIMIT=100000 \
+  node node_modules/next/dist/bin/next dev -p 3299 &
 
-# 经代理的写链路逐道重跑：把 PARITY_NODE 指过去即可，其余不变
-node scripts/proxy-cutover-check.mjs --base=http://localhost:3400 --keep-render \
-     --money --community --admin --study --import
-PARITY_NODE=http://localhost:3400 node scripts/studio-check.mjs      # 51/51
-PARITY_NODE=http://localhost:3400 node scripts/study-check.mjs       # 117/117
-PARITY_NODE=http://localhost:3400 node scripts/admin-check.mjs       # 65/65
-PARITY_NODE=http://localhost:3400 node scripts/page-check.mjs        # 50/50
-PARITY_NODE=http://localhost:3400 node scripts/money-check.mjs       # 94 项 + 6 SKIP
-PARITY_NODE=http://localhost:3400 node scripts/community-check.mjs   # 103 项 + 5 SKIP
-PARITY_NODE=http://localhost:3400 node scripts/paywall-probe.mjs bo-20260911-1   # 差分项记 —
-PARITY_NODE=http://localhost:3400 node scripts/search-leak-probe.mjs bo-20260911-1
-node scripts/contract.mjs check --base=http://localhost:3400         # 30/30，与对岸无关
+node scripts/proxy-cutover-check.mjs --base=http://localhost:3299 \
+     --money --community --admin --study --import --ai
+PARITY_NODE=http://localhost:3299 PARITY_JAVA=http://localhost:3199 \
+  node scripts/auth-flow-check.mjs                       # 25/25
+PARITY_NODE=http://localhost:3299 node scripts/studio-check.mjs      # 51/51
+PARITY_NODE=http://localhost:3299 node scripts/study-check.mjs       # 117/117
+PARITY_NODE=http://localhost:3299 node scripts/admin-check.mjs       # 65/65
+PARITY_NODE=http://localhost:3299 node scripts/page-check.mjs        # 64/64
+PARITY_NODE=http://localhost:3299 node scripts/money-check.mjs       # 94 项 + 6 项恒 SKIP
+PARITY_NODE=http://localhost:3299 node scripts/community-check.mjs   # 103 项 + 5 项恒 SKIP
+node scripts/contract.mjs check --base=http://localhost:3299         # 31 项，与对岸无关
 ```
+
+`EDGE_API_LIMIT=100000` 是给临时实例用的：这些闸门一轮几百发，不抬档位会把自己刷成 429，
+而"满屏 429"读起来和"两栈不一致"一模一样可信。生产实例不设这个变量（默认 120 次/分/IP）。
+`--ai` 那一段还要那个实例的 AI 面落在 demo 档：只要处在 live/透传档，一问就扣 5 点墨、
+就去问真上游，所以上面那条命令把 `DEEPSEEK_API_KEY` 与 `AGENT_SERVICE_URL` 一起抹空；
+闸门自己会先查 `/api/agent/status`，不是 demo 就记 SKIP 而不是发问——**宁可不测，
+也不拿用户的墨水去赌配置**。
 
 `contract.mjs check` 打谁都是同一句判据——它比的是一条活应答有没有长成基线那个形状，
-所以整前缀切流之后它是唯一还在守读侧契约的一道。
-
-对拍（闸门 1）在 3400 上会**直接拒绝起跑**：
-
-```
-站点 http://localhost:3400 的接口由 "java" 应答，不是 node。
-  Node 路由已删除的话，这一道本来就不该跑：改用 node scripts/contract.mjs check
-```
-
-这不是切流切坏了，是它比的是"同一份数据、两套实现"——两侧同一个执行者时满屏绿字不说明任何事。
-判据在 `scripts/gate-executor.mjs`：拿 Java 自己盖的 `x-backend` 反推"这一发到底谁答的"，
-探不出 Node 就停下。**接班的是闸门 1′**（`contract.mjs check`），见上一节。
-
-`--ai` 那一段要**换一对配置**再跑：AI 面只要落在 live/透传档，一问就扣 5 点墨、就去问真上游，
-所以那个实例必须两侧都在 demo 档（闸门自己会先查 `/api/agent/status`，不是 demo 就记 SKIP 而不是发问）：
-
-```bash
-MSYS_NO_PATHCONV=1 NEXT_DIST_DIR=.next-cutover \
-JAVA_BASE=http://localhost:3194 AGENT_SERVICE_URL= DEEPSEEK_API_KEY= \
-JAVA_ROUTES=/api/ai,/api/agent node node_modules/next/dist/bin/next dev -p 3400
-node scripts/proxy-cutover-check.mjs --ai --base=http://localhost:3400
-# 3194 是闸门 14 那对"裸"Java 实例（见下一节的 ③）：同一个工程、同样的空配置，换端口而已
-```
+所以 Node 路由删掉之后它是唯一还在守读侧契约的一道（`freeze` 已停用，见闸门 1′ 那一节）。
 
 书房那六条是**整前缀**切的（`/api/drafts` 等下面没有未迁分支），`/api/series` 从 P6d 起也是整前缀：
 它的 `GET` 曾经是两栈同 URL 却不同义（Node=我的专栏 / Java=公开合集架），所以只能按段通配留一条
@@ -1059,13 +1146,19 @@ P6b 之后 `/api/ai` 与 `/api/agent` 两个前缀整段安全，P6d 之后闸�
 
 ## 🔒 会话互通是字节级的
 
-两套后端共用同一枚 Cookie，任何一处偏差都会把用户劈成"半登录态"。这些约定写死在代码与单测里：
+换栈期两套后端共用同一枚 Cookie，任何一处偏差都会把用户劈成"半登录态"。这些约定写死在代码与单测里。
+
+⚠ P7f-2 之后签名方只剩 Java 一套，于是这份清单的性质变了：它不再是"两侧必须逐字节对齐"的
+**差分约束**，而是"Java 单方面必须守住的历史事实"——守的是老用户手里那枚已经签发的 Cookie
+（换了键序或签名口径就是全站掉登录）、`sessions.token_hash` 那把 sha256 的算法，以及
+`contract/` 里冻结下来的旧实现形状。**一条差分约束在对岸消失后不会自动变成不变量**，
+所以这一节该留着，而且要比以前更当回事。
 
 - Cookie 值 = `base64url(JSON).base64url(HMAC-SHA256)`，**签名覆盖的是那段 base64url 字符串本身**的 UTF-8 字节，不是解码后的 JSON；载荷键序固定 `sid,uid,exp`，`exp` 是毫秒
 - HMAC 密钥是 `SESSION_SECRET` 的原始 UTF-8 字节，不做任何 KDF——两侧必须是同一个值
 - 口令哈希 `scrypt(N=16384, r=8, p=1, keylen=64)`，存储格式 `32位hex盐:128位hex派生钥`；**喂给 scrypt 的盐是那串 hex 字符本身，不是解码后的 16 字节**（按 16 字节算会得到完全不同的哈希）
-- `sessions.token_hash` 存整枚 Cookie 值的 sha256；登出 / 改密 / 封号靠这张表跨栈即时生效
-- `expires_at` 由 MySQL `FROM_UNIXTIME()` 解释，两侧都不改写连接会话时区，否则同一时刻会被判成不同有效期
+- `sessions.token_hash` 存整枚 Cookie 值的 sha256；登出 / 改密 / 封号靠这张表即时生效
+- `expires_at` 由 MySQL `FROM_UNIXTIME()` 解释，不改写连接会话时区，否则同一时刻会被判成不同有效期
 - `Secure` 标志跟随站点协议（http 部署带上会让浏览器拒收 Cookie，表现为"登录成功却仍是游客"）
 - 付费墙：未解锁读者的正文在 **SQL 层**就被 `SUBSTRING_INDEX(md_content, '\n', 6)` 截断，全文绝不进结果集——先取全文再判权限等于没设防
 
@@ -1109,10 +1202,11 @@ mvn spring-boot:run                  # http://localhost:3101
 
 ```
 .
-├── app/                    # Next.js App Router：页面 + 尚未迁移的 Node API
-├── components/ lib/        # 前端组件与设计层；lib/data.ts=页面取数（只问 Java），
-│                           #   lib/data-legacy.ts=搬出来的 Node 读 SQL（只服务 app/api/**，P7f 删）
-├── middleware.ts           # 安全头 + 限流 + CSRF + JAVA_ROUTES 切流
+├── app/                    # Next.js App Router：**只有页面**。58 个 app/api/**/route.ts 已在
+│                           #   P7f-2 删除，"谁应答 /api"这件事不再存在于这一层
+├── components/ lib/        # 前端组件与设计层；lib/data.ts=页面取数（只问 Java 或只渲染演示数据），
+│                           #   lib/java-source.ts=那一句句 remote 调用本身
+├── middleware.ts           # 安全头 + 限流 + CSRF + /api/* 全量 rewrite（没有路由名单）
 ├── server/                 # ⭐ Spring Boot 后端（Maven 模块）
 │   ├── settings.xml        #    工程内 Maven 镜像（不改全局）
 │   └── src/main/java/com/inkstack/
@@ -1125,15 +1219,18 @@ mvn spring-boot:run                  # http://localhost:3101
 │       │                                     #   Node 的取值语义与口径，逐条对齐的落点
 │       └── web/                              # 参数解析器、ClientMeta、后端标记
 ├── db/schema.sql           # 建表脚本（含 ngram 全文索引）
-├── contract/               # 闸门 1′ 的冻结基线：每个接口一份"应答该长成这样"（30 条）
-├── scripts/                # 二十道闸门（parity / contract-check / interop / paywall / page-check
+├── contract/               # 闸门 1′ 的冻结基线：每个接口一份"应答该长成这样"（30 条，全部冻自 Node 时代）
+├── scripts/                # 闸门（contract / paywall-probe / search-leak-probe / page-check
 │                           #   / auth-flow / proxy-cutover / money-check / route-inventory
 │                           #   / community-check / studio-check / admin-check / study-check
 │                           #   / import-check / ai-check / agent-engine-check / schema-check
-│                           #   / rate-limit-check / page-sql-inventory / pagereads-check）
+│                           #   / rate-limit-check / page-sql-inventory / pagereads-check
+│                           #   / demo-mode-check，外加 gate-executor.mjs 那个"谁在应答"探针）
 │                           #   + 种子与运维脚本
 └── docs/                   # 预览图与集成方案
 ```
+（`scripts/parity.mjs` 与 `scripts/interop-check.mjs` 不是漏写：它们随对岸一起退役了，
+ 想看跑法 `git show P7f-1f-b:scripts/parity.mjs`。）
 
 ## ⚙️ 环境变量
 
@@ -1142,14 +1239,15 @@ mvn spring-boot:run                  # http://localhost:3101
 | 变量 | 说明 |
 |---|---|
 | `DATABASE_URL` | MySQL 连接串；Java 侧由脚本派生成 JDBC |
-| `SESSION_SECRET` | **两栈必须同值**，否则会话互不认 |
-| `JAVA_BASE` / `JAVA_ROUTES` | 双轨切流开关（见上）。`JAVA_BASE` 现在同时决定**页面取数问谁**：非空 → 页面只问 Java（Java 挂了页面就 500，不静默回落）；留空 → 页面渲染 `lib/demo-data.ts` 的演示数据。`JAVA_ROUTES` 只管 HTTP 接口，**P7f-1 之后可以直接写 `/api`**（整前缀切，闸门 8 现算无缺口）；切到这一档时跨栈差分的三道闸门会拒绝起跑，这是设计 |
+| `SESSION_SECRET` | 换栈期两栈必须同值（不同值表现为"另一侧完全认不出这枚 Cookie"）。P7f-2 之后只有 Java 校验它，但它仍是**已下发的那枚 Cookie 的验证密钥**：换值等于全站掉登录，不是"改个配置" |
+| `JAVA_BASE` | "有没有后端"的总闸，同时决定两件事：① 页面取数——非空即只问 Java（问不到就抛、页面 500，绝不静默回落成演示数据），留空 = 演示模式渲染 `lib/demo-data.ts`；② HTTP——middleware 见 `/api/` 就转发给它，**没有名单**。留空时 `/api/*` 一律 503 而不是 404。这一档由闸门 20 守着 |
+| ~~`JAVA_ROUTES`~~ | **已退役（P7f-2）**，随 `app/api/**` 一起。原来它是"逗号分隔前缀、留空即整套回滚"；Node 侧没有能应答 /api 的实现之后，清空它只会得到一堆 404 而不是回滚。**一个含义已经变掉的开关比没有开关更坏**，所以整条删掉；回滚请 `git revert` P7f-2 那一系列提交 |
 | `EDGE_API_LIMIT` | Next 边缘那道全站 API 滑窗的档位，留空 = 每 IP 每 60 秒 120 次。留这个口子有两个理由：出口共用一个公网 IP 的用户群会被 120 误伤；以及跑批量闸门时只给演练实例抬档——闸门一次上百发、全来自同一个回环地址，刷爆之后的 429 读起来和"两栈不一致"一模一样 |
 | ~~`DATA_VIA_JAVA`~~ | **已退役（P7e′）**：页面只剩一条取数路，逐函数开关没有东西可切了。`x-data-source` 应答头同时删除——一个含义会变掉的信号比没有信号更坏 |
 | `NEXT_PUBLIC_SITE_URL` | 站点地址；决定会话 Cookie 是否带 `Secure` |
 | `TRUST_PROXY` | 反代后设 `1`，限流与审计才取真实 IP |
-| `AGENT_SERVICE_URL` | 旧的 Python 分身服务地址（P6c 起仓库里已无该服务）。配了它，Java/Node 仍会把问答透传过去——留着是为了兼容既有部署，新部署请用下面的引擎 |
-| `AGENT_ENGINE` | `off`（默认）或 `spring-ai`。`spring-ai` = 启用 Java 侧智能体引擎（Spring AI + 文章检索工具）。**只有 Java 侧有这个引擎**，开了就必须把 `/api/ai`、`/api/agent` 整前缀切给 Java |
+| `AGENT_SERVICE_URL` | 旧的 Python 分身服务地址（P6c 起仓库里已无该服务）。配了它，Java 仍会把问答透传过去——留着是为了兼容既有部署，新部署请用下面的引擎 |
+| `AGENT_ENGINE` | `off`（默认）或 `spring-ai`。`spring-ai` = 启用 Java 侧智能体引擎（Spring AI + 文章检索工具）。这个引擎只有 Java 有，而 `/api/ai`、`/api/agent` 自 P7f-2 起**恒由 Java 应答**，所以这里没有"切过去"这一步了——它现在纯粹是引擎档位开关 |
 | `AGENT_MODEL_BASE_URL` / `AGENT_MODEL_API_KEY` / `AGENT_MODEL_NAME` | 引擎接的 OpenAI 兼容端点与模型名，默认指向 DeepSeek 的 `/v1` 并复用 `DEEPSEEK_API_KEY`；换百炼只改这三行 |
 | `DEEPSEEK_API_KEY` | 没有分身服务时的降档判据（有 Key → `live`，无 → `demo`）；同样派生给 Java。**跑闸门时不要把真 Key 写进 `.env`**：`/api/ai/write` 的计费链路会照着它去问真上游，烧的是账号里的墨水 |
 | `DEEPSEEK_BASE_URL` | live 通道的大模型地址，默认官方。**留这个口子是给闸门指的**：`ai-check` 把它指向自己的 SSE 夹具，否则"上游 503 不许扣墨"这类用例每跑一次就真发一次请求 |

@@ -8,20 +8,29 @@
 // 原实现走的是「先扣后生成、失败再退分」：退分本身一失败就永久丢墨，模板兜底也照扣，
 // 文案还谎报「已退回」。所以本闸门把「兜底必不扣墨」与「探针拦住就不该问上游」钉成硬断言。
 //
-// 另一条只有 AI 面才有的红线：**四段演示模板必须逐字节一致**。它是 Node 侧的字符串常量，
-// Java 重抄一遍，少一个前导换行肉眼看不出来——而这段文字直接给读者看。
+// 另一条只有 AI 面才有的红线：**四段演示模板必须逐字节一致**。模板原文是 Node 时代的字符串
+// 常量，Java 重抄了一遍，少一个前导换行肉眼看不出来——而这段文字直接给读者看。
+//
+// P7f-2 的改判（与闸门 13 同一处理，一条判据都没减）：这里的"两个入口"历史上叫 Node 与 Java
+//   （判据文案当时写作"两栈"）。现在它们是经 Next 代理与直连 Java，于是"两侧逐字节相同"
+//   从"两套实现抄得一样"降成"同一套实现经 rewrite 之后输出没被改坏"——仍然是有宾语的判据
+//   （NDJSON 分帧、编码、Set-Cookie 都会在这一层被动过），但它**不再能证明抄得对**。
+//   "抄得对"由两处独立承担：本文件的期望文本是**手抄常量**（见 demoText 那一段），
+//   以及闸门 1′ 冻在 contract/ 里的旧实现形状。**降了档的判据必须改名**——留着旧名字，
+//   下一个人会以为这里还有一套 Node 在跟 Java 逐字节对抄。
 //
 //   node scripts/ai-check.mjs            跑完把余额与流水复原
 //   node scripts/ai-check.mjs --keep     保留现场
 //
 // 前提（三对实例，各测一条通道；少一对就有整段用例跑不到，闸门会直接停下说明缺哪一对）：
-//   ① 常规两栈（Node 3200 / Java 3101）——只测 /api/ai/write 的模板兜底与入参校验，
-//      不在上面问分身：**这台机器的 shell 里有真 DEEPSEEK_API_KEY**，登录后一句提问就会
-//      走 live 通道打到真大模型、真扣墨。所以 ask 的用例一律在 ② ③ 上跑。
+//   ① 常规那对（Next 3200 → Java 3101）——只测 /api/ai/write 的模板兜底与入参校验，
+//      不在上面问分身：**只要环境里带着真 DEEPSEEK_API_KEY，一句提问就会走 live 通道打到
+//      真大模型、真扣墨**，所以 ask 的用例一律在 ② ③ 那对上跑。
+//      ⚠ AI 的三个配置变量现在**只有 Java 侧读**（Node 那份 ai/agent 实现随 app/api/** 一起
+//      删了），Next 那一侧只需要 JAVA_BASE 指对，不必再抄一遍 AGENT_SERVICE_URL / DEEPSEEK_API_KEY。
 //   ② 一对「接了夹具」的实例，测分身透传与 DeepSeek SSE 两条通道：
-//        MSYS_NO_PATHCONV=1 NEXT_DIST_DIR=.next-aitest \
-//          AGENT_SERVICE_URL=http://127.0.0.1:4601 DEEPSEEK_API_KEY=gate-fake-key \
-//          DEEPSEEK_BASE_URL=http://127.0.0.1:4601 node node_modules/next/dist/bin/next dev -p 3296
+//        JAVA_BASE=http://localhost:3196 NEXT_DIST_DIR=.next-aitest \
+//          node node_modules/next/dist/bin/next dev -p 3296
 //        cd server && JAVA_HOME=<jdk17> mvn -o -s settings.xml spring-boot:run \
 //          -Dspring-boot.run.arguments="--server.port=3196 \
 //            --inkstack.agent.service-url=http://127.0.0.1:4601 \
@@ -30,18 +39,19 @@
 //      Key 是假的、base 指向夹具自己的 /chat/completions——**这两件事必须同时成立**，
 //      不然"上游 503 不许扣墨"这种用例每跑一次就真向官方 API 发一次请求。
 //   ③ 一对「什么都没配」的裸实例，测 demo 通道（游客可问）：
-//        MSYS_NO_PATHCONV=1 NEXT_DIST_DIR=.next-agentask AGENT_SERVICE_URL= DEEPSEEK_API_KEY= \
+//        JAVA_BASE=http://localhost:3194 NEXT_DIST_DIR=.next-agentask \
 //          node node_modules/next/dist/bin/next dev -p 3294
 //        cd server && JAVA_HOME=<jdk17> mvn -o -s settings.xml spring-boot:run \
 //          -Dspring-boot.run.arguments="--server.port=3194 --inkstack.agent.service-url= \
 //            --inkstack.agent.deepseek-key= --inkstack.agent.deepseek-base=http://127.0.0.1:59999"
-//      空串是有效值：Next 不会用 .env 覆盖已存在的环境变量，Java 侧命令行参数优先级最高。
+//      空串是有效值：Java 侧命令行参数优先级最高，把 service-url 与 key 显式清空才落得进 demo 档。
 //      deepseek-base 指到一个没人听的端口，是防"Key 意外非空"时打到真上游的最后一道保险。
 //   ④ DATABASE_URL 指向克隆库 inkstack_j：会真扣真写流水（含 agent_qa），跑完按快照复原。
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { executorOf } from "./gate-executor.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const env = Object.fromEntries(
@@ -50,12 +60,14 @@ const env = Object.fromEntries(
 );
 const NODE = process.env.PARITY_NODE || env.PARITY_NODE || "http://localhost:3200";
 const JAVA = process.env.PARITY_JAVA || env.PARITY_JAVA || "http://localhost:3101";
-const ANODE = process.env.AI_NODE || "http://localhost:3296";
-const AJAVA = process.env.AI_JAVA || "http://localhost:3196";
+/** ② 那一对"接了夹具"的入口：经代理 / 直连（历史上叫 Node / Java）。 */
+const APROXY = process.env.AI_PROXY || "http://localhost:3296";
+const ADIRECT = process.env.AI_DIRECT || "http://localhost:3196";
 // 演示通道要一对"什么上游都没配"的实例：AI 那一对同时配了分身服务与（假）大模型 Key，
-// 判据走到那儿就落不进 demo 档了。空串是有效的——Node 不会用 .env 覆盖已存在的环境变量。
-const BNODE = process.env.BARE_NODE || "http://localhost:3294";
-const BJAVA = process.env.BARE_JAVA || "http://localhost:3194";
+// 判据走到那儿就落不进 demo 档了。空串是有效的——Next 不会用 .env 覆盖已存在的环境变量。
+/** ③ 那一对"什么都没配"的裸入口。 */
+const BPROXY = process.env.BARE_PROXY || "http://localhost:3294";
+const BDIRECT = process.env.BARE_DIRECT || "http://localhost:3194";
 const KEEP = process.argv.includes("--keep");
 const FIXTURE_PORT = Number(process.env.AI_FIXTURE_PORT || 4601);
 const MODES = ["continue", "polish", "title", "topic"];
@@ -234,7 +246,7 @@ const server = http.createServer((req, res) => {
       if (sseMode === "abort") {
         // 头已经 200、也吐了两帧，然后上游把连接掐了。此刻后端**已经扣过墨**，
         // 只能发一条 error 帧并明说"本次已计费"——装作什么都没发生就是骗读者。
-        // 停顿是必要的：不等一下就写不到客户端去，两栈会在 fetch 阶段就失败，测的就不是"半路断"。
+        // 停顿是必要的：不等一下就写不到客户端去，两个入口会在 fetch 阶段就失败，测的就不是"半路断"。
         res.write('data: {"choices":[{"delta":{"content":"半句"}}]}\n\n');
         res.write('data: {"choices":[{"delta":{"content":"就断了"}}]}\n\n');
         await nap(120);
@@ -356,14 +368,19 @@ async function suit() {
     await conn.query("UPDATE users SET points_balance = ? WHERE id = ?", [balance, uid]);
     console.log(`    （账号只有 ${snapshot} 点，先垫到 ${balance} 再跑，收尾照旧收回）`);
   }
-  for (const [label, base] of [["Node", ANODE], ["Java", AJAVA]]) {
+  for (const [label, base] of [["经 Next 代理", APROXY], ["直连 Java", ADIRECT]]) {
     const up = await call(base, "GET", "/api/articles?limit=1");
     if (up.status !== 200) {
       throw new Error(`未检测到「接了上游夹具」的 ${label} 实例 ${base}（见本文件头部 ② 的启动命令）`);
     }
   }
+  for (const [name, a, b] of [["① 常规", NODE, JAVA], ["② 夹具", APROXY, ADIRECT], ["③ 裸", BPROXY, BDIRECT]]) {
+    console.log(`入口探针 ${name}：${a} → ${await executorOf(a)}，${b} → ${await executorOf(b)}`);
+  }
+  console.log("      （两侧都由 Java 应答 = 双轨已收口；此时「两侧同式」比的是经 rewrite 与直连的保真度，"
+    + "\n       不是两套实现互抄——那一半由手抄期望常量与闸门 1′ 的 contract/ 基线守着。）\n");
   const writer = await login(NODE, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
-  const writerA = await login(ANODE, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
+  const writerA = await login(APROXY, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
   /** 全场唯一的计费判据：扣了几次钱就必须有几条流水、总额必须等于档位价之和。 */
   let charged = 0;
   let chargedSum = 0;
@@ -376,7 +393,7 @@ async function suit() {
   /* ---------- 1 三档模式 ---------- */
   console.log("\n## 1 GET /api/agent/status：徽标不许谎报，判据全来自配置");
   // 没接上游时该报哪一档，取决于这台机器有没有配大模型 Key —— 闸门不能假设答案，
-  // 只能断言"两栈一致"与"上游不在场就绝不报 agentscope"。写死 demo 会在有 Key 的机器上假红。
+  // 只能断言"两个入口一致"与"上游不在场就绝不报 agentscope"。写死 demo 会在有 Key 的机器上假红。
   const noUpstreamMode = (process.env.DEEPSEEK_API_KEY || env.DEEPSEEK_API_KEY) ? "live" : "demo";
   console.log(`    （本机 ${process.env.DEEPSEEK_API_KEY || env.DEEPSEEK_API_KEY ? "有" : "没有"} DEEPSEEK_API_KEY → 无上游时应报 ${noUpstreamMode}）`);
   const [stN, stJ] = await Promise.all([
@@ -384,22 +401,22 @@ async function suit() {
   ]);
   check(stN.status === 200 && stJ.status === 200 && stN.json?.mode === noUpstreamMode
     && stJ.json?.mode === noUpstreamMode && stN.json?.ok === true && stJ.json?.ok === true,
-    "没配上游 → 两栈按同一条判据降档（有大模型 Key 就 live，没有就 demo，绝不 agentscope）",
-    () => `node=${stN.json?.mode} java=${stJ.json?.mode}`);
+    "没配上游 → 两个入口按同一条判据降档（有大模型 Key 就 live，没有就 demo，绝不 agentscope）",
+    () => `代理=${stN.json?.mode} 直连=${stJ.json?.mode}`);
   const [stAn, stAj] = await Promise.all([
-    call(ANODE, "GET", "/api/agent/status"), call(AJAVA, "GET", "/api/agent/status"),
+    call(APROXY, "GET", "/api/agent/status"), call(ADIRECT, "GET", "/api/agent/status"),
   ]);
   check(stAn.json?.mode === "agentscope" && stAj.json?.mode === "agentscope",
-    "配了上游且 /health 探活成功（夹具应答） → 两栈都报 agentscope",
-    () => `node=${stAn.json?.mode} java=${stAj.json?.mode}`);
+    "配了上游且 /health 探活成功（夹具应答） → 两个入口都报 agentscope",
+    () => `代理=${stAn.json?.mode} 直连=${stAj.json?.mode}`);
   await closeOnce(); // 上游死了：探活必须在 1.2 秒内失败并降档，不能挂着
   const [deadN, deadJ] = await Promise.all([
-    call(ANODE, "GET", "/api/agent/status"), call(AJAVA, "GET", "/api/agent/status"),
+    call(APROXY, "GET", "/api/agent/status"), call(ADIRECT, "GET", "/api/agent/status"),
   ]);
   check(deadN.json?.mode !== "agentscope" && deadJ.json?.mode !== "agentscope"
     && deadN.json?.mode === deadJ.json?.mode && deadN.status === 200 && deadJ.status === 200,
-    "上游死了 → 两栈都在 1.2 秒内降档且落到同一档（宁可少报，不可谎报）",
-    () => `node=${deadN.json?.mode}/${deadN.status} java=${deadJ.json?.mode}/${deadJ.status}`);
+    "上游死了 → 两个入口都在 1.2 秒内降档且落到同一档（宁可少报，不可谎报）",
+    () => `代理=${deadN.json?.mode}/${deadN.status} 直连=${deadJ.json?.mode}/${deadJ.status}`);
   await listen();
 
   /* ---------- 2 入参形状 ---------- */
@@ -415,7 +432,7 @@ async function suit() {
     check(n.status === 400 && j.status === 400
       && n.json?.error === "mode 须为 continue | polish | title | topic"
       && j.json?.error === n.json?.error, label,
-    () => `node=${n.status}/${n.json?.error ?? n.text.slice(0, 40)} java=${j.status}/${j.json?.error ?? j.text.slice(0, 40)}`);
+    () => `代理=${n.status}/${n.json?.error ?? n.text.slice(0, 40)} 直连=${j.status}/${j.json?.error ?? j.text.slice(0, 40)}`);
   }
   const [longN, longJ] = await Promise.all([
     write(NODE, { mode: "continue", draft: "x".repeat(100_001) }, writer),
@@ -424,7 +441,7 @@ async function suit() {
   check(longN.status === 400 && longJ.status === 400
     && longN.json?.error === "草稿过长（上限 10 万字）" && longJ.json?.error === longN.json?.error,
     "draft 超 10 万字 → 400（v18.0 的入参收口，防几十 MB body 全量进内存再转发上游）",
-    () => `node=${longN.json?.error} java=${longJ.json?.error}`);
+    () => `代理=${longN.json?.error} 直连=${longJ.json?.error}`);
   const [edgeN, edgeJ] = await Promise.all([
     write(NODE, { mode: "title", draft: "x".repeat(100_000) }, writer),
     write(JAVA, { mode: "title", draft: "x".repeat(100_000) }, writer),
@@ -436,10 +453,10 @@ async function suit() {
   ]);
   check(anonN.status === 401 && anonJ.status === 401
     && anonN.json?.error === "登录后才能使用 AI 写作助手" && anonJ.json?.error === anonN.json?.error,
-    "未登录 → 401，两栈同文案", () => `node=${anonN.json?.error} java=${anonJ.json?.error}`);
+    "未登录 → 401，两个入口同文案", () => `代理=${anonN.json?.error} 直连=${anonJ.json?.error}`);
 
   /* ---------- 3 模板兜底逐字节 ---------- */
-  console.log("\n## 3 模板兜底：四段文本两栈逐字节一致，而且一个墨点都不扣");
+  console.log("\n## 3 模板兜底：四段文本两个入口逐字节一致，而且一个墨点都不扣");
   const balBeforeDemo = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
   const ledBeforeDemo = await ledgerRows();
   for (const mode of MODES) {
@@ -449,8 +466,8 @@ async function suit() {
     ]);
     check(n.status === 200 && j.status === 200 && typeof n.json?.text === "string"
       && n.json.text.length > 40 && n.json.text === j.json.text,
-      `${mode}：兜底文本两栈逐字节相同`,
-      () => `node=${JSON.stringify(n.json?.text?.slice(0, 20))}… java=${JSON.stringify(j.json?.text?.slice(0, 20))}…`);
+      `${mode}：兜底文本两个入口逐字节相同`,
+      () => `代理=${JSON.stringify(n.json?.text?.slice(0, 20))}… 直连=${JSON.stringify(j.json?.text?.slice(0, 20))}…`);
     demoText[mode] = n.json?.text;
     check(JSON.stringify(n.keys) === JSON.stringify(j.keys)
       && n.json.fallback === true && n.json.aiGenerated === true
@@ -470,7 +487,7 @@ async function suit() {
   await conn.query("UPDATE users SET points_balance = 3 WHERE id = ?", [uid]);
   upstreamHits.length = 0;
   for (const [label, base, cookie, mode, need] of [
-    ["Node", NODE, writer, "continue", 15], ["Java", JAVA, writer, "continue", 15],
+    ["经代理", NODE, writer, "continue", 15], ["直连", JAVA, writer, "continue", 15],
   ]) {
     const r = await write(base, { mode, draft: "x" }, cookie);
     check(r.status === 402 && r.json?.error === `积分不足（余额 3，本次需 ${need}）`,
@@ -481,13 +498,13 @@ async function suit() {
     "被探针拦住的请求**一次都没到上游**（否则用户白等、平台白烧 token）",
     () => `上游收到 ${upstreamHits.length} 次`);
   const [tN, tJ] = await Promise.all([
-    write(ANODE, { mode: "title", draft: "x" }, writerA),
-    write(AJAVA, { mode: "title", draft: "x" }, writerA),
+    write(APROXY, { mode: "title", draft: "x" }, writerA),
+    write(ADIRECT, { mode: "title", draft: "x" }, writerA),
   ]);
   check(tN.status === 402 && tJ.status === 402
     && tN.json?.error === "积分不足（余额 3，本次需 5）" && tJ.json?.error === tN.json?.error,
     "档位价 5 也按同一判据（3 < 5）：402 文案里的数字跟着档位价走，不是硬编码 15",
-    () => `node=${tN.json?.error} java=${tJ.json?.error}`);
+    () => `代理=${tN.json?.error} 直连=${tJ.json?.error}`);
   await conn.query("UPDATE users SET points_balance = ? WHERE id = ?", [balance, uid]);
 
   /* ---------- 5 上游真产出才扣墨 ---------- */
@@ -503,30 +520,30 @@ async function suit() {
     return { r, bal1, delta: bal1 - bal0, ledger: led0, row };
   }
   upstreamMode = "ok";
-  const paidN = await round(ANODE, "continue", { draft: "夹具计费轮" });
+  const paidN = await round(APROXY, "continue", { draft: "夹具计费轮" });
   check(paid(paidN.r) && paidN.delta === -15 && paidN.row?.reason === "AI写作·续写"
     && paidN.row?.delta === -15
     && paidN.r.json.pointsNote === `已扣 15 滴墨水 · 余额 ${paidN.bal1}`
     && String(paidN.r.json.text).startsWith("【夹具生成·continue】"),
-    "Node 侧真扣一轮：-15、一条「AI写作·续写」流水、note 里的余额与库内一致、无 fallback 键",
+    "经代理那一轮真扣：-15、一条「AI写作·续写」流水、note 里的余额与库内一致、无 fallback 键",
     () => `Δ=${paidN.delta} 流水=${JSON.stringify(paidN.row)} note=${paidN.r.json?.pointsNote}`);
-  const paidJ = await round(AJAVA, "continue", { draft: "夹具计费轮" });
+  const paidJ = await round(ADIRECT, "continue", { draft: "夹具计费轮" });
   check(paid(paidJ.r) && paidJ.delta === -15 && paidJ.row?.reason === "AI写作·续写"
     && paidJ.r.json.text === paidN.r.json.text,
-    "Java 侧同一档：扣墨金额、流水 reason、产出文本与 Node 完全同式",
+    "直连那一轮同一档：扣墨金额、流水 reason、产出文本与经代理那轮完全同式（跨实现同式那半由手抄常量与闸门 1′ 守）",
     () => `Δ=${paidJ.delta} 流水=${JSON.stringify(paidJ.row)}`);
   const sent = upstreamHits[upstreamHits.length - 1] ?? {};
   check(sent.mode === "continue" && sent.draft === "夹具计费轮" && sent.author === "博主",
     "上游收到的请求体：mode/draft 原样、author 默认「博主」", () => JSON.stringify(sent).slice(0, 120));
   upstreamHits.length = 0;
-  await round(AJAVA, "polish", { author: "名".repeat(60) });
+  await round(ADIRECT, "polish", { author: "名".repeat(60) });
   const sentLong = upstreamHits[0] ?? {};
   check(sentLong.author === "名".repeat(40)
     && String(sentLong.draft).startsWith("（作者尚未写下草稿，主题："),
     "author 裁到 40 字、draft 缺省时替它拼一条主题占位（Node 同式）",
     () => `author=${String(sentLong.author ?? "").length} 字 draft=${String(sentLong.draft).slice(0, 20)}`);
 
-  // 类型收口：JSON 允许 draft/author 是数字、数组、对象、布尔，两栈必须把同一个请求收成同一个字符串。
+  // 类型收口：JSON 允许 draft/author 是数字、数组、对象、布尔，两个入口必须把同一个请求收成同一个字符串。
   // Node 原本在这里是一个未捕获的 TypeError → 500（`(5).trim()`），Java 一直安静地按 String() 取值，
   // 于是"换个入口"会改状态码。用 garbage 档跑：这里断言的是**上游收到了什么**，不该真扣墨，
   // 所以它也不会惊动 §7 的账实核对。
@@ -538,10 +555,10 @@ async function suit() {
   ];
   for (const [label, payload, wantDraft, wantAuthor] of COERCIONS) {
     upstreamHits.length = 0;
-    await Promise.all([write(ANODE, payload, writerA), write(AJAVA, payload, writerA)]);
+    await Promise.all([write(APROXY, payload, writerA), write(ADIRECT, payload, writerA)]);
     check(upstreamHits.length === 2 && upstreamHits.every((h) => h
       && h.draft === wantDraft && h.author === wantAuthor),
-      `${label} → 两栈转发给上游的字符串一模一样（且都不扣墨）`,
+      `${label} → 两个入口转发给上游的字符串一模一样（且都不扣墨）`,
       () => upstreamHits.map((h) => JSON.stringify({ d: h?.draft, a: h?.author })).join(" "));
   }
   upstreamMode = "ok";
@@ -552,7 +569,7 @@ async function suit() {
     ["topic", "上游返回不是 JSON", "garbage"],
   ]) {
     upstreamMode = m; // 必须在**这一档的两轮之前**拨好，否则跑的还是上一档的坏态
-    for (const [label, base] of [["Java", AJAVA], ["Node", ANODE]]) {
+    for (const [label, base] of [["直连", ADIRECT], ["经代理", APROXY]]) {
       const bad = await round(base, mode, { draft: "坏态轮" });
       check(bad.r.status === 200 && bad.r.json?.fallback === true
         && bad.delta === 0 && bad.r.json.text === demoText[mode],
@@ -566,7 +583,7 @@ async function suit() {
   console.log("\n## 6 六路并发：探针不是防线，FOR UPDATE 才是");
   await conn.query("UPDATE users SET points_balance = 40 WHERE id = ?", [uid]); // 只够两次
   const raced = await Promise.all(Array.from({ length: 6 }, () =>
-    write(AJAVA, { mode: "continue", draft: "并发轮" }, writerA)));
+    write(ADIRECT, { mode: "continue", draft: "并发轮" }, writerA)));
   const balRace = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
   const won = raced.filter(paid).length;
   charged += won;
@@ -579,15 +596,15 @@ async function suit() {
 
   /* ---------- 7 demo 通道：游客可问、逐帧一致、一个墨点都不扣 ---------- */
   console.log("\n## 7 demo 通道（一对什么都没配的实例）：匿名能问，但一滴墨都不许动");
-  for (const [label, base] of [["Node", BNODE], ["Java", BJAVA]]) {
+  for (const [label, base] of [["经 Next 代理", BPROXY], ["直连 Java", BDIRECT]]) {
     const up = await call(base, "GET", "/api/articles?limit=1");
     if (up.status !== 200) {
       throw new Error(`未检测到「没配任何上游」的 ${label} 实例 ${base}（见本文件头部 ③ 的启动命令）`);
     }
   }
-  const writerB = await login(BNODE, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
+  const writerB = await login(BPROXY, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
   const KB_HIT = "为什么 then 要进微任务？";
-  // 期望文本是**手抄**的常量，不是"从 Node 读出来再比 Java"：两栈一起把模板抄错时，
+  // 期望文本是**手抄**的常量，不是"从 Node 读出来再比 Java"：两个入口一起把模板抄错时，
   // 只有独立写一遍期望值才报得出来（这一段的判据来自 app/api/agent/ask/route.ts 的 KB）。
   const KB_TEXT = "因为 Promises/A+ 规范 §2.2.4 要求 onFulfilled/onRejected 必须在「平台代码」之外的"
     + "执行上下文中调用——也就是不能同步执行。微任务是浏览器给 Promise 的专用通道，"
@@ -598,12 +615,12 @@ async function suit() {
   const balBeforeAsk = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
   const ledBeforeAsk = await ledgerRows();
   const [dN, dJ] = await Promise.all([
-    ask(BNODE, { question: KB_HIT }, writerB), ask(BJAVA, { question: KB_HIT }, writerB),
+    ask(BPROXY, { question: KB_HIT }, writerB), ask(BDIRECT, { question: KB_HIT }, writerB),
   ]);
   check(dN.status === 200 && dJ.status === 200 && dN.text === dJ.text
     && mediaType(dN.contentType) === mediaType(dJ.contentType) && dJ.backend === "inkstack-java",
-    "同一句提问两栈**逐字节**同一条流（含 content-type），且请求确实落在 Java",
-    () => `node=${dN.frames.length}帧/${dN.contentType} java=${dJ.frames.length}帧/${dJ.contentType}/backend=${dJ.backend || "无"}`);
+    "同一句提问两个入口**逐字节**同一条流（含 content-type），且请求确实落在 Java",
+    () => `代理=${dN.frames.length}帧/${dN.contentType} 直连=${dJ.frames.length}帧/${dJ.contentType}/backend=${dJ.backend || "无"}`);
   check(dN.badLines === 0 && dJ.badLines === 0
     && JSON.stringify(dN.frames) === JSON.stringify(dJ.frames),
     "每一行都是合法帧、也没有 [DONE] 混进来（契约只有三种帧，靠连接关闭收尾）",
@@ -614,25 +631,25 @@ async function suit() {
     "delta 拼回手抄的模板全文、末尾恰好一条 cite、每帧不超过 6 字（前端的打字机节奏就定在这个宽度）",
     () => `拼回=${JSON.stringify(streamed(dJ).slice(0, 24))}… cite=${JSON.stringify(dJ.frames.at(-1))}`);
   const [aN, aJ] = await Promise.all([
-    ask(BNODE, { question: "微任务是什么" }), ask(BJAVA, { question: "微任务是什么" }),
+    ask(BPROXY, { question: "微任务是什么" }), ask(BDIRECT, { question: "微任务是什么" }),
   ]);
   check(aN.status === 200 && aJ.status === 200 && streamed(aJ) === FALLBACK_TEXT
     && aJ.frames.at(-1).citation === null && aJ.text === aN.text,
     "游客（不带 Cookie）同样能问，落兜底文案且 citation 是 null——切流不许把这条通道悄悄变成 401",
-    () => `node=${aN.status} java=${aJ.status}/${JSON.stringify(streamed(aJ).slice(0, 18))}…`);
+    () => `代理=${aN.status} 直连=${aJ.status}/${JSON.stringify(streamed(aJ).slice(0, 18))}…`);
   const [nN, nJ] = await Promise.all([
-    ask(BNODE, { question: 5 }, writerB), ask(BJAVA, { question: 5 }, writerB),
+    ask(BPROXY, { question: 5 }, writerB), ask(BDIRECT, { question: 5 }, writerB),
   ]);
   check(nN.status === 200 && nJ.status === 200 && nJ.text === nN.text,
     "question 是数字也按 String() 收成「5」：进兜底而不是把 trim 打成 500（与 /api/ai/write 同口径）",
-    () => `node=${nN.status} java=${nJ.status}/${nJ.text.slice(0, 30)}`);
+    () => `代理=${nN.status} 直连=${nJ.status}/${nJ.text.slice(0, 30)}`);
   const [eN, eJ] = await Promise.all([
-    ask(BNODE, { question: "   " }, writerB), ask(BJAVA, { question: "   " }, writerB),
+    ask(BPROXY, { question: "   " }, writerB), ask(BDIRECT, { question: "   " }, writerB),
   ]);
   check(eN.status === 400 && eJ.status === 400 && eN.json?.error === "question 不能为空"
     && eJ.json?.error === eN.json.error && eJ.contentType.includes("application/json"),
     "空提问是一条普通 JSON 400，不是一条带着 error 帧的流（前端两条读法不同，不能混）",
-    () => `node=${eN.status}/${eN.contentType} java=${eJ.status}/${eJ.json?.error}`);
+    () => `代理=${eN.status}/${eN.contentType} 直连=${eJ.status}/${eJ.json?.error}`);
   const balAfterAsk = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
   check(balAfterAsk === balBeforeAsk && (await ledgerRows()) === ledBeforeAsk,
     "演示通道从头到尾没碰过账", () => `Δ余额=${balAfterAsk - balBeforeAsk}`);
@@ -646,8 +663,8 @@ async function suit() {
   agentMode = "ok";
   agentHits.length = 0;
   const [pN, pJ] = await Promise.all([
-    ask(ANODE, { question: "透传轮", author: "名", about: "某篇文章" }, writerA),
-    ask(AJAVA, { question: "透传轮", author: "名", about: "某篇文章" }, writerA),
+    ask(APROXY, { question: "透传轮", author: "名", about: "某篇文章" }, writerA),
+    ask(ADIRECT, { question: "透传轮", author: "名", about: "某篇文章" }, writerA),
   ]);
   qaCharged += 2;
   const PASSED = JSON.stringify([
@@ -657,21 +674,21 @@ async function suit() {
   check(JSON.stringify(pJ.frames) === PASSED && pN.text === pJ.text
     && pJ.badLines === 0 && pJ.chunks > 1,
     "上游那四帧原样到达读者、一帧不重排，而且**分块到达**（整块缓冲就把流式做成了等十几秒）",
-    () => `java=${JSON.stringify(pJ.frames.map((f) => f.type))} 块数=${pJ.chunks}`);
+    () => `直连=${JSON.stringify(pJ.frames.map((f) => f.type))} 块数=${pJ.chunks}`);
   check(agentHits.length === 2 && JSON.stringify(agentHits[0]) === JSON.stringify(agentHits[1])
     && agentHits[0].question === "透传轮" && agentHits[0].author === "名"
     && agentHits[0].about === "某篇文章",
-    "转发给分身服务的请求体两栈同式（question/author/about 原样，不多不少）",
+    "转发给分身服务的请求体两个入口同式（question/author/about 原样，不多不少）",
     () => agentHits.map((h) => JSON.stringify(h)).join(" "));
   const qaShape = await qaRows();
   check(Number(qaShape?.n) === 2 && qaShape?.a === "(AgentScope streamed)"
     && qaShape?.c === "[]" && Number(qaShape?.missing) === 0
     && Number(qaShape?.mine) === 2,
-    "问答流水按 Node 的占位形状落库（answer 是标记串、citations 是空数组），asker_id 两栈都落提问者"
+    "问答流水按 Node 的占位形状落库（answer 是标记串、citations 是空数组），asker_id 两个入口都落提问者"
     + "（成就「十问分身」的计数就是 WHERE asker_id = ?，这列空着徽章永远不动）",
     () => JSON.stringify(qaShape));
   const [npN, npJ] = await Promise.all([
-    ask(ANODE, { question: "about 缺席轮" }, writerA), ask(AJAVA, { question: "about 缺席轮" }, writerA),
+    ask(APROXY, { question: "about 缺席轮" }, writerA), ask(ADIRECT, { question: "about 缺席轮" }, writerA),
   ]);
   qaCharged += 2;
   const absent = agentHits.slice(-2);
@@ -680,23 +697,23 @@ async function suit() {
     "没传 about 时上游收到的 JSON 里**没有这个键**（Node 的 about || undefined 不是空串）",
     () => JSON.stringify(absent.map((h) => Object.keys(h ?? {}))));
   const [an401N, an401J] = await Promise.all([
-    ask(ANODE, { question: "游客提问" }), ask(AJAVA, { question: "游客提问" }),
+    ask(APROXY, { question: "游客提问" }), ask(ADIRECT, { question: "游客提问" }),
   ]);
   check(an401N.status === 401 && an401J.status === 401
     && an401N.json?.error === "登录后才能与分身对话" && an401J.json?.error === an401N.json.error
     && an401N.contentType.includes("application/json"),
-    "接了分身服务时游客是 401 普通 JSON（demo 档游客可问、这一档不行，差别必须在两栈同时成立）",
-    () => `node=${an401N.status}/${an401N.json?.error} java=${an401J.status}`);
+    "接了分身服务时游客是 401 普通 JSON（demo 档游客可问、这一档不行，差别必须在两个入口同时成立）",
+    () => `代理=${an401N.status}/${an401N.json?.error} 直连=${an401J.status}`);
   await conn.query("UPDATE users SET points_balance = 3 WHERE id = ?", [uid]);
   agentHits.length = 0;
   const [poorN, poorJ] = await Promise.all([
-    ask(ANODE, { question: "穷轮" }, writerA), ask(AJAVA, { question: "穷轮" }, writerA),
+    ask(APROXY, { question: "穷轮" }, writerA), ask(ADIRECT, { question: "穷轮" }, writerA),
   ]);
   check(poorN.status === 402 && poorJ.status === 402
     && poorJ.json?.error === "墨水不足（余额 3，本次需 5）"
     && poorN.json?.error === poorJ.json?.error && agentHits.length === 0,
     "余额 3 → 402 且一次都没问到上游（问答的文案是「墨水不足」，与写作的「积分不足」不是一条，别顺手统一）",
-    () => `node=${poorN.json?.error} java=${poorJ.json?.error} 上游收到=${agentHits.length}`);
+    () => `代理=${poorN.json?.error} 直连=${poorJ.json?.error} 上游收到=${agentHits.length}`);
   await conn.query("UPDATE users SET points_balance = ? WHERE id = ?", [balance, uid]);
   agentMode = "error"; // 分身服务坏了 → 落 live 通道（正是 §9 要的姿势）
 
@@ -713,8 +730,8 @@ async function suit() {
   sseMode = "ok";
   deepseekHits.length = 0;
   const [lN, lJ] = await Promise.all([
-    ask(ANODE, { question: "微任务", author: "博主甲", about: "某篇", history: HISTORY }, writerA),
-    ask(AJAVA, { question: "微任务", author: "博主甲", about: "某篇", history: HISTORY }, writerA),
+    ask(APROXY, { question: "微任务", author: "博主甲", about: "某篇", history: HISTORY }, writerA),
+    ask(ADIRECT, { question: "微任务", author: "博主甲", about: "某篇", history: HISTORY }, writerA),
   ]);
   qaCharged += 2;
   check(lJ.badLines === 0 && streamed(lJ) === "从夹具结尾"
@@ -723,7 +740,7 @@ async function suit() {
     () => `java 原文=${JSON.stringify(lJ.text.slice(0, 120))} node 原文=${JSON.stringify(lN.text.slice(0, 60))}`);
   check(deepseekHits.length === 2
     && JSON.stringify(deepseekHits[0]) === JSON.stringify(deepseekHits[1]),
-    "上游收到的 DeepSeek 请求体两栈逐字一致（system prompt、历史、参数全在内）",
+    "上游收到的 DeepSeek 请求体两个入口逐字一致（system prompt、历史、参数全在内）",
     () => deepseekHits.map((h) => JSON.stringify(h).slice(0, 60)).join(" "));
   const sentDeep = deepseekHits[1] ?? {};
   const roles = (sentDeep.messages ?? []).map((m) => m.role);
@@ -752,7 +769,7 @@ async function suit() {
   const ledBeforeBad = await ledgerRows();
   const balBeforeBad = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
   const [lbN, lbJ] = await Promise.all([
-    ask(ANODE, { question: "上游 503 轮" }, writerA), ask(AJAVA, { question: "上游 503 轮" }, writerA),
+    ask(APROXY, { question: "上游 503 轮" }, writerA), ask(ADIRECT, { question: "上游 503 轮" }, writerA),
   ]);
   check(lbN.frames.length === 1 && JSON.stringify(lbN.frames) === JSON.stringify(lbJ.frames)
     && lbJ.frames[0]?.type === "error"
@@ -761,11 +778,11 @@ async function suit() {
     && (await ledgerRows()) === ledBeforeBad
     && (await num("SELECT points_balance FROM users WHERE id = ?", [uid])) === balBeforeBad,
     "上游非 2xx → 一条 error 帧、文案逐字一致、状态码仍是 200（流已经开始）、零扣墨",
-    () => `java=${JSON.stringify(lbJ.frames)} node=${JSON.stringify(lbN.frames)}`);
+    () => `直连=${JSON.stringify(lbJ.frames)} 代理=${JSON.stringify(lbN.frames)}`);
   sseMode = "abort";
   const balBeforeAbort = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
   const [abN, abJ] = await Promise.all([
-    ask(ANODE, { question: "上游半路断轮" }, writerA), ask(AJAVA, { question: "上游半路断轮" }, writerA),
+    ask(APROXY, { question: "上游半路断轮" }, writerA), ask(ADIRECT, { question: "上游半路断轮" }, writerA),
   ]);
   const aborted = (r) => r.frames.at(-1)?.type === "error"
     && String(r.frames.at(-1)?.message).endsWith("（本次问答已按成功计费）");
@@ -775,7 +792,7 @@ async function suit() {
     && (await num("SELECT points_balance FROM users WHERE id = ?", [uid])) === balBeforeAbort - 10,
     "上游吐了两帧再把连接掐了：已发出的那半句照给读者，末尾补一条 error 明说本次已计费，且没有 cite 帧"
     + "（扣了墨的问答不给引用是诚实，不给答案才是问题）",
-    () => `java=${JSON.stringify(abJ.frames)} node=${JSON.stringify(abN.frames)}`);
+    () => `直连=${JSON.stringify(abJ.frames)} 代理=${JSON.stringify(abN.frames)}`);
   sseMode = "ok"; agentMode = "ok";
 
   /* ---------- 10 账实核对 ---------- */

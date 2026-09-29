@@ -1,8 +1,8 @@
 // 页面取数层：配了 JAVA_BASE 就只有一条路——问 Java；没配就只用内置演示数据。
 //
-// P7e′ 之前这里每个读函数开头都有一句 `if (viaJava("x"))` 的分流，Node 侧还留着一份 SQL 实现。
-// 那份实现现在整体住在 lib/data-legacy.ts，**只有 app/api/** 的遗留路由在用**，页面不再读它。
-// 于是"同一个页面在两栈各算一遍"这件事从可选变成不可能：页面级只剩"渲染必须长成什么样"的
+// P7e′ 之前这里每个读函数开头都有一句 `if (viaJava("x"))` 的分流，Node 侧还留着一份 SQL 实现；
+// 那份实现后来集中到 lib/data-legacy.ts，随 app/api/** 一起在 P7f-2 删除。于是
+// "同一个页面在两栈各算一遍"这件事从可选变成不可能：页面级只剩"渲染必须长成什么样"的
 // 断言可写（scripts/page-check.mjs，闸门 4），README 的闸门 4 一节写了为什么这不是退步。
 //
 // 分流删掉之后剩下的这个二选一必须钉死方向：
@@ -10,7 +10,6 @@
 //   · JAVA_BASE 配了但调用失败 → **抛出**，页面 500。绝不静默回落。
 // 回落会把"Java 挂了"伪装成"站点正常"，而 listArticles 的 SQL 路径当年 catch 降级成 demo
 // 正是这个坑（页面 200、数据是假的、日志里什么都没有）。
-import { getPool } from "./db";
 import { demoArticles, demoComments, type DemoArticle, type DemoComment } from "./demo-data";
 import {
   javaReady,
@@ -24,23 +23,6 @@ import {
   remoteAdminUsers, remoteBadgeRewardClaimed, remoteFollowingFeed, remotePlatformStats,
   remoteSeriesTitleSuggestions, remoteTopAuthors, remoteWeeklyStats,
 } from "./java-source";
-
-/* ---------- 数据库可重试错误（v18.0） ----------
- * InnoDB 的死锁与锁等待超时属于**可重试**错误：官方建议由应用侧重放整个语句/事务。
- * 用于「多条无锁语句构成一次逻辑写」的场景（如 toggleBookmark 的 INSERT IGNORE→DELETE）。
- * 判定只看错误码，不做字符串匹配。
- */
-const RETRYABLE_LOCK_ERRORS = new Set(["ER_LOCK_DEADLOCK", "ER_LOCK_WAIT_TIMEOUT"]);
-
-export function isRetryableLockError(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null | undefined)?.code;
-  return typeof code === "string" && RETRYABLE_LOCK_ERRORS.has(code);
-}
-
-/** 退避等待（带抖动由调用方给值，避免并发重试同步对撞） */
-export function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export type ArticleRow = {
   slug: string;
@@ -251,81 +233,9 @@ export type CommentRow = {
 
 export function demoToCommentRows(slug: string): CommentRow[] {
   return (demoComments[slug] ?? []).map((c) => ({ ...c, likes: 0, viewerLiked: false }));
-}
-/** 评论点赞/取消（toggle），返回最新状态 */
-export async function toggleCommentLike(userId: number, commentId: number): Promise<{ liked: boolean; likes: number }> {
-  const pool = await getPool();
-  if (!pool) return { liked: false, likes: 0 };
-  const [exist] = await pool.query(`SELECT id FROM comment_likes WHERE comment_id = ? AND user_id = ? LIMIT 1`, [
-    commentId,
-    userId,
-  ]);
-  const has = Array.isArray(exist) && (exist as unknown[]).length > 0;
-  if (has) {
-    await pool.query(`DELETE FROM comment_likes WHERE comment_id = ? AND user_id = ?`, [commentId, userId]);
-  } else {
-    await pool.query(`INSERT IGNORE INTO comment_likes (comment_id, user_id) VALUES (?, ?)`, [commentId, userId]);
-  }
-  const [cnt] = await pool.query(`SELECT COUNT(*) AS n FROM comment_likes WHERE comment_id = ?`, [commentId]);
-  const likes = Array.isArray(cnt) ? Number((cnt as Record<string, unknown>[])[0]?.n ?? 0) : 0;
-  return { liked: !has, likes };
-}
-
-export async function listComments(slug: string, viewerId?: number | null): Promise<CommentRow[]>  {
+}export async function listComments(slug: string, viewerId?: number | null): Promise<CommentRow[]>  {
   if (!javaReady()) return demoToCommentRows(slug);
   return remoteListComments(slug);
-}
-
-export async function addComment(
-  slug: string,
-  input: { nickname: string; content: string; parentId?: number | null },
-  user?: { id: number; nickname: string } // 传入则绑定账号，昵称以账号为准
-): Promise<{ ok: boolean; error?: string; id?: number; createdAt?: string }> {
-  const nickname = (user?.nickname ?? input.nickname).trim().slice(0, 20) || "访客";
-  const content = input.content.trim();
-  if (!content) return { ok: false, error: "评论内容不能为空" };
-  if (content.length > 1000) return { ok: false, error: "评论最长 1000 字" };
-
-  const pool = await getPool();
-  if (pool) {
-    try {
-      // 回复目标校验：必须存在且属于同一篇文章（防跨文串楼）
-      let parentId: number | null = null;
-      if (input.parentId) {
-        const [pRows] = await pool.query(
-          `SELECT c.id FROM comments c JOIN articles a ON a.id = c.article_id
-           WHERE c.id = ? AND a.slug = ? LIMIT 1`,
-          [input.parentId, slug]
-        );
-        parentId = (pRows as { id: number }[])[0]?.id ?? null;
-        if (!parentId) return { ok: false, error: "要回复的评论不存在或已删除" };
-      }
-      // v17.5：INSERT..SELECT 补 status='published'。原实现不限定状态，任何人只要猜到
-      //   slug（中文标题的草稿 slug 形如 bo-20260918-1，可枚举）就能给别人的**草稿/已撤回**
-      //   文章灌评论——既污染未公开内容，又给作者发通知，还种下 comments 外键子行
-      //   导致作者草稿硬删被 FK 挡下。同时不再对未命中的 slug 虚增 comment_count。
-      const [ins] = await pool.query(
-        `INSERT INTO comments (article_id, user_id, guest_nickname, parent_id, content)
-         SELECT id, ?, ?, ?, ? FROM articles WHERE slug = ? AND status = 'published'`,
-        [user?.id ?? null, user ? null : nickname, parentId, content, slug]
-      );
-      if (Number((ins as { affectedRows?: number }).affectedRows ?? 0) === 0) {
-        return { ok: false, error: "文章不存在或未公开，无法评论" };
-      }
-      await pool.query(
-        `UPDATE articles SET comment_count = comment_count + 1 WHERE slug = ?`,
-        [slug]
-      );
-      // 返回真实 id 与服务端时间，前端用它替换占位行（否则新评论立刻点赞/回复会 404）
-      const newId = Number((ins as { insertId?: number }).insertId ?? 0) || undefined;
-      const [t] = await pool.query(`SELECT DATE_FORMAT(NOW(),'%Y-%m-%d %H:%i') AS createdAt`);
-      return { ok: true, id: newId, createdAt: (t as { createdAt: string }[])[0]?.createdAt };
-    } catch {
-      return { ok: false, error: "数据库暂不可用，评论未保存" };
-    }
-  }
-  // 演示模式：只回成功但不持久化（页面刷新后消失，属预期行为）
-  return { ok: true, error: undefined };
 }
 
 /* ============ 运营台：内容管理 ============ */
@@ -361,18 +271,6 @@ const ACTION_SQL: Record<AdminAction, string> = {
 };
 
 /** 运营操作：下架/发布/置顶/精选。返回是否生效 */
-export async function adminSetArticle(slug: string, action: AdminAction): Promise<{ ok: boolean; error?: string }> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库不可用" };
-  const sql = ACTION_SQL[action];
-  if (!sql) return { ok: false, error: "未知操作" };
-  // 下架时同时取消置顶/精选，避免僵尸状态
-  const extra = action === "unpublish" ? ", pinned = 0, featured = 0" : "";
-  const [res] = await pool.query(`UPDATE articles SET ${sql}${extra} WHERE slug = ?`, [slug]);
-  const affected = (res as { affectedRows?: number }).affectedRows ?? 0;
-  return affected > 0 ? { ok: true } : { ok: false, error: "文章不存在" };
-}
-
 /* ============ 管理后台：审核 / 用户 / 举报 / 审计日志 ============ */
 
 export type ReviewRow = {
@@ -440,108 +338,7 @@ export async function adminListActions(limit = 30): Promise<AdminActionLogRow[]>
 }
 
 /** 审核操作：通过 / 驳回（驳回需带原因，会通知作者） */
-export async function adminReviewArticle(
-  slug: string,
-  decision: "approve" | "reject",
-  note?: string
-): Promise<{ ok: boolean; error?: string; authorId?: number }> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库不可用" };
-  if (decision === "reject" && !(note ?? "").trim()) {
-    return { ok: false, error: "驳回必须填写原因" };
-  }
-  const reviewStatus = decision === "approve" ? "approved" : "rejected";
-  const reviewNote = decision === "approve" ? null : (note ?? "").trim().slice(0, 255);
-  const [rows] = await pool.query(
-    `UPDATE articles SET review_status = ?, review_note = ? WHERE slug = ?`,
-    [reviewStatus, reviewNote, slug]
-  );
-  const affected = (rows as { affectedRows?: number }).affectedRows ?? 0;
-  if (affected === 0) return { ok: false, error: "文章不存在" };
-  const [author] = await pool.query(`SELECT author_id FROM articles WHERE slug = ?`, [slug]);
-  return {
-    ok: true,
-    authorId: Number((author as Record<string, unknown>[])[0]?.author_id ?? 0) || undefined,
-  };
-}
-
 /** 用户管理操作：封禁/解封/加分/扣分（封禁即时生效——getCurrentUser 拒绝 banned 用户） */
-export async function adminSetUser(
-  userId: number,
-  action: "ban" | "unban" | "grant" | "revoke" | "setRole",
-  amount?: number,
-  newRole?: string
-): Promise<{ ok: boolean; error?: string }> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库不可用" };
-  if (action === "ban") {
-    const [r] = await pool.query(`UPDATE users SET banned = 1 WHERE id = ? AND role NOT IN ('admin','developer')`, [userId]);
-    if ((r as { affectedRows?: number }).affectedRows === 0) return { ok: false, error: "用户不存在或为管理团队" };
-    return { ok: true };
-  }
-  if (action === "unban") {
-    const [r] = await pool.query(`UPDATE users SET banned = 0 WHERE id = ?`, [userId]);
-    if ((r as { affectedRows?: number }).affectedRows === 0) return { ok: false, error: "用户不存在" };
-    return { ok: true };
-  }
-  /* v17.1 角色管理（仅 developer 可调用，路由层已二次校验）：
-     可把普通用户设为 user/author/admin；developer 身份不可经此授予或修改 */
-  if (action === "setRole") {
-    const target = String(newRole ?? "").trim();
-    if (!["reader", "author", "admin"].includes(target)) {
-      return { ok: false, error: "目标角色须为 reader / author / admin" };
-    }
-    const [cur] = await pool.query(`SELECT role FROM users WHERE id = ?`, [userId]);
-    const curRole = String((cur as Record<string, unknown>[])[0]?.role ?? "");
-    if (!curRole) return { ok: false, error: "用户不存在" };
-    if (curRole === "developer") return { ok: false, error: "开发者身份不可在此变更" };
-    const [rr] = await pool.query(`UPDATE users SET role = ? WHERE id = ?`, [target, userId]);
-    if ((rr as { affectedRows?: number }).affectedRows === 0) return { ok: false, error: "角色变更失败" };
-    return { ok: true };
-  }
-  const amt = Math.floor(Number(amount) || 0);
-  if (amt <= 0 || amt > 100_000) return { ok: false, error: "点墨数量须为 1–100000" };
-  const delta = action === "grant" ? amt : -amt;
-  // v17.4：余额变更与流水落账收进同一事务；扣减不再用 GREATEST(0,..) 掩盖差额 ——
-  // 原写法「账记 -200、余额只掉 50」会让 point_ledger 求和与真实余额永久对不上。
-  // 现按真实余额变化记 applied，账面与流水恒等；流水写失败即整体回滚。
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    const [rows] = await conn.query(
-      `SELECT points_balance FROM users WHERE id = ? FOR UPDATE`,
-      [userId]
-    );
-    const cur = (rows as Record<string, unknown>[])[0];
-    if (!cur) {
-      await conn.rollback();
-      return { ok: false, error: "用户不存在" };
-    }
-    const before = Number(cur.points_balance ?? 0);
-    const after = Math.max(0, before + delta);
-    const applied = after - before;
-    if (applied === 0) {
-      await conn.rollback();
-      return { ok: false, error: "该用户余额已为 0，无可扣回的点墨" };
-    }
-    await conn.query(`UPDATE users SET points_balance = ? WHERE id = ?`, [after, userId]);
-    await conn.query(`INSERT INTO point_ledger (user_id, delta, reason) VALUES (?, ?, ?)`, [
-      userId,
-      applied,
-      action === "grant"
-        ? `运营发放 ${amt} 点墨`
-        : `运营扣回 ${-applied} 点墨${applied !== delta ? `（请求 ${amt}，余额不足按实际扣减）` : ""}`,
-    ]);
-    await conn.commit();
-    return { ok: true };
-  } catch {
-    await conn.rollback();
-    return { ok: false, error: "点墨调整失败，请稍后再试" };
-  } finally {
-    conn.release();
-  }
-}
-
 /* ==================== v17.1 运营台扩展：资金 / 评论 / 改价 ==================== */
 
 export type AdminOrderRow = {
@@ -575,58 +372,7 @@ export async function adminListComments(): Promise<AdminCommentRow[]> {
 }
 
 /** 删除评论（含一级回复），并回扣文章评论计数 */
-export async function adminDeleteComment(commentId: number): Promise<{ ok: boolean; error?: string; removed?: number }> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库不可用" };
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    const [rows] = await conn.query(`SELECT article_id FROM comments WHERE id = ? FOR UPDATE`, [commentId]);
-    const c = (rows as { article_id: number }[])[0];
-    if (!c) {
-      await conn.rollback();
-      return { ok: false, error: "评论不存在" };
-    }
-    const [del] = await conn.query(
-      `DELETE FROM comments WHERE id = ? OR parent_id = ?`,
-      [commentId, commentId]
-    );
-    const removed = Number((del as { affectedRows?: number }).affectedRows ?? 0);
-    await conn.query(
-      `UPDATE articles SET comment_count = GREATEST(0, comment_count - ?) WHERE id = ?`,
-      [removed, c.article_id]
-    );
-    await conn.commit();
-    return { ok: true, removed };
-  } catch {
-    await conn.rollback();
-    return { ok: false, error: "删除失败" };
-  } finally {
-    conn.release();
-  }
-}
-
 /** 运营改价：单篇解锁价 / 限时折扣（0 = 关闭付费墙） */
-export async function adminSetArticlePrice(
-  slug: string,
-  unlockPrice: number,
-  discountPrice: number
-): Promise<{ ok: boolean; error?: string }> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库不可用" };
-  const up = Math.floor(Number(unlockPrice) || 0);
-  const dp = Math.floor(Number(discountPrice) || 0);
-  if (up < 0 || up > 100_000 || dp < 0 || dp > up) {
-    return { ok: false, error: "价格须为 0–100000，且折扣价 ≤ 解锁价" };
-  }
-  const [r] = await pool.query(
-    `UPDATE articles SET unlock_price = ?, discount_price = ?, discount_until = ? WHERE slug = ?`,
-    [up, dp, dp > 0 ? DATE_AFTER_DAYS(7) : null, slug]
-  );
-  if ((r as { affectedRows?: number }).affectedRows === 0) return { ok: false, error: "文章不存在" };
-  return { ok: true };
-}
-
 /** 折扣截止：N 天后（SQL 表达式工具） */
 function DATE_AFTER_DAYS(days: number): string {
   const d = new Date(Date.now() + days * 86400_000);
@@ -652,123 +398,8 @@ export type ReportTarget = { type: "article"; slug: string } | { type: "comment"
  * 注意：去重口径只在 `status='open'` 上——举报被处理后（resolved/dismissed），
  * 同一用户应当可以再次举报，所以**不能**用普通唯一索引（MySQL 无部分索引）。
  */
-export async function submitReport(
-  reporterId: number,
-  target: ReportTarget,
-  reason: string
-): Promise<{ ok: true } | { ok: false; code: "not_found" | "duplicate" | "db" }> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, code: "db" };
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    // 锁锚点：目标行本身。同目标的并发举报在此排队。
-    const anchorSql =
-      target.type === "article"
-        ? `SELECT id FROM articles WHERE slug = ? AND status = 'published' LIMIT 1 FOR UPDATE`
-        : `SELECT id FROM comments WHERE id = ? LIMIT 1 FOR UPDATE`;
-    const anchorArg = target.type === "article" ? target.slug : target.commentId;
-    const [anchorRows] = await conn.query(anchorSql, [anchorArg]);
-    const anchor = (anchorRows as { id: number }[])[0];
-    if (!anchor) {
-      await conn.rollback();
-      return { ok: false, code: "not_found" };
-    }
-    const [dup] = await conn.query(
-      `SELECT 1 FROM reports WHERE reporter_id = ? AND target_type = ? AND target_id = ? AND status = 'open' LIMIT 1`,
-      [reporterId, target.type, anchor.id]
-    );
-    if ((dup as unknown[]).length > 0) {
-      await conn.rollback();
-      return { ok: false, code: "duplicate" };
-    }
-    await conn.query(`INSERT INTO reports (reporter_id, target_type, target_id, reason) VALUES (?, ?, ?, ?)`, [
-      reporterId,
-      target.type,
-      anchor.id,
-      reason,
-    ]);
-    await conn.commit();
-    return { ok: true };
-  } catch {
-    await conn.rollback().catch(() => {});
-    return { ok: false, code: "db" };
-  } finally {
-    conn.release();
-  }
-}
-
 /** 举报处理：删除内容 / 保留内容仅忽略 / 直接关闭 */
-export async function adminHandleReport(
-  reportId: number,
-  handle: "delete_content" | "keep" | "dismiss",
-  note?: string
-): Promise<{ ok: boolean; error?: string }> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库不可用" };
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    const [rows] = await conn.query(
-      `SELECT id, target_type AS targetType, target_id AS targetId FROM reports WHERE id = ? FOR UPDATE`,
-      [reportId]
-    );
-    const rep = (rows as { id: number; targetType: string; targetId: number }[])[0];
-    if (!rep) {
-      await conn.rollback();
-      return { ok: false, error: "举报不存在" };
-    }
-    if (handle === "delete_content") {
-      if (rep.targetType === "article") {
-        await conn.query(`UPDATE articles SET status='removed', pinned=0, featured=0 WHERE id = ?`, [rep.targetId]);
-      } else {
-        await conn.query(`DELETE FROM comments WHERE id = ?`, [rep.targetId]);
-      }
-      await conn.query(`UPDATE reports SET status='resolved', handle_note=?, handled_at=NOW() WHERE id = ?`, [
-        (note ?? "已删除被举报内容").slice(0, 255),
-        reportId,
-      ]);
-    } else if (handle === "keep") {
-      await conn.query(`UPDATE reports SET status='resolved', handle_note=?, handled_at=NOW() WHERE id = ?`, [
-        (note ?? "核查后保留内容").slice(0, 255),
-        reportId,
-      ]);
-    } else {
-      await conn.query(`UPDATE reports SET status='dismissed', handle_note=?, handled_at=NOW() WHERE id = ?`, [
-        (note ?? "无效举报").slice(0, 255),
-        reportId,
-      ]);
-    }
-    await conn.commit();
-    return { ok: true };
-  } catch {
-    await conn.rollback();
-    return { ok: false, error: "处理失败（数据库异常）" };
-  } finally {
-    conn.release();
-  }
-}
-
 /** 管理操作审计日志（运营台所有敏感动作调用） */
-export async function logAdminAction(
-  adminId: number,
-  action: string,
-  targetType: string,
-  targetId: string | number,
-  detail?: string
-): Promise<void> {
-  const pool = await getPool();
-  if (!pool) return;
-  try {
-    await pool.query(
-      `INSERT INTO admin_actions (admin_id, action, target_type, target_id, detail) VALUES (?, ?, ?, ?, ?)`,
-      [adminId, action.slice(0, 64), targetType.slice(0, 32), String(targetId).slice(0, 64), detail?.slice(0, 500) ?? null]
-    );
-  } catch {
-    /* 日志失败静默 */
-  }
-}
-
 /* ---------- 首页：平台数据横幅 ---------- */
 
 export type PlatformStats = { articles: number; authors: number; qaTotal: number; tipsTotal: number };
@@ -878,32 +509,6 @@ export async function isFollowing(followerId: number | null, followeeId: number)
 }
 
 /** 关注/取关（toggle）。返回关注后的最新状态 */
-export async function toggleFollow(
-  followerId: number,
-  followeeId: number
-): Promise<{ ok: boolean; following?: boolean; error?: string }> {
-  if (followerId === followeeId) return { ok: false, error: "不能关注自己" };
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库不可用" };
-  try {
-    const [ex] = await pool.query(
-      `SELECT 1 AS x FROM follows WHERE follower_id = ? AND followee_id = ? LIMIT 1`,
-      [followerId, followeeId]
-    );
-    if (Array.isArray(ex) && ex.length > 0) {
-      await pool.query(`DELETE FROM follows WHERE follower_id = ? AND followee_id = ?`, [followerId, followeeId]);
-      return { ok: true, following: false };
-    }
-    await pool.query(
-      `INSERT IGNORE INTO follows (follower_id, followee_id) VALUES (?, ?)`,
-      [followerId, followeeId]
-    );
-    return { ok: true, following: true };
-  } catch {
-    return { ok: false, error: "操作失败（数据库异常）" };
-  }
-}
-
 /** 关注我的人（个人中心·粉丝列表） */
 export async function listMyFollowers(userId: number, limit = 50): Promise<FollowPeer[]>  {
   if (!javaReady()) return [];
@@ -926,61 +531,7 @@ export async function listMyLikes(userId: number, limit = 30): Promise<Footprint
 export async function listMyComments(userId: number, limit = 30): Promise<MyCommentRow[]>  {
   if (!javaReady()) return [];
   return remoteMyComments(limit);
-}
-/** 收藏/取消收藏（toggle），返回最新状态 */
-export async function toggleBookmark(userId: number, slug: string): Promise<{ bookmarked: boolean }> {
-  const pool = await getPool();
-  if (!pool) return { bookmarked: false };
-  // v17.5：必须限定 status='published'。原实现只按 slug 命中，于是草稿（乃至 removed）
-  //   也能被收藏——文章页对它们本就 404，收藏按钮无处可达，但接口可直接打；
-  //   更糟的是这会往 bookmarks 里种下外键子行，让作者的草稿硬删被 FK RESTRICT 挡下。
-  //   与 like / tip / boost / unlock 的公开态口径保持一致。
-  const [artRows] = await pool.query(
-    `SELECT id FROM articles WHERE slug = ? AND status = 'published' LIMIT 1`,
-    [slug]
-  );
-  const art = (artRows as Record<string, unknown>[])[0];
-  if (!art) return { bookmarked: false };
-  const articleId = Number(art.id);
-  // v17.9：改为「INSERT IGNORE 判态、失败再删」。
-  //   原实现是「先 SELECT 判是否已收藏 → 再裸 INSERT」，两条语句之间无锁：
-  //   并发/双击（或前端重试）时两个请求都判为「未收藏」，后到者撞唯一键 uk_bm
-  //   抛 ER_DUP_ENTRY，被路由 catch 成 500「收藏失败，请稍后再试」。
-  //   实测 20 并发首次收藏 → 1 成功 / 19 抛 ER_DUP_ENTRY。
-  //   唯一键本身已保证不会重复，这里只需让「重复插入」不再变成异常；
-  //   与 toggleFollow 的 INSERT IGNORE 写法保持一致。
-  //
-  // v18.0：上面的写法解决了 ER_DUP_ENTRY，但留下另一条失败路径——**ER_LOCK_DEADLOCK**。
-  //   `INSERT IGNORE` 撞到已存在的行时，InnoDB 要先对那一行取**共享锁**判定唯一键；
-  //   紧接着的 `DELETE` 又要把它升级成**排他锁**。N 个并发请求各持一把 S 锁、
-  //   又都想要 X 锁，于是成环死锁。实测同一 (user, article) 20 并发：
-  //   **10/20 抛 ER_LOCK_DEADLOCK**，被路由 catch 成 500「收藏失败，请稍后再试」。
-  //   （对照：toggleFollow / toggleCommentLike 20 并发零错误——它们只在「已存在」时
-  //     DELETE、只在「不存在」时 INSERT，不构成 S→X 升级。）
-  //   死锁是 InnoDB 的正常现象，官方给的解法就是**重放**；此处按语句重试 3 次并带抖动退避，
-  //   仅在「确实撞上可重试锁错误」时才多花一次往返。
-  //   重放语义安全：死锁会整条回滚该语句，状态不变；重放后再判一次态即得正确结果
-  //   （若前一次 INSERT 已成功、只死在 DELETE 上，重放的 INSERT IGNORE 会返回 0 并走 DELETE，
-  //    最终状态仍是「已取消收藏」，与 toggle 意图一致）。
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const [ins] = await pool.query(`INSERT IGNORE INTO bookmarks (user_id, article_id) VALUES (?, ?)`, [
-        userId,
-        articleId,
-      ]);
-      if (Number((ins as { affectedRows?: number }).affectedRows ?? 0) === 1) {
-        return { bookmarked: true };
-      }
-      await pool.query(`DELETE FROM bookmarks WHERE user_id = ? AND article_id = ?`, [userId, articleId]);
-      return { bookmarked: false };
-    } catch (e) {
-      if (!isRetryableLockError(e) || attempt >= 2) throw e;
-      await sleepMs(5 + Math.floor(Math.random() * 25) * (attempt + 1));
-    }
-  }
-}
-
-/** viewer 是否收藏了某篇 */
+}/** viewer 是否收藏了某篇 */
 export async function isBookmarked(userId: number | null, slug: string): Promise<boolean>  {
   if (!javaReady()) return false;
   return remoteIsBookmarked(userId, slug);
@@ -995,21 +546,6 @@ export async function listMyBookmarks(userId: number, limit = 50): Promise<Bookm
 /* ---------- 阅读历史「最近读过」（read_history 表由 db/schema.sql 建） ---------- */
 
 /** 记录一次阅读（同人同文去重，累计次数 + 刷新最近时间） */
-export async function recordRead(userId: number, slug: string): Promise<void> {
-  const pool = await getPool();
-  if (!pool) return;
-  try {
-    await pool.query(
-      `INSERT INTO read_history (user_id, article_id, read_times, read_at)
-       SELECT ?, id, 1, NOW() FROM articles WHERE slug = ? AND status = 'published'
-       ON DUPLICATE KEY UPDATE read_times = read_times + 1, read_at = NOW()`,
-      [userId, slug]
-    );
-  } catch {
-    /* 静默失败：阅读记录不影响主流程 */
-  }
-}
-
 /** 我的阅读足迹（个人中心「最近读过」） */
 export async function listMyHistory(userId: number, limit = 30): Promise<HistoryRow[]>  {
   if (!javaReady()) return [];
@@ -1301,108 +837,9 @@ export async function suggestSeriesTitles(authorId: number): Promise<SeriesTitle
 }
 
 /** 新建专栏，返回 id */
-export async function createSeries(authorId: number, title: string, description: string): Promise<number | null> {
-  const pool = await getPool();
-  if (!pool) return null;
-  const [res] = await pool.query(`INSERT INTO series (author_id, title, description) VALUES (?, ?, ?)`, [
-    authorId,
-    title.slice(0, 120),
-    description.slice(0, 500),
-  ]);
-  return Number((res as { insertId: bigint | number }).insertId) || null;
-}
-
 /** 更新专栏元信息（仅作者本人） */
-export async function updateSeriesMeta(
-  id: number,
-  authorId: number,
-  patch: { title?: string; description?: string; bundlePrice?: number | null }
-): Promise<boolean> {
-  const pool = await getPool();
-  if (!pool) return false;
-  const sets: string[] = [];
-  const args: unknown[] = [];
-  if (patch.title !== undefined) {
-    sets.push("title = ?");
-    args.push(patch.title.slice(0, 120));
-  }
-  if (patch.description !== undefined) {
-    sets.push("description = ?");
-    args.push(patch.description.slice(0, 500));
-  }
-  if (patch.bundlePrice !== undefined) {
-    // null/0 = 关闭打包；1-99999 = 一口价
-    const bp = patch.bundlePrice === null ? 0 : Math.floor(Number(patch.bundlePrice) || 0);
-    sets.push("bundle_price = ?");
-    args.push(bp > 0 && bp <= 99999 ? bp : null);
-  }
-  if (sets.length === 0) return true;
-  args.push(id, authorId);
-  const [res] = await pool.query(`UPDATE series SET ${sets.join(", ")} WHERE id = ? AND author_id = ?`, args);
-  return Number((res as { affectedRows: number }).affectedRows) > 0;
-}
-
 /** 删除专栏（仅作者本人；条目级联删除） */
-export async function deleteSeries(id: number, authorId: number): Promise<boolean> {
-  const pool = await getPool();
-  if (!pool) return false;
-  const [res] = await pool.query(`DELETE FROM series WHERE id = ? AND author_id = ?`, [id, authorId]);
-  return Number((res as { affectedRows: number }).affectedRows) > 0;
-}
-
 /** 重设专栏篇目（整体替换）：仅收本人已发布且过审的文章，按数组顺序定 position */
-export async function setSeriesItems(id: number, authorId: number, slugs: string[]): Promise<boolean> {
-  const pool = await getPool();
-  if (!pool) return false;
-  // 重复篇目直接拒绝（原实现靠 `命中行数 !== 入参个数` 间接挡下，语义相同但更隐晦；
-  // 且若放任重复进 INSERT，会撞 series_items 主键 (series_id, article_id)）
-  if (new Set(slugs).size !== slugs.length) return false;
-  // v17.9：整段收进单事务，并对 series 行 FOR UPDATE 串行化同一专栏的重设请求。
-  //   原实现是「SELECT 校验归属 → DELETE series_items → SELECT 篇目 id → INSERT」四条
-  //   各自自动提交的语句：并发重设（前端双击保存）时 DELETE 各自提交、INSERT 撞主键，
-  //   实测 12 并发 → 3 成功 / 9 抛错（ER_DUP_ENTRY + ER_LOCK_DEADLOCK）；更糟的是
-  //   某个请求 DELETE 已提交而 INSERT 抛错时，专栏篇目会被清空且不回填（部分写入）。
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    const [own] = await conn.query(
-      `SELECT id FROM series WHERE id = ? AND author_id = ? LIMIT 1 FOR UPDATE`,
-      [id, authorId]
-    );
-    if ((own as unknown[]).length === 0) {
-      await conn.rollback();
-      return false;
-    }
-    const idBySlug = new Map<string, number>();
-    if (slugs.length > 0) {
-      const [ok] = await conn.query(
-        `SELECT id, slug FROM articles WHERE author_id = ? AND status = 'published' AND review_status = 'approved'
-          AND slug IN (${slugs.map(() => "?").join(",")})`,
-        [authorId, ...slugs]
-      );
-      if ((ok as unknown[]).length !== slugs.length) {
-        await conn.rollback();
-        return false; // 有不属于自己的或未过审的
-      }
-      for (const r of ok as Record<string, unknown>[]) idBySlug.set(String(r.slug), Number(r.id));
-    }
-    await conn.query(`DELETE FROM series_items WHERE series_id = ?`, [id]);
-    if (slugs.length > 0) {
-      const values = slugs.map((slug, i) => [id, idBySlug.get(slug), i]).filter((v) => typeof v[1] === "number");
-      if (values.length > 0) {
-        await conn.query(`INSERT INTO series_items (series_id, article_id, position) VALUES ?`, [values]);
-      }
-    }
-    await conn.commit();
-    return true;
-  } catch {
-    await conn.rollback().catch(() => {});
-    return false;
-  } finally {
-    conn.release();
-  }
-}
-
 export type ArticleSeriesNav = {
   id: number;
   title: string;
@@ -1494,73 +931,6 @@ export type UnlockResult =
 /** 解锁付费文章：读者付 unlock_price，作者得 70%，平台 30%（购过幂等返回成功）
  *  v15.0：全程单事务原子化——先 INSERT 占位（唯一键判重防并发双花），
  *  再 FOR UPDATE 扣款 + 分账 + 流水，任一步失败整体回滚。 */
-export async function unlockArticle(slug: string, userId: number): Promise<UnlockResult> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库暂不可用" };
-  try {
-    const [rows] = await pool.query(
-      `SELECT id, author_id, IFNULL(unlock_price,0) AS price, IFNULL(discount_price,0) AS dprice,
-              discount_until AS duntil
-         FROM articles
-        WHERE slug = ? AND status = 'published' AND (review_status = 'approved' OR review_status IS NULL) LIMIT 1`,
-      [slug]
-    );
-    const art = (rows as { id: number; author_id: number; price: number; dprice: number; duntil: Date | string | null }[])[0];
-    if (!art) return { ok: false, error: "文章不存在或未公开" };
-    const price = effectiveUnlockPrice({
-      unlockPrice: Number(art.price),
-      discountPrice: Number(art.dprice ?? 0),
-      discountUntil: art.duntil ? new Date(art.duntil).toISOString() : null,
-    });
-    if (Number(art.price) <= 0) return { ok: false, error: "本文免费，无需解锁" };
-    if (Number(art.author_id) === userId) return { ok: false, error: "作者本人无需解锁" };
-
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
-      // 1) 占位判重：唯一键 (article_id, user_id) 挡并发双击
-      const [ins] = await conn.query(
-        `INSERT IGNORE INTO article_purchases (article_id, user_id, price, author_gain) VALUES (?, ?, 0, 0)`,
-        [art.id, userId]
-      );
-      if (Number((ins as { affectedRows?: number }).affectedRows ?? 0) === 0) {
-        await conn.rollback();
-        return { ok: true, price: 0, authorGot: 0, balance: -1 }; // 已解锁，幂等
-      }
-      // 2) 锁行扣款
-      const [balRows] = await conn.query(
-        `SELECT points_balance FROM users WHERE id = ? FOR UPDATE`,
-        [userId]
-      );
-      const bal = Number((balRows as Record<string, unknown>[])[0]?.points_balance ?? 0);
-      if (bal < price) {
-        await conn.rollback();
-        return { ok: false, error: `积分不足（余额 ${bal}，本次需 ${price}）` };
-      }
-      await conn.query(`UPDATE users SET points_balance = points_balance - ? WHERE id = ?`, [price, userId]);
-      await conn.query(`INSERT INTO point_ledger (user_id, delta, reason) VALUES (?, ?, ?)`, [userId, -price, "付费解锁文章"]);
-      // 3) 作者分账 70%
-      const authorGot = Math.floor(price * 0.7);
-      await conn.query(`UPDATE users SET points_balance = points_balance + ? WHERE id = ?`, [authorGot, Number(art.author_id)]);
-      await conn.query(`INSERT INTO point_ledger (user_id, delta, reason) VALUES (?, ?, ?)`, [Number(art.author_id), authorGot, "文章被解锁"]);
-      // 4) 补齐购买记录真实金额
-      await conn.query(
-        `UPDATE article_purchases SET price = ?, author_gain = ? WHERE article_id = ? AND user_id = ?`,
-        [price, authorGot, art.id, userId]
-      );
-      await conn.commit();
-      return { ok: true, price, authorGot, balance: bal - price };
-    } catch {
-      await conn.rollback();
-      return { ok: false, error: "解锁失败，请稍后再试" };
-    } finally {
-      conn.release();
-    }
-  } catch {
-    return { ok: false, error: "解锁失败，请稍后再试" };
-  }
-}
-
 export type BundleUnlockResult =
   | { ok: true; price: number; authorGot: number; unlocked: number; balance: number; already: boolean }
   | { ok: false; error: string; code: MoneyFailCode };
@@ -1573,92 +943,6 @@ export type BundleUnlockResult =
  * v15.0：全程单事务原子化——先 INSERT series_purchases 占位（唯一键防并发双花），
  * 再同事务内 FOR UPDATE 扣款 + 分账 + 逐篇落 article_purchases，任一步失败整体回滚。
  */
-export async function bundleUnlock(seriesId: number, userId: number): Promise<BundleUnlockResult> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库暂不可用", code: "server" };
-  try {
-    const [sRows] = await pool.query(
-      `SELECT id, author_id, bundle_price AS bundlePrice FROM series WHERE id = ? LIMIT 1`,
-      [seriesId]
-    );
-    const s = (sRows as { id: number; author_id: number; bundlePrice: number | null }[])[0];
-    if (!s) return { ok: false, error: "专栏不存在", code: "notfound" };
-    const bundlePrice = Math.floor(Number(s.bundlePrice ?? 0));
-    if (bundlePrice <= 0) return { ok: false, error: "本专栏未开放打包购买", code: "forbidden" };
-    if (Number(s.author_id) === userId) return { ok: false, error: "这是你自己的专栏，无需购买", code: "forbidden" };
-
-    // 未解锁的付费篇目（排除已单买过的）
-    const [aRows] = await pool.query(
-      `SELECT a.id, IFNULL(a.unlock_price,0) AS unlockPrice
-         FROM series_items si JOIN articles a ON a.id = si.article_id
-        WHERE si.series_id = ? AND a.status = 'published' AND a.review_status = 'approved'
-              AND IFNULL(a.unlock_price,0) > 0
-              AND NOT EXISTS(SELECT 1 FROM article_purchases p WHERE p.article_id = a.id AND p.user_id = ?)`,
-      [seriesId, userId]
-    );
-    const pending = (aRows as { id: number; unlockPrice: number }[]).map((r) => Number(r.id));
-    if (pending.length === 0) {
-      return { ok: false, error: "专栏内已无待解锁的付费篇目", code: "forbidden" };
-    }
-
-    // 分摊：floor 均摊，余数分给前几篇（保证 sum(shares) === bundlePrice）
-    const base = Math.floor(bundlePrice / pending.length);
-    let remainder = bundlePrice - base * pending.length;
-    const shares = pending.map(() => {
-      const extra = remainder > 0 ? 1 : 0;
-      if (remainder > 0) remainder -= 1;
-      return base + extra;
-    });
-    const authorGot = shares.reduce((sum, sh) => sum + Math.floor(sh * 0.7), 0);
-
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
-      // 1) 占位判重：唯一键 (series_id, user_id) 挡并发双击
-      const [ins] = await conn.query(
-        `INSERT IGNORE INTO series_purchases (series_id, user_id, price, author_gain, item_count) VALUES (?, ?, 0, 0, 0)`,
-        [seriesId, userId]
-      );
-      if (Number((ins as { affectedRows?: number }).affectedRows ?? 0) === 0) {
-        await conn.rollback();
-        return { ok: true, price: 0, authorGot: 0, unlocked: 0, balance: -1, already: true };
-      }
-      // 2) 锁行扣款
-      const [balRows] = await conn.query(`SELECT points_balance FROM users WHERE id = ? FOR UPDATE`, [userId]);
-      const bal = Number((balRows as Record<string, unknown>[])[0]?.points_balance ?? 0);
-      if (bal < bundlePrice) {
-        await conn.rollback();
-        return { ok: false, error: `积分不足（余额 ${bal}，本次需 ${bundlePrice}）`, code: "insufficient" };
-      }
-      await conn.query(`UPDATE users SET points_balance = points_balance - ? WHERE id = ?`, [bundlePrice, userId]);
-      await conn.query(`INSERT INTO point_ledger (user_id, delta, reason) VALUES (?, ?, ?)`, [userId, -bundlePrice, "专栏打包解锁"]);
-      // 3) 作者分账
-      await conn.query(`UPDATE users SET points_balance = points_balance + ? WHERE id = ?`, [authorGot, Number(s.author_id)]);
-      await conn.query(`INSERT INTO point_ledger (user_id, delta, reason) VALUES (?, ?, ?)`, [Number(s.author_id), authorGot, "专栏被打包解锁"]);
-      // 4) 逐篇落明细 + 补齐打包单真实金额
-      for (let i = 0; i < pending.length; i++) {
-        await conn.query(
-          `INSERT IGNORE INTO article_purchases (article_id, user_id, price, author_gain) VALUES (?, ?, ?, ?)`,
-          [pending[i], userId, shares[i], Math.floor(shares[i] * 0.7)]
-        );
-      }
-      await conn.query(
-        `UPDATE series_purchases SET price = ?, author_gain = ?, item_count = ? WHERE series_id = ? AND user_id = ?`,
-        [bundlePrice, authorGot, pending.length, seriesId, userId]
-      );
-      await conn.commit();
-      return { ok: true, price: bundlePrice, authorGot, unlocked: pending.length, balance: bal - bundlePrice, already: false };
-    } catch {
-      await conn.rollback();
-      return { ok: false, error: "打包解锁失败，请稍后再试", code: "server" };
-    } finally {
-      conn.release();
-    }
-  } catch {
-    return { ok: false, error: "打包解锁失败，请稍后再试", code: "server" };
-  }
-}
-
 /* ======================= 打赏 / 加热（单事务金钱链路） ======================= */
 
 export const TIP_AMOUNTS = [10, 50] as const;
@@ -1688,81 +972,6 @@ export type BoostResult =
  * 全在**同一事务**内，任一环节失败整体回滚，不再依赖补偿。
  * 并发安全：`SELECT ... FOR UPDATE` 按 id 升序锁定双方账户行，规避互相打赏时的死锁。
  */
-export async function tipArticle(
-  slug: string,
-  fromUserId: number,
-  amount: number
-): Promise<TipResult> {
-  if (!(TIP_AMOUNTS as readonly number[]).includes(amount)) {
-    return { ok: false, error: `打赏档位须为 ${TIP_AMOUNTS.join(" 或 ")} 点墨`, code: "server" };
-  }
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库暂不可用", code: "server" };
-  try {
-    const [rows] = await pool.query(
-      "SELECT id, author_id FROM articles WHERE slug = ? AND status = 'published' LIMIT 1",
-      [slug]
-    );
-    const art = (rows as { id: number; author_id: number }[])[0];
-    if (!art) return { ok: false, error: "文章不存在", code: "notfound" };
-    const toUserId = Number(art.author_id);
-    if (toUserId === fromUserId) return { ok: false, error: "不能给自己的文章打赏", code: "forbidden" };
-
-    const authorGot = Math.floor(amount * TIP_AUTHOR_SHARE);
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
-      // 1) 双方账户按 id 升序加锁（避免互相打赏造成交叉等待死锁）
-      const [lockRows] = await conn.query(
-        `SELECT id, points_balance FROM users WHERE id IN (?, ?) ORDER BY id FOR UPDATE`,
-        [fromUserId, toUserId]
-      );
-      const bal = Number(
-        (lockRows as Record<string, unknown>[]).find((r) => Number(r.id) === fromUserId)
-          ?.points_balance ?? 0
-      );
-      if (bal < amount) {
-        await conn.rollback();
-        return { ok: false, error: `积分不足（余额 ${bal}，本次需 ${amount}）`, code: "insufficient" };
-      }
-      // 2) 读者扣款 + 流水
-      await conn.query("UPDATE users SET points_balance = points_balance - ? WHERE id = ?", [
-        amount,
-        fromUserId,
-      ]);
-      await conn.query("INSERT INTO point_ledger (user_id, delta, reason) VALUES (?, ?, ?)", [
-        fromUserId,
-        -amount,
-        "墨水打赏",
-      ]);
-      // 3) 作者分账 + 流水
-      await conn.query("UPDATE users SET points_balance = points_balance + ? WHERE id = ?", [
-        authorGot,
-        toUserId,
-      ]);
-      await conn.query("INSERT INTO point_ledger (user_id, delta, reason) VALUES (?, ?, ?)", [
-        toUserId,
-        authorGot,
-        "收到打赏",
-      ]);
-      // 4) 明细落库（同事务，不再吞异常）
-      await conn.query(
-        "INSERT INTO article_tips (article_id, from_user, to_user, amount) VALUES (?, ?, ?, ?)",
-        [art.id, fromUserId, toUserId, amount]
-      );
-      await conn.commit();
-      return { ok: true, amount, authorGot, balance: bal - amount, toUserId };
-    } catch {
-      await conn.rollback();
-      return { ok: false, error: "打赏失败，请稍后再试", code: "server" };
-    } finally {
-      conn.release();
-    }
-  } catch {
-    return { ok: false, error: "打赏失败，请稍后再试", code: "server" };
-  }
-}
-
 /**
  * 文章加热（v17.3 单事务重构）。
  *
@@ -1772,83 +981,6 @@ export async function tipArticle(
  *
  * 现在：锁行扣款、流水、加热记录全在同一事务内，异常一律回滚，钱与货要么同时成立要么都不动。
  */
-export async function boostArticle(slug: string, userId: number): Promise<BoostResult> {
-  const pool = await getPool();
-  if (!pool) return { ok: false, error: "数据库暂不可用", code: "server" };
-  try {
-    const [rows] = await pool.query(
-      "SELECT id, author_id FROM articles WHERE slug = ? AND status = 'published' LIMIT 1",
-      [slug]
-    );
-    const art = (rows as { id: number; author_id: number }[])[0];
-    if (!art) return { ok: false, error: "文章不存在", code: "notfound" };
-    if (Number(art.author_id) !== userId) {
-      return { ok: false, error: "只能加热自己的文章", code: "forbidden" };
-    }
-
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
-      // 1) 锁行扣款 + 流水
-      const [balRows] = await conn.query(
-        "SELECT points_balance FROM users WHERE id = ? FOR UPDATE",
-        [userId]
-      );
-      const bal = Number((balRows as Record<string, unknown>[])[0]?.points_balance ?? 0);
-      if (bal < BOOST_COST) {
-        await conn.rollback();
-        return {
-          ok: false,
-          error: `积分不足（余额 ${bal}，本次需 ${BOOST_COST}）`,
-          code: "insufficient",
-        };
-      }
-      await conn.query("UPDATE users SET points_balance = points_balance - ? WHERE id = ?", [
-        BOOST_COST,
-        userId,
-      ]);
-      await conn.query("INSERT INTO point_ledger (user_id, delta, reason) VALUES (?, ?, ?)", [
-        userId,
-        -BOOST_COST,
-        "文章加热·24h",
-      ]);
-      // 2) 写入加热记录：叠加规则「新截止 = MAX(现在, 现有未过期截止) + 24h」
-      const [ins] = await conn.query(
-        `INSERT INTO article_boosts (article_id, user_id, boost_until)
-         VALUES (?, ?, DATE_ADD(GREATEST(NOW(), IFNULL(
-                    (SELECT MAX(b.boost_until) FROM article_boosts b
-                      WHERE b.article_id = ? AND b.boost_until > NOW()), NOW())), INTERVAL 24 HOUR))`,
-        [art.id, userId, art.id]
-      );
-      const boostId = Number((ins as { insertId?: number }).insertId ?? 0);
-      if (!boostId) {
-        await conn.rollback();
-        return { ok: false, error: "加热失败，请稍后再试", code: "server" };
-      }
-      const [untilRows] = await conn.query(
-        "SELECT boost_until AS until_ FROM article_boosts WHERE id = ?",
-        [boostId]
-      );
-      const until = (untilRows as { until_: Date | string | null }[])[0]?.until_ ?? null;
-      await conn.commit();
-      return {
-        ok: true,
-        cost: BOOST_COST,
-        balance: bal - BOOST_COST,
-        boostUntil:
-          until instanceof Date ? until.toISOString() : until ? new Date(String(until)).toISOString() : null,
-      };
-    } catch {
-      await conn.rollback();
-      return { ok: false, error: "加热失败，请稍后再试", code: "server" };
-    } finally {
-      conn.release();
-    }
-  } catch {
-    return { ok: false, error: "加热失败，请稍后再试", code: "server" };
-  }
-}
-
 /* ======================= 付费转化漏斗（书房看板） ======================= */
 
 export type FunnelRow = {
@@ -1865,20 +997,6 @@ export type FunnelRow = {
 };
 
 /** 记一次付费墙到达（仅被墙文章触发；失败静默——埋点不阻塞阅读） */
-export async function recordPaywallView(slug: string): Promise<void> {
-  const pool = await getPool();
-  if (!pool) return;
-  try {
-    await pool.query(
-      `UPDATE articles SET paywall_views = paywall_views + 1
-        WHERE slug = ? AND status = 'published' AND IFNULL(unlock_price,0) > 0 LIMIT 1`,
-      [slug]
-    );
-  } catch {
-    /* 埋点失败不影响主流程 */
-  }
-}
-
 /** 作者付费转化漏斗：阅读 → 付费墙 → 解锁（含收入），按解锁数降序 */
 export async function listMyFunnel(authorId: number): Promise<FunnelRow[]>  {
   if (!javaReady()) return [];

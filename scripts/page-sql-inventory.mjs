@@ -316,9 +316,9 @@ if (migrated.length) {
 if (!bad && !offenders.length) {
   console.log("\n✓ 登记表已清空：渲染层（页面 + 它能走到的所有模块）不再有任何进程内 SQL，");
   console.log("  \"页面只渲染、数据全问 Java\" 从此可以被机器复验。");
-  console.log("  （app/api/** 与 lib/data-legacy.ts 里那些直连 MySQL 的读是**待删的遗留 HTTP 面**，");
-  console.log("    不属于渲染层，由闸门 8 计数、P7f-2 一次删除——这一道刻意不把它们算进来，");
-  console.log("    否则\"还剩多少没迁\"会随每条路由的写法抖动。）");
+  console.log("  （P7f-2 之前这里还要解释一句：app/api/** 与 lib/data-legacy.ts 里那些直连 MySQL");
+  console.log("    的读是**待删的遗留 HTTP 面**，不属于渲染层，所以刻意不算进来——现在它们已经删了，");
+  console.log("    这条排除留在代码里只说明边界怎么画的：本闸门管渲染层，不管一个不存在的集合。）");
 } else if (!bad) {
   console.log(`\n⚠ 退出码 0（实况与登记表一字不差），但渲染层仍在这 ${offenders.length} 条里摸 MySQL：`);
   console.log("  \"web 退化为纯渲染层\" 还没成立，P7f-2 的删除前提因此**不成立**——");
