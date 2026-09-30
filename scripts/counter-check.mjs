@@ -30,6 +30,9 @@
 //     skipped。所以 read_count 与 SUM(read_history.read_times) 是同一件事的两个名字。
 //   · 种子写进去的虚构数字**保留**（演示首屏要有好看的读数），代价就是 §8 那张豁免表；
 //     表里逐条点名，不写成"凡是种子稿一律不查"这种会把判据掏空的规则。
+//   · 复算式与那张登记表的**出处**是 `scripts/counter-exempts.mjs`（P8c 收进去的）：这一道 import
+//     它们，改那一个文件等于同时改了这道闸门和 `scripts/recounters.mjs`（修数据那一条）。
+//     判的与修的各抄一份，最后会走成两边口径不一样——那时"修完了"和"判绿了"不再是同一件事。
 //
 //   node scripts/counter-check.mjs              跑完清场（夹具文章、评论、点赞、足迹、
 //                                               问答流水、站内信、审计、奖励流水与计数全还原）
@@ -49,6 +52,9 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { createRequire } from "node:module";
+// 复算式与豁免登记表**只有这一份**：判的那一条（闸门 21）和修的那一条（recounters）共用，
+// 抄两份迟早走成"修的人按 A 口径、判的人按 B 口径"。
+import { COLUMNS, EXEMPT, measureDrift, exemptKey, isExempt } from "./counter-exempts.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const env = Object.fromEntries(
@@ -157,80 +163,6 @@ const closeOnce = () => new Promise((resolve) => {
   server.once("close", resolve);
   server.close();
 });
-
-/* ==================== 四列的复算式（一行一处，改口径只能改这里） ==================== */
-
-const COLUMNS = [
-  { col: "read_count", real: (id) => ["SELECT IFNULL(SUM(read_times),0) AS n FROM read_history WHERE article_id = ?", [id]],
-    why: "登录读者每打开一次 +1，与 SUM(read_times) 同涨" },
-  { col: "comment_count", real: (id) => ["SELECT COUNT(*) AS n FROM comments WHERE article_id = ?", [id]],
-    why: "发一条评论 +1（楼中楼也算一条），删多少行扣多少" },
-  { col: "like_count", real: (id) => ["SELECT COUNT(*) AS n FROM article_likes WHERE article_id = ?", [id]],
-    why: "点赞一人一行，取消即减" },
-  { col: "agent_qa_count", real: (id) => ["SELECT COUNT(*) AS n FROM agent_qa WHERE article_id = ?", [id]],
-    why: "P8a 起问答按 slug 归属，认领到才 +1" },
-];
-
-/**
- * 豁免登记表：换栈之前就坏在库里的那些（种子写的展示值 / 种子直接 INSERT 的演示行）。
- * 后两个数字是**登记当时**的 stored 与 real，只给人看来历，不参与比对；比对认的是名字。
- * 规则是双向棘轮：登记表外的新不一致 → 红；登记过但已经不差的 → 也红（该摘掉）。
- */
-const EXEMPT = [
-  ["shou-xie-promise", "read_count", 12840, 3],
-  ["shou-xie-promise", "comment_count", 135, 2],
-  ["shou-xie-promise", "agent_qa_count", 1284, 0],
-  ["wenfeng-dangan", "read_count", 4200, 0],
-  ["wenfeng-dangan", "comment_count", 90, 3],
-  ["wenfeng-dangan", "agent_qa_count", 302, 0],
-  ["pgvector-gou-yong", "read_count", 3800, 13],
-  ["pgvector-gou-yong", "comment_count", 65, 1],
-  ["pgvector-gou-yong", "agent_qa_count", 96, 0],
-  ["cong-ling-kai-shi-xie-zuo", "read_count", 1047, 0],
-  ["cong-ling-kai-shi-xie-zuo", "like_count", 35, 0],
-  ["cong-ling-kai-shi-xie-zuo", "agent_qa_count", 1, 0],
-  ["shen-ye-shu-dian", "read_count", 1015, 1],
-  ["shen-ye-shu-dian", "like_count", 55, 0],
-  ["shen-ye-shu-dian", "agent_qa_count", 6, 0],
-  ["ai-fen-shen-she-ji-si-lu", "read_count", 3495, 0],
-  ["ai-fen-shen-she-ji-si-lu", "like_count", 49, 0],
-  ["ai-fen-shen-she-ji-si-lu", "agent_qa_count", 17, 0],
-  ["man-pao-yu-xie-zuo", "read_count", 1360, 1],
-  ["man-pao-yu-xie-zuo", "like_count", 54, 0],
-  ["man-pao-yu-xie-zuo", "agent_qa_count", 4, 0],
-  ["mysql-man-cha-xun-pai-cha-shi-ji", "read_count", 970, 0],
-  ["mysql-man-cha-xun-pai-cha-shi-ji", "like_count", 19, 0],
-  ["mysql-man-cha-xun-pai-cha-shi-ji", "agent_qa_count", 15, 0],
-  ["cheng-shi-man-bu-bi-ji", "read_count", 2283, 0],
-  ["cheng-shi-man-bu-bi-ji", "like_count", 64, 0],
-  ["cheng-shi-man-bu-bi-ji", "agent_qa_count", 1, 0],
-  ["qian-duan-xing-neng-you-hua-qing-dan", "read_count", 1599, 1],
-  ["qian-duan-xing-neng-you-hua-qing-dan", "like_count", 54, 0],
-  ["qian-duan-xing-neng-you-hua-qing-dan", "agent_qa_count", 6, 0],
-  ["rag-yin-yong-lu-bi-zhun-que-lu", "read_count", 3686, 0],
-  ["rag-yin-yong-lu-bi-zhun-que-lu", "like_count", 62, 0],
-  ["rag-yin-yong-lu-bi-zhun-que-lu", "agent_qa_count", 11, 0],
-  ["wo-de-ge-ren-zhi-shi-ku", "read_count", 1510, 0],
-  ["wo-de-ge-ren-zhi-shi-ku", "like_count", 32, 0],
-  ["wo-de-ge-ren-zhi-shi-ku", "agent_qa_count", 8, 0],
-  ["du-li-kai-fa-zhe-zhi-fu-ji-hua", "read_count", 2796, 0],
-  ["du-li-kai-fa-zhe-zhi-fu-ji-hua", "like_count", 49, 0],
-  ["yu-fa-bao-han-shi-ru-he-du-shu", "read_count", 2993, 0],
-  ["yu-fa-bao-han-shi-ru-he-du-shu", "like_count", 63, 0],
-  ["yu-fa-bao-han-shi-ru-he-du-shu", "agent_qa_count", 4, 0],
-  ["xie-zuo-de-yi-shi-gan", "read_count", 1907, 0],
-  ["xie-zuo-de-yi-shi-gan", "like_count", 21, 0],
-  ["xie-zuo-de-yi-shi-gan", "agent_qa_count", 11, 0],
-  ["nei-rong-chuang-zuo-ai-shi-yong-shou-ce", "read_count", 2049, 6],
-  ["nei-rong-chuang-zuo-ai-shi-yong-shou-ce", "like_count", 44, 0],
-  ["nei-rong-chuang-zuo-ai-shi-yong-shou-ce", "agent_qa_count", 11, 0],
-  ["ye-jian-mo-shi-she-ji-ru-kao-cha", "read_count", 532, 0],
-  ["ye-jian-mo-shi-she-ji-ru-kao-cha", "like_count", 53, 0],
-  ["ye-jian-mo-shi-she-ji-ru-kao-cha", "agent_qa_count", 4, 0],
-  ["bo-20260911-1", "read_count", 0, 12],
-  ["bo-20260911-1", "comment_count", 0, 4],
-  ["bo-20260914-2", "read_count", 0, 1],
-];
 
 /* ==================== 现场与清场 ==================== */
 
@@ -604,29 +536,20 @@ async function suit() {
 
   /* ---------- 8 全库复算 + 豁免登记表（双向棘轮） ---------- */
   console.log("\n## 8 全库逐列复算：登记表外的新不一致红，登记表里已归零的也红");
-  const [all] = await conn.query(`SELECT id, slug, read_count, comment_count, like_count, agent_qa_count
-      FROM articles ORDER BY id`);
-  const drift = [];
-  for (const a of all) {
-    for (const s of COLUMNS) {
-      const r = await real(s, a.id);
-      if (Number(a[s.col]) !== r) drift.push([a.slug, s.col, Number(a[s.col]), r]);
-    }
-  }
-  const key = (s, c) => `${s}|${c}`;
-  const exemptKeys = new Set(EXEMPT.map((e) => key(e[0], e[1])));
-  const fresh = drift.filter((d) => !exemptKeys.has(key(d[0], d[1])));
+  // 复算这件事交给 counter-exempts 里那一份 measureDrift：对齐脚本修的就是它量出来的东西，
+  // 两边各写一遍循环的话，"修完了"和"判绿了"会不是同一件事。
+  const { articles: total, drift } = await measureDrift(conn);
+  const fresh = drift.filter((d) => !isExempt(d.slug, d.col));
   check(fresh.length === 0,
     `登记表之外没有任何不一致（现存漂移 ${drift.length} 项，全部来自登记过的种子/历史数据）`,
-    () => fresh.slice(0, 8).map((d) => `${d[0]}.${d[1]}：stored=${d[2]} real=${d[3]}`).join(" ; ") || `0 项`);
-  const driftKeys = new Set(drift.map((d) => key(d[0], d[1])));
-  const stale = EXEMPT.filter((e) => !driftKeys.has(key(e[0], e[1])));
+    () => fresh.slice(0, 8).map((d) => `${d.slug}.${d.col}：stored=${d.stored} real=${d.real}`).join(" ; ") || `0 项`);
+  const driftKeys = new Set(drift.map((d) => exemptKey(d.slug, d.col)));
+  const stale = EXEMPT.filter((e) => !driftKeys.has(exemptKey(e[0], e[1])));
   check(stale.length === 0,
     "登记表里每一条**仍然**不一致（已经归零的却不摘，下一个人会以为数据还是坏的）",
     () => stale.slice(0, 8).map((e) => `${e[0]}.${e[1]}`).join(" ; ") || `0 条`);
-  const driftedSlugs = new Set(drift.map((d) => d[0]));
-  const cleanArticles = all.filter((a) => !driftedSlugs.has(a.slug)).length;
+  const cleanArticles = total - new Set(drift.map((d) => d.slug)).size;
   check(drift.length > 0 && cleanArticles > 0,
     "上面两条的宾语两头都非空：既有登记在册的漂移、也有四列全对得上的文章（缺任一头都是空断言）",
-    () => `文章 ${all.length} 篇 · 全对的 ${cleanArticles} 篇 · 漂移条目 ${drift.length} · 豁免表 ${EXEMPT.length} 条`);
+    () => `文章 ${total} 篇 · 全对的 ${cleanArticles} 篇 · 漂移条目 ${drift.length} · 豁免表 ${EXEMPT.length} 条`);
 }
