@@ -91,6 +91,7 @@ public class AgentAskService {
   private final String agentServiceUrl;
   private final String deepseekKey;
   private final String deepseekBase;
+  private final long streamTimeoutMs;
   private final ObjectMapper json = new ObjectMapper();
   private final HttpClient http = HttpClient.newBuilder()
       .connectTimeout(Duration.ofSeconds(8))
@@ -99,7 +100,8 @@ public class AgentAskService {
   public AgentAskService(PointsService points, RagService rag, AgentQaRecorder qa, AvatarEngine engine,
       @Value("${inkstack.agent.service-url:}") String agentServiceUrl,
       @Value("${inkstack.agent.deepseek-key:}") String deepseekKey,
-      @Value("${inkstack.agent.deepseek-base:https://api.deepseek.com}") String deepseekBase) {
+      @Value("${inkstack.agent.deepseek-base:https://api.deepseek.com}") String deepseekBase,
+      @Value("${inkstack.agent.stream-timeout-ms:60000}") long streamTimeoutMs) {
     this.points = points;
     this.rag = rag;
     this.qa = qa;
@@ -107,6 +109,9 @@ public class AgentAskService {
     this.agentServiceUrl = agentServiceUrl;
     this.deepseekKey = deepseekKey;
     this.deepseekBase = deepseekBase;
+    // 配置写成 0 或负数 = 退回默认 60 秒，而不是"不设限"："永远等下去"正是这一期要消灭的状态，
+    // 所以这里不给它一个"关掉"的取值（UpstreamDeadline 里那个 <=0 的分支只是防御性兜底）。
+    this.streamTimeoutMs = streamTimeoutMs > 0 ? streamTimeoutMs : 60_000L;
   }
 
   /**
@@ -153,8 +158,7 @@ public class AgentAskService {
             return new Reply.Status(402, Map.of("error", nullToEmpty(spend.error())));
           }
           insertQa(uid, articleSlug, question, "(AgentScope streamed)", "[]");
-          long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
-          return new Reply.Stream(out -> pump(upstream.body(), out, deadline));
+          return new Reply.Stream(out -> pump(upstream.body(), out));
         }
       }
     }
@@ -271,8 +275,26 @@ public class AgentAskService {
    * <p>按<b>字节</b>切行而不是先解码再切：{@code \n} 不可能出现在 UTF-8 多字节序列中间，
    * 所以"字节级找行、整行解码"与 Node 的"增量解码后再 split" 结果相同，
    * 却省掉一个 CharsetDecoder 的半字符滞留问题。末尾不足一行的残字节两栈一起丢。
+   *
+   * <p>这一侧从前<b>一句截止都没有</b>（透传那条至少还在两块之间判一下），上游卡住就是永远卡住。
+   * 现在挂同一款守卫：到点关流，把那次 IOException 翻成一句人话再往上抛，
+   * 由 {@link #streamLive} 现成的 catch 发 error 帧并说明"本次已计费"——不另开一条出口，
+   * 免得两条通道对同一件事说两种话。
    */
   private void readSse(InputStream in, OutputStream out) throws IOException {
+    UpstreamDeadline deadline = UpstreamDeadline.arm(in, streamTimeoutMs);
+    try {
+      readSseInto(in, out);
+    } catch (IOException broken) {
+      throw deadline.stalled()
+          ? new IOException("AI 服务" + deadline.seconds() + " 秒没有再吐字，这次回答不完整")
+          : broken;
+    } finally {
+      deadline.close();
+    }
+  }
+
+  private void readSseInto(InputStream in, OutputStream out) throws IOException {
     try (InputStream body = in) {
       ByteArrayOutputStream tail = new ByteArrayOutputStream();
       byte[] chunk = new byte[8192];
@@ -425,7 +447,10 @@ public class AgentAskService {
   private HttpResponse<InputStream> postJson(String url, Map<String, Object> payload, String authorization) {
     try {
       HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url))
-          .timeout(Duration.ofSeconds(60))
+          // 同一个旋钮管两头：`.timeout` 只 bounds 到响应头（这是 JDK 的行为，实测过），
+          // 体那一侧由 UpstreamDeadline 关流来 bounds。分成两个独立数字会让人以为整条链
+          // 是"头 60 秒 + 体 60 秒"，而那恰好是没人想要的形状。
+          .timeout(Duration.ofMillis(streamTimeoutMs))
           .header("Content-Type", "application/json")
           .POST(HttpRequest.BodyPublishers.ofString(
               json.writeValueAsString(payload), StandardCharsets.UTF_8));
@@ -444,21 +469,45 @@ public class AgentAskService {
   /**
    * 透传：原样搬运上游字节，一帧都不重排——上游已经是 NDJSON 了。
    *
-   * <p>截止时刻对齐 Node 的 {@code AbortSignal.timeout(60_000)}。差别要说清楚：Node 那个信号
-   * 能在一次 read 正卡着时把它打断，这里只能在两块之间判——真出现"60 秒一个字节都不来"的挂起，
-   * 得靠连接层（LB / TCP）先收走。这不是把防护做小了就是把流式做贵了的取舍，P7 与共享限流一起收。
+   * <p>截止由 {@link UpstreamDeadline} 从另一条线程关流兑现。旧写法是"在两块数据之间判
+   * {@code System.nanoTime() > deadline}"，那句判断得先等到下一块数据才有机会跑——
+   * 上游不再吐字节时它一次都不执行，于是一次挂起把 servlet 工作线程永久占住
+   * （攒够 Tomcat 默认那 200 个，整台服务连 {@code /api/auth/me} 都不答）。
+   *
+   * <p>任何一次截断都补一帧 {@code error}，不静默收尾——被截止关掉的那次，以及上游半路断掉的那次
+   * （live 通道本来就是这个姿势，两条通道对同一件事说同一种话）。这套协议没有 {@code [DONE]} 哨兵，
+   * "被截断"与"说完了"在读侧本来不可区分。补帧前如果上一块字节停在半行上，先补一个换行——
+   * 否则那半帧会与 error 帧黏成一行，读者按行切的时候把那句"卡住了"一起丢进解析失败。
+   * 这一处刻意偏离旧实现（Node 那边是把 abort 后的半截流直接收尾，什么帧都不发），
+   * 写在 README 的缺口一节而不是藏在这里。
    */
-  private static void pump(InputStream in, OutputStream out, long deadlineNanos) throws IOException {
+  private void pump(InputStream in, OutputStream out) throws IOException {
+    byte[] chunk = new byte[8192];
+    boolean lineOpen = false;
+    UpstreamDeadline deadline = UpstreamDeadline.arm(in, streamTimeoutMs);
     try (InputStream body = in) {
-      byte[] chunk = new byte[8192];
       int read;
       while ((read = body.read(chunk)) != -1) {
         out.write(chunk, 0, read);
         out.flush();
-        if (System.nanoTime() > deadlineNanos) {
+        lineOpen = chunk[read - 1] != '\n';
+      }
+      return;
+    } catch (IOException broken) {
+      String message = "分身服务"
+          + (deadline.stalled() ? deadline.seconds() + " 秒没有再吐字" : "连接中断")
+          + "，这次回答不完整（本次问答已按成功计费）";
+      if (lineOpen) {
+        // 半帧不收口就会把下面这一行吃掉，读者那句"卡住了"跟着一起进了解析失败
+        try {
+          out.write('\n');
+        } catch (IOException clientGone) {
           return;
         }
       }
+      send(out, frame("type", "error", "message", message));
+    } finally {
+      deadline.close();
     }
   }
 

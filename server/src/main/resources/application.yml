@@ -89,6 +89,12 @@ inkstack:
     # live 通道的 DeepSeek 接入点。默认官方地址，留口子是为了让闸门拿本地 SSE 夹具
     # 验"上游坏态不扣墨"——不留就只能对着真大模型测，每验一次真花一次 token。
     deepseek-base: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+    # 一次问答从头到尾允许多久没动静（毫秒）。两头都归它管：响应头由 JDK 的请求超时，
+    # 响应体由 UpstreamDeadline 到点关流——后者才是这一期的重点，因为 JDK 的请求超时管不到
+    # "头都到了、一个字节都不再吐"的那种挂起，会把一个 Tomcat worker 永久占住。
+    # 留短是给闸门用的（见 scripts/ai-check.mjs 的前提那一段），线上不要设成 0：
+    # 0 与负数在这里一律退回 60000，不给它"永不超时"这个取值。
+    stream-timeout-ms: ${AGENT_STREAM_TIMEOUT_MS:60000}
     # 智能体引擎：off=沿用三条通道（默认，双轨对拍要求两侧同行为）；
     # spring-ai=用 Java 侧的 Spring AI 智能体顶掉 Python 的 agent-service。
     # ⚠ 这是**只存在于 Java 侧的第四通道**：开了它就必须把 /api/ai 与 /api/agent 整前缀切给 Java，

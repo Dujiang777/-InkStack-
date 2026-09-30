@@ -28,16 +28,20 @@
 //      真大模型、真扣墨**，所以 ask 的用例一律在 ② ③ 那对上跑。
 //      ⚠ AI 的三个配置变量现在**只有 Java 侧读**（Node 那份 ai/agent 实现随 app/api/** 一起
 //      删了），Next 那一侧只需要 JAVA_BASE 指对，不必再抄一遍 AGENT_SERVICE_URL / DEEPSEEK_API_KEY。
-//   ② 一对「接了夹具」的实例，测分身透传与 DeepSeek SSE 两条通道：
+//   ② 一对「接了夹具」的实例，测分身透传与 DeepSeek SSE 两条通道，以及**上游卡住时怎么收**：
 //        JAVA_BASE=http://localhost:3196 NEXT_DIST_DIR=.next-aitest \
 //          node node_modules/next/dist/bin/next dev -p 3296
 //        cd server && JAVA_HOME=<jdk17> mvn -o -s settings.xml spring-boot:run \
 //          -Dspring-boot.run.arguments="--server.port=3196 \
 //            --inkstack.agent.service-url=http://127.0.0.1:4601 \
 //            --inkstack.agent.deepseek-key=gate-fake-key \
-//            --inkstack.agent.deepseek-base=http://127.0.0.1:4601"
+//            --inkstack.agent.deepseek-base=http://127.0.0.1:4601 \
+//            --inkstack.agent.stream-timeout-ms=2000"
 //      Key 是假的、base 指向夹具自己的 /chat/completions——**这两件事必须同时成立**，
 //      不然"上游 503 不许扣墨"这种用例每跑一次就真向官方 API 发一次请求。
+//      stream-timeout 要设成 2000 也是同一类前提：卡住那两档测的是"到点自己收干净"，
+//      留在默认 60 秒档上，那两条判据要么等一分钟、要么根本不返回。所以它们红的时候
+//      先怀疑这一条启动参数没带，而不是产品坏了（判据的 detail 里就把这个原因写着）。
 //   ③ 一对「什么都没配」的裸实例，测 demo 通道（游客可问）：
 //        JAVA_BASE=http://localhost:3194 NEXT_DIST_DIR=.next-agentask \
 //          node node_modules/next/dist/bin/next dev -p 3294
@@ -146,12 +150,12 @@ const paid = (r) => r.status === 200 && r.json?.fallback === undefined
  * "等十几秒然后整篇砸脸上"，功能没坏但体验全毁——而这正是切流最容易丢掉的东西。
  * 混进来的 [DONE] 也数进 badLines：契约里没有这个哨兵，谁把它透传出来谁就是错的。
  */
-async function askStream(base, body, cookie) {
+async function askStream(base, body, cookie, signal) {
   const h = { "content-type": "application/json" };
   if (cookie) h.cookie = cookie;
   let res;
   try {
-    res = await fetch(base + "/api/agent/ask", { method: "POST", headers: h, body: JSON.stringify(body) });
+    res = await fetch(base + "/api/agent/ask", { method: "POST", headers: h, body: JSON.stringify(body), signal });
   } catch (down) {
     return { status: 0, json: null, frames: [], text: `连不上：${down?.message ?? down}`, chunks: 0, contentType: "", backend: "", badLines: 0 };
   }
@@ -181,6 +185,31 @@ async function askStream(base, body, cookie) {
   return { status: res.status, json: null, frames, text: buf, chunks, contentType, backend, badLines };
 }
 const ask = (base, body, cookie) => askStream(base, body, cookie);
+/**
+ * 跑一次并计时，**带客户端天花板**（默认 25 秒）。
+ *
+ * stall 那两档判的是"服务端到点自己收干净"。如果服务端根本不收（旧实现就是这样：
+ * 一次 read 卡着，那句 deadline 判断永远等不到下一块数据），一个不加天花板的判据
+ * 不会红，它会把整道闸门一起挂住——判据必须能失败，不能只是不动。
+ * 所以这里到点由客户端掐线，并把 aborted 交回判据去说"是哪一边没收"。
+ */
+const CEILING_MS = 25_000;
+async function timedAsk(base, body, cookie, ceiling = CEILING_MS) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ceiling);
+  const t0 = Date.now();
+  try {
+    const r = await askStream(base, body, cookie, ac.signal);
+    return { ...r, ms: Date.now() - t0, hitCeiling: false };
+  } catch (neverEnded) {
+    return {
+      status: 0, json: null, frames: [], text: "", chunks: 0, contentType: "", backend: "",
+      badLines: 0, ms: Date.now() - t0, hitCeiling: true,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 /** 把 delta 帧拼回文本：三条通道都用它断言"读者看到的就是这份字"。 */
 const streamed = (r) => r.frames.filter((f) => f.type === "delta").map((f) => f.text).join("");
 /**
@@ -195,8 +224,8 @@ const upstreamHits = [];
 const agentHits = [];      // 通道①：Python 分身服务收到的请求体
 const deepseekHits = [];   // 通道②：DeepSeek 收到的请求体
 let upstreamMode = "ok"; // ok | blank | error | garbage
-let agentMode = "ok";    // 分身透传：ok | error
-let sseMode = "ok";      // DeepSeek SSE：ok | error | abort
+let agentMode = "ok";    // 分身透传：ok | error | stall（发半帧就卡住不关连接）
+let sseMode = "ok";      // DeepSeek SSE：ok | error | abort | stall（吐两帧就卡住不关连接）
 const nap = (ms) => new Promise((r) => setTimeout(r, ms));
 const server = http.createServer((req, res) => {
   const url = (req.url || "/").split("?")[0];
@@ -212,7 +241,9 @@ const server = http.createServer((req, res) => {
     req.on("data", (c) => { raw += c; });
     req.on("end", async () => {
       try { agentHits.push(JSON.parse(raw)); } catch { agentHits.push({ unparsable: raw.slice(0, 60) }); }
-      if (agentMode !== "ok") {
+      if (agentMode === "error") {
+        // 只认 error：从前这里写的是 `agentMode !== "ok"`，于是新加的任何一档都会被这一支先吃掉，
+        // 表现是"透传通道的那条用例其实没打在透传上"——夹具自己也得有宾语。
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "夹具模拟分身服务 500" }));
         return;
@@ -224,6 +255,14 @@ const server = http.createServer((req, res) => {
         { type: "cite", citation: "《夹具·透传》" },
       ];
       res.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8" });
+      if (agentMode === "stall") {
+        // 头给了、第一帧也到了，然后一个字节都不再吐，也不关连接。
+        // **故意停在半行上**（没有结尾的换行）：这是为了让"补 error 帧之前先补换行"那一句
+        // 有宾语——不补，error 就与这半帧黏成一行，读者按行切的时候正好把那句"卡住了"丢掉。
+        res.write('{"type":"delta","text":"半帧');
+        console.log("    [夹具] 透传通道已发半帧并卡住");
+        return;
+      }
       for (const frame of frames) {
         res.write(`${JSON.stringify(frame)}\n`);
         await nap(20);
@@ -253,6 +292,14 @@ const server = http.createServer((req, res) => {
         res.write('data: {"choices":[{"delta":{"content":"就断了"}}]}\n\n');
         await nap(120);
         if (res.socket) res.socket.destroy(); else res.end();
+        return;
+      }
+      if (sseMode === "stall") {
+        // 两帧正常吐出去，然后**卡住不关连接**。这一档与上面那档是两种失败：abort 是连接被掐，
+        // read 当场就抛；stall 是"活着的挂起"——JDK 的请求超时只管到响应头，那种挂起它看不见。
+        res.write('data: {"choices":[{"delta":{"content":"半句"}}]}\n\n');
+        res.write('data: {"choices":[{"delta":{"content":"卡住了"}}]}\n\n');
+        console.log("    [夹具] SSE 已发两帧并卡住（不关连接）");
         return;
       }
       const sse = [
@@ -724,6 +771,52 @@ async function suit() {
     "余额 3 → 402 且一次都没问到上游（问答的文案是「墨水不足」，与写作的「积分不足」不是一条，别顺手统一）",
     () => `代理=${poorN.json?.error} 直连=${poorJ.json?.error} 上游收到=${agentHits.length}`);
   await conn.query("UPDATE users SET points_balance = ? WHERE id = ?", [balance, uid]);
+
+  /* 卡住的上游（P9）：这一档只有"短超时"那一台测得动，前提见文件头 §② 的那条启动参数。
+   * 它测的是一件既有闸门全都看不见的事：一次 read 正卡着的时候，代码没有任何机会去判超时。 */
+  agentMode = "stall";
+  const hitsBeforeStall = agentHits.length;
+  const balBeforeStall = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
+  const [klN, klJ] = await Promise.all([
+    timedAsk(APROXY, { question: "上游卡住轮·透传" }, writerA),
+    timedAsk(ADIRECT, { question: "上游卡住轮·透传" }, writerA),
+  ]);
+  qaCharged += 2;
+  const stallMs = Math.max(klN.ms, klJ.ms);
+  check(!klJ.hitCeiling && !klN.hitCeiling && klJ.status === 200 && klN.status === 200 && stallMs < 12_000,
+    "上游发半帧就卡住时，这一次请求**自己在短档内收干净**——不是等 TCP 或反代来救"
+    + "（红在这里通常是那一台没按前提用 --inkstack.agent.stream-timeout-ms=2000 起，还停在默认 60 秒档；"
+    + "如果服务端根本不收，客户端会在 25 秒掐线，hitCeiling=true 就是那一种红）",
+    () => `代理=${klN.ms}ms/掐线=${klN.hitCeiling} 直连=${klJ.ms}ms/掐线=${klJ.hitCeiling}`);
+  check(agentHits.length === hitsBeforeStall + 2,
+    "这一档**确实打在透传通道上**（夹具收到两次提问）——上一轮的教训：夹具的 mode 守卫写宽了，"
+    + "请求悄悄落回 live 通道，于是两条计时判据照样绿而它们测的不是那件事。计时判据必须配一个宾语判据",
+    () => `夹具累计收到=${agentHits.length}（进这一档前 ${hitsBeforeStall}，期望 +2）`);
+  const stalledFrame = (r) => r.frames.at(-1);
+  check(stalledFrame(klJ)?.type === "error" && stalledFrame(klN)?.type === "error"
+    && String(stalledFrame(klJ)?.message).includes("秒没有再吐字")
+    && String(stalledFrame(klJ)?.message).endsWith("（本次问答已按成功计费）")
+    && JSON.stringify(stalledFrame(klN)) === JSON.stringify(stalledFrame(klJ)),
+    "截断必须说出来：末尾那一帧是 error，不是一声不响地关连接"
+    + "（这套 NDJSON 没有 [DONE] 哨兵，静默 EOF 与『说完了』在读侧是同一件事）",
+    () => `直连=${JSON.stringify(klJ.frames)} 代理=${JSON.stringify(klN.frames)}`);
+  check(klJ.badLines === 1 && klJ.frames.length === 1 && klN.badLines === 1 && klN.frames.length === 1,
+    "那半帧确实坏了（一行解不出来），而 error 是**单独一行**没被它吃掉——这一条测的是"
+    + "『补 error 帧之前先补一个换行』：不补，两句就黏成一行，读者连那句『卡住了』都拿不到",
+    () => `直连坏行=${klJ.badLines} 直连帧数=${klJ.frames.length} 代理坏行=${klN.badLines}`);
+  const balAfterStall = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
+  check(balAfterStall === balBeforeStall - 10,
+    "卡住的这一次仍然按『已扣费』结账：墨在透传 2xx 那一刻就扣了，截断不改账（两个入口各 5）",
+    () => `扣前=${balBeforeStall} 扣后=${balAfterStall}`);
+  await conn.query("UPDATE users SET points_balance = ? WHERE id = ?", [balance, uid]);
+  agentMode = "ok";
+  const afterStall = await timedAsk(ADIRECT, { question: "卡住之后的复原轮" }, writerA);
+  qaCharged += 1;
+  check(afterStall.status === 200 && afterStall.frames.at(-1)?.type === "cite" && afterStall.ms < 8_000,
+    "关掉一条卡住的上游流之后，同一台服务下一轮照常出完整四帧"
+    + "（这条只证明『那个 worker 还回来了、下一轮用得上』，不是线程计数——没有把它说成线程数）",
+    () => `状态=${afterStall.status} 帧=${JSON.stringify(afterStall.frames.map((f) => f.type))} 用时=${afterStall.ms}ms`);
+  await conn.query("UPDATE users SET points_balance = ? WHERE id = ?", [balance, uid]);
   agentMode = "error"; // 分身服务坏了 → 落 live 通道（正是 §9 要的姿势）
 
   /* ---------- 9 live 通道：SSE → NDJSON，坏态一律不扣墨 ---------- */
@@ -769,10 +862,10 @@ async function suit() {
     "历史裁到 600 字、本次提问原样收尾",
     () => `历史=${String(sentDeep.messages?.[3]?.content).length} 收尾=${JSON.stringify(lastText)}`);
   const qaLive = await qaRows();
-  check(Number(qaLive?.n) === 6 && qaLive?.a === "(streamed)"
-    && Number(qaLive?.missing) === 0 && Number(qaLive?.mine) === 6,
+  check(Number(qaLive?.n) === 9 && qaLive?.a === "(streamed)"
+    && Number(qaLive?.missing) === 0 && Number(qaLive?.mine) === 9,
     "live 通道的问答流水落的是 (streamed) 标记，条数与前面几轮加起来对得上"
-    + "（透传 2 + about 缺席 2 + 本轮 2；坏态与 401/402 一律不落），而且六条都挂得上提问者",
+    + "（透传 2 + about 缺席 2 + 卡住 2 + 复原 1 + 本轮 2；坏态与 401/402 一律不落），而且九条都挂得上提问者",
     () => JSON.stringify(qaLive));
   sseMode = "error";
   const ledBeforeBad = await ledgerRows();
@@ -802,6 +895,25 @@ async function suit() {
     "上游吐了两帧再把连接掐了：已发出的那半句照给读者，末尾补一条 error 明说本次已计费，且没有 cite 帧"
     + "（扣了墨的问答不给引用是诚实，不给答案才是问题）",
     () => `直连=${JSON.stringify(abJ.frames)} 代理=${JSON.stringify(abN.frames)}`);
+  /* live 通道同一次挂起（P9）：这一侧从前**一句截止都没有**，透传那条至少还在两块数据之间判一下 */
+  sseMode = "stall";
+  const balBeforeSseStall = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
+  const [ssN, ssJ] = await Promise.all([
+    timedAsk(APROXY, { question: "上游卡住轮·live" }, writerA),
+    timedAsk(ADIRECT, { question: "上游卡住轮·live" }, writerA),
+  ]);
+  qaCharged += 2;
+  const sseStallMs = Math.max(ssN.ms, ssJ.ms);
+  check(!ssN.hitCeiling && !ssJ.hitCeiling && ssJ.status === 200 && ssN.status === 200 && sseStallMs < 12_000,
+    "live 通道的上游吐两帧就卡住：这一次请求也在短档内自己收干净（透传那条有截止、这条从前一句都没有，"
+    + "同一个缺陷在两条通道上各修一次，所以也各判一次）",
+    () => `代理=${ssN.ms}ms/掐线=${ssN.hitCeiling} 直连=${ssJ.ms}ms/掐线=${ssJ.hitCeiling}`);
+  check(aborted(ssJ) && aborted(ssN) && streamed(ssJ).startsWith("半句")
+    && String(ssJ.frames.at(-1)?.message).includes("秒没有再吐字")
+    && ssJ.frames.filter((f) => f.type === "cite").length === 0
+    && (await num("SELECT points_balance FROM users WHERE id = ?", [uid])) === balBeforeSseStall - 10,
+    "卡住的这一次与半路断的那一次说同一个句式：半句照给、末尾一帧 error 明说已计费、不给 cite、扣两次墨",
+    () => `直连=${JSON.stringify(ssJ.frames)} 代理=${JSON.stringify(ssN.frames)}`);
   sseMode = "ok"; agentMode = "ok";
 
   /* ---------- 10 P8a 归因：站在哪篇文章前问的，就记在那篇文章名下 ---------- */
