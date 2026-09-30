@@ -7,6 +7,7 @@
 // · 401/402 优雅提示（余额不足/未登录直接给行动指引）
 // 版式：墨色渐变描边、印章头像、气泡左右分、墨滴打字动画
 import { useEffect, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 
 type Msg = { role: "user" | "agent"; text: string; cite?: string | null };
 
@@ -41,6 +42,10 @@ export default function AgentChat({
   const [copied, setCopied] = useState(false);
   const [engine, setEngine] = useState<EngineMode>("demo");
   const chatRef = useRef<HTMLDivElement>(null);
+  // 文章身份从 URL 取，不从 props 传：文章页侧栏与全站浮窗两个入口都在同一个 URL 下，
+  // 一处推导比两处传参更少分叉（浮窗那侧连 article 对象都没有，它只有 DOM 上的标题）。
+  // 只认 /article/<slug> 这一种形态，别的页面问分身就是不归属——宁缺不假。
+  const slug = (usePathname()?.match(/^\/article\/([^/?#]+)/) ?? [])[1] ?? "";
 
   useEffect(() => {
     fetch("/api/agent/status")
@@ -93,7 +98,7 @@ export default function AgentChat({
       const res = await fetch("/api/agent/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q, author, about, history }),
+        body: JSON.stringify({ question: q, author, about, history, ...(slug ? { article: slug } : {}) }),
       });
       if (!res.ok) {
         // 401 未登录 / 402 余额不足 / 5xx：给出行动指引而非沉默

@@ -54,7 +54,13 @@ public class AgentAskController {
     String question = NodeShapes.slice(NodeShapes.jsTrim(coerce(body, "question", "")), 500);
     String author = NodeShapes.slice(NodeShapes.jsTrim(coerce(body, "author", "博主")), 40);
     String about = NodeShapes.slice(NodeShapes.jsTrim(coerce(body, "about", "")), 120);
-    Reply reply = agent.ask(me == null ? null : me.id(), question, author, about, history(body));
+    // article 是**文章身份**，不是阅读上下文（about 那个标题从来只当上下文用，见 #19）。
+    // 裁到 160 与 articles.slug 同宽；它是可选键，缺省空串 = 不归属任何文章。
+    // 注意它不参与发给上游的 payload（那是原样的 question/author/about 三件），只用于落库归属，
+    // 所以换栈期的应答契约一条没动。
+    String articleSlug = NodeShapes.slice(NodeShapes.jsTrim(coerce(body, "article", "")), 160);
+    Reply reply = agent.ask(me == null ? null : me.id(), question, author, about, articleSlug,
+        history(body));
     if (reply instanceof Reply.Status status) {
       // 参数与鉴权类失败仍是一条普通 JSON（前端读 error 字段），不是流里的一帧
       byte[] payload = jsonBytes(status.body());

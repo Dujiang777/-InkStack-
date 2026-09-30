@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // P6c 引擎闸门：Java 侧 Spring AI 智能体顶掉 Python 的 agent-service，测的是"替得对不对"。
 //
-// 这一道与闸门 14 的分工不同：14 测的是**双栈一致**（Node 与 Java 必须给同一个产物），
+// 这一道与闸门 14 的分工不同：14 比的是**同一个实现经代理与直连是否给同一个产物**（P7f-2 之后
+// 那一对"Node 与 Java"已经不存在，逐字一致那一半由手抄常量与闸门 1′ 的 contract/ 守着），
 // 而引擎是只存在于 Java 侧的第四通道，没有对岸可比。所以这里全部换成**绝对判据**：
 //   ① 检索工具真的被调用，而且喂给模型的语料带付费墙与审核闸门——
 //      Python 版那条 SQL 两条都缺，等于让分身把没解锁的付费正文念给读者听。
@@ -447,7 +448,7 @@ async function suit() {
   check(w2.status === 200 && w2.json?.fallback === true
     && w2.json?.pointsNote === "模板兜底 · 本次不扣墨水"
     && (await ledgerRows()) === ledBeforeWriteFail,
-    "写作档坏态 → 模板兜底、零扣墨（与双栈那一条判据同一个）",
+    "写作档坏态 → 模板兜底、零扣墨（与闸门 14 那条兜底判据同一个）",
     () => JSON.stringify(w2.json).slice(0, 120));
   writeMode = "ok";
 

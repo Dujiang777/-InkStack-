@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.inkstack.agent.AvatarEngine;
 import com.inkstack.common.NodeShapes;
-import com.inkstack.mapper.AgentQaMapper;
 import com.inkstack.points.PointsService;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -86,7 +85,8 @@ public class AgentAskService {
 
   private final PointsService points;
   private final RagService rag;
-  private final AgentQaMapper qa;
+  /** 流水与文章计数的那一笔两写：见 {@link AgentQaRecorder} 为什么必须是一个事务。 */
+  private final AgentQaRecorder qa;
   private final AvatarEngine engine;
   private final String agentServiceUrl;
   private final String deepseekKey;
@@ -96,7 +96,7 @@ public class AgentAskService {
       .connectTimeout(Duration.ofSeconds(8))
       .build();
 
-  public AgentAskService(PointsService points, RagService rag, AgentQaMapper qa, AvatarEngine engine,
+  public AgentAskService(PointsService points, RagService rag, AgentQaRecorder qa, AvatarEngine engine,
       @Value("${inkstack.agent.service-url:}") String agentServiceUrl,
       @Value("${inkstack.agent.deepseek-key:}") String deepseekKey,
       @Value("${inkstack.agent.deepseek-base:https://api.deepseek.com}") String deepseekBase) {
@@ -111,8 +111,11 @@ public class AgentAskService {
 
   /**
    * @param uid 登录用户；{@code null} 是游客——演示通道对游客开放，另两条通道会先要登录
+   * @param articleSlug 读者站在哪篇文章前问的分身（文章页由前端从 URL 带来，不在文章页就是空串）。
+   *        它<b>只</b>决定这笔流水记在谁名下，不决定能不能问：认领不到就记 NULL，回答照旧。
    */
-  public Reply ask(Long uid, String question, String author, String about, List<Turn> history) {
+  public Reply ask(Long uid, String question, String author, String about, String articleSlug,
+      List<Turn> history) {
     if (question.isEmpty()) {
       return new Reply.Status(400, Map.of("error", "question 不能为空"));
     }
@@ -121,7 +124,7 @@ public class AgentAskService {
     if (agentUrl.isEmpty() && engine.available()) {
       // 第四通道：Java 侧 Spring AI 智能体。它与 live 通道同一种"钱停在哪儿"的规矩——
       // 先让模型把整段回答生成出来，确认非空，才扣这一次墨。
-      Reply fromEngine = askNative(uid, question, author, about);
+      Reply fromEngine = askNative(uid, question, author, about, articleSlug);
       if (fromEngine != null) {
         return fromEngine;
       }
@@ -149,7 +152,7 @@ public class AgentAskService {
             closeQuietly(upstream.body());
             return new Reply.Status(402, Map.of("error", nullToEmpty(spend.error())));
           }
-          insertQa(uid, question, "(AgentScope streamed)", "[]");
+          insertQa(uid, articleSlug, question, "(AgentScope streamed)", "[]");
           long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
           return new Reply.Stream(out -> pump(upstream.body(), out, deadline));
         }
@@ -165,7 +168,7 @@ public class AgentAskService {
       if (bal < QA_COST) {
         return new Reply.Status(402, Map.of("error", "墨水不足（余额 " + bal + "，本次需 " + QA_COST + "）"));
       }
-      return new Reply.Stream(out -> streamLive(out, uid, question, author, about, history));
+      return new Reply.Stream(out -> streamLive(out, uid, question, author, about, articleSlug, history));
     }
     return new Reply.Stream(out -> streamDemo(out, question));
   }
@@ -177,7 +180,7 @@ public class AgentAskService {
    *
    * <p>鉴权与预检的姿势与 live 通道一致：登录 + 只读探针在前，扣款在模型给出非空回答之后。
    */
-  private Reply askNative(Long uid, String question, String author, String about) {
+  private Reply askNative(Long uid, String question, String author, String about, String articleSlug) {
     if (uid == null) {
       return new Reply.Status(401, Map.of("error", "登录后才能与分身对话"));
     }
@@ -194,7 +197,7 @@ public class AgentAskService {
       return new Reply.Status(402, Map.of("error", nullToEmpty(spend.error())));
     }
     try {
-      insertQa(uid, question, reply.text(), reply.citation() == null
+      insertQa(uid, articleSlug, question, reply.text(), reply.citation() == null
           ? "[]" : json.writeValueAsString(List.of(reply.citation())));
     } catch (Exception qaFailed) {
       // 流水失败不阻塞回答
@@ -218,7 +221,7 @@ public class AgentAskService {
   /* ==================== 通道 ②：DeepSeek 流式 ==================== */
 
   private void streamLive(OutputStream out, long uid, String question, String author,
-      String about, List<Turn> history) {
+      String about, String articleSlug, List<Turn> history) {
     boolean charged = false;
     try {
       List<RagService.Snippet> snippets = rag.retrieve(question, uid);
@@ -249,7 +252,7 @@ public class AgentAskService {
       List<String> titles = snippets.stream().map(s -> "《" + s.title() + "》").toList();
       send(out, frame("type", "cite", "citation", titles.isEmpty() ? null : String.join("、", titles)));
       try {
-        insertQa(uid, question, "(streamed)", json.writeValueAsString(
+        insertQa(uid, articleSlug, question, "(streamed)", json.writeValueAsString(
             snippets.stream().map(RagService.Snippet::title).toList()));
       } catch (Exception qaFailed) {
         // 流水失败不阻塞回答
@@ -471,9 +474,15 @@ public class AgentAskService {
     }
   }
 
-  private void insertQa(Long askerId, String question, String answer, String citations) {
+  /**
+   * 记一笔问答流水。三条通道各自调它，所以"流水 + 文章计数"这一对写只有这一个入口。
+   *
+   * <p>失败口径照旧：整笔吞掉，不阻塞回答。注意吞的是<b>整笔</b>——流水与计数在同一个事务里，
+   * 不会出现"行落了、计数没动"这种一半成功，那正是计数器会漂的唯一原因。
+   */
+  private void insertQa(Long askerId, String articleSlug, String question, String answer, String citations) {
     try {
-      qa.insert(askerId, question, answer, citations);
+      qa.record(askerId, articleSlug, question, answer, citations);
     } catch (Exception failed) {
       // 流水写失败不阻塞回答，与 Node 的 .catch(() => {}) 同形
     }

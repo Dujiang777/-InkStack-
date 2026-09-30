@@ -47,6 +47,8 @@
 //      空串是有效值：Java 侧命令行参数优先级最高，把 service-url 与 key 显式清空才落得进 demo 档。
 //      deepseek-base 指到一个没人听的端口，是防"Key 意外非空"时打到真上游的最后一道保险。
 //   ④ DATABASE_URL 指向克隆库 inkstack_j：会真扣真写流水（含 agent_qa），跑完按快照复原。
+//      §10 还会**建三篇夹具文章**（一篇 published、一篇 draft、一篇 slug 恰好 160 字）来验归因，
+//      收尾一并删掉——articles 是读者看得见的表，不留。
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -322,7 +324,13 @@ async function cleanup() {
   // 分身问答每张通道都会往 agent_qa 落一行流水，不清就会污染统计与成就计数
   const qa = await num("SELECT COUNT(*) FROM agent_qa WHERE id > ?", [state.qaMark]);
   await conn.query("DELETE FROM agent_qa WHERE id > ?", [state.qaMark]);
-  return `余额复原 ${state.balance}、删掉本次 ${rows} 条流水、${qa} 条问答记录`;
+  // §10 的三篇夹具文章：agent_qa.article_id 没有外键，所以删不删都行——但 articles 表是
+  // 读者看得见的地方，留三篇「P8a 归因夹具」在首页上就是脏数据。
+  const arts = state.fixtureIds ?? [];
+  if (arts.length) {
+    await conn.query(`DELETE FROM articles WHERE id IN (${arts.map(() => "?").join(",")})`, arts);
+  }
+  return `余额复原 ${state.balance}、删掉本次 ${rows} 条流水、${qa} 条问答记录、${arts.length} 篇夹具文章`;
 }
 
 try {
@@ -546,7 +554,7 @@ async function suit() {
   // 类型收口：JSON 允许 draft/author 是数字、数组、对象、布尔，两个入口必须把同一个请求收成同一个字符串。
   // Node 原本在这里是一个未捕获的 TypeError → 500（`(5).trim()`），Java 一直安静地按 String() 取值，
   // 于是"换个入口"会改状态码。用 garbage 档跑：这里断言的是**上游收到了什么**，不该真扣墨，
-  // 所以它也不会惊动 §7 的账实核对。
+  // 所以它也不会惊动 §11 的账实核对。
   upstreamMode = "garbage";
   const COERCIONS = [
     ["数字当草稿", { mode: "polish", draft: 5, author: 7 }, "5", "7"],
@@ -605,7 +613,8 @@ async function suit() {
   const writerB = await login(BPROXY, env.INK_WRITER_EMAIL, env.INK_WRITER_PASSWORD);
   const KB_HIT = "为什么 then 要进微任务？";
   // 期望文本是**手抄**的常量，不是"从 Node 读出来再比 Java"：两个入口一起把模板抄错时，
-  // 只有独立写一遍期望值才报得出来（这一段的判据来自 app/api/agent/ask/route.ts 的 KB）。
+  // 只有独立写一遍期望值才报得出来（这份 KB 原文出自 Node 时代的 app/api/agent/ask/route.ts，
+  // 那个文件已随 P7f-2 删除；现在它只有两处：Java 侧的常量与这里的期望值，两处不一样就是其中一处抄错了）。
   const KB_TEXT = "因为 Promises/A+ 规范 §2.2.4 要求 onFulfilled/onRejected 必须在「平台代码」之外的"
     + "执行上下文中调用——也就是不能同步执行。微任务是浏览器给 Promise 的专用通道，"
     + "比 setTimeout 更早、更稳定。文章第 2 节完整推演过这个时序。";
@@ -795,8 +804,151 @@ async function suit() {
     () => `直连=${JSON.stringify(abJ.frames)} 代理=${JSON.stringify(abN.frames)}`);
   sseMode = "ok"; agentMode = "ok";
 
-  /* ---------- 10 账实核对 ---------- */
-  console.log("\n## 10 每一笔扣墨恰好对应一次成功产出，反之亦然");
+  /* ---------- 10 P8a 归因：站在哪篇文章前问的，就记在那篇文章名下 ---------- */
+  console.log("\n## 10 文章身份归因：流水挂得上文章、计数追得上流水，而且这一对写不许分家");
+  // 夹具直接建在库里（不走发布接口：不触发奖励，也不污染墨仓账）。三篇各有各的用处：
+  // 一篇 published 拿来证明"认得到"，一篇 draft 拿来证明"认不到"，
+  // 一篇 slug 恰好 160 字长——它是 slice(160) 这条边界的**唯一可观测证据**（见下面超长那一条）。
+  const fixtureIds = [];
+  state.fixtureIds = fixtureIds;
+  const makeArticle = async (slug, title, status) => {
+    await conn.query(
+      `INSERT INTO articles (author_id, slug, title, md_content, summary, tags, status, review_status)
+       VALUES (?,?,?,?,?,?,?, 'approved')`,
+      [uid, slug, title, `${title}\n\n第二段用于夹具检索。`, "闸门 14 的归因夹具", '["闸门"]', status]
+    );
+    const id = Number((await only("SELECT id FROM articles WHERE slug = ?", [slug])).id);
+    fixtureIds.push(id);
+    return id;
+  };
+  /** 按提问文本取那一轮落的水行：文本在各轮之间唯一的，id > qaMark 再挡一层历史。 */
+  const rowsOf = (question) => only(
+    `SELECT COUNT(*) AS n, IFNULL(MAX(article_id),0) AS art, SUM(article_id IS NULL) AS orphan
+     FROM agent_qa WHERE question = ? AND id > ?`, [question, qaMark]);
+  const countOf = (articleId) => num("SELECT agent_qa_count FROM articles WHERE id = ?", [articleId]);
+  /** 那篇文章名下真实的流水行数：计数必须与它相等，否则「分身已回答 N 次」就是一句谎话。 */
+  const qaOf = (articleId) => num("SELECT COUNT(*) FROM agent_qa WHERE article_id = ?", [articleId]);
+  const runTag = Math.floor(Math.random() * 1e6).toString().padStart(6, "0");
+  const LONG_SLUG = ("归因边界-".repeat(40)).slice(0, 160 - runTag.length) + runTag;
+  const pubSlug = `p8a-pub-${runTag}`;
+  const draftSlug = `p8a-draft-${runTag}`;
+  const idPub = await makeArticle(pubSlug, "P8a 归因夹具·已发布", "published");
+  const idDraft = await makeArticle(draftSlug, "P8a 归因夹具·草稿", "draft");
+  const idLong = await makeArticle(LONG_SLUG, "P8a 归因夹具·160 字长 slug", "published");
+  check(LONG_SLUG.length === 160 && LONG_SLUG === LONG_SLUG.slice(0, 160) && idLong > 0,
+    "夹具自证：那篇文章的 slug 恰好 160 字（articles.slug 的宽度），建得起来",
+    () => `长度=${LONG_SLUG.length} id=${idLong}`);
+
+  agentHits.length = 0;
+  const [gN, gJ] = await Promise.all([
+    ask(APROXY, { question: "归因轮·甲", author: "名", about: "某篇文章", article: pubSlug }, writerA),
+    ask(ADIRECT, { question: "归因轮·甲", author: "名", about: "某篇文章", article: pubSlug }, writerA),
+  ]);
+  qaCharged += 2;
+  check(gN.status === 200 && gJ.status === 200 && gJ.text === gN.text
+    && gJ.frames.at(-1)?.type === "cite",
+    "带上 article 之后应答形状一点没变（两个入口仍是逐字节同一条流）——归因是库侧的事，不该从流里长出来",
+    () => `代理=${gN.status}/${gN.frames.length}帧 直连=${gJ.status}/${gJ.frames.length}帧`);
+  check(agentHits.length === 2
+    && agentHits.every((h) => JSON.stringify(Object.keys(h ?? {})) === '["question","author","about"]'),
+    "转发给分身服务的请求体里**没有 article 键**：上游契约与闸门 1′ 冻住的形状完全一致（多余的一个键就可能让对岸换答案）",
+    () => agentHits.map((h) => JSON.stringify(Object.keys(h ?? {}))).join(" "));
+  const rowsAttr = await rowsOf("归因轮·甲");
+  const cntAttr = await countOf(idPub);
+  const rowsPub = await qaOf(idPub);
+  check(Number(rowsAttr?.n) === 2 && Number(rowsAttr?.art) === idPub
+    && Number(rowsAttr?.orphan) === 0 && cntAttr === 2 && rowsPub === 2,
+    "问一次 → 计数 +1：两条流水都挂在夹具文章名下，articles.agent_qa_count == COUNT(*) == 2"
+    + "（这两个名字必须是同一件事的两个写法，能分开就是计数器要漂了）",
+    () => `计数=${cntAttr} 行数=${rowsPub} 归因=${JSON.stringify(rowsAttr)}`);
+
+  const [dA, dB] = await Promise.all([
+    ask(APROXY, { question: "归因轮·草稿", article: draftSlug }, writerA),
+    ask(ADIRECT, { question: "归因轮·草稿", article: draftSlug }, writerA),
+  ]);
+  qaCharged += 2;
+  const rowsDraft = await rowsOf("归因轮·草稿");
+  const cntDraft = await countOf(idDraft);
+  check(dA.status === 200 && dB.status === 200 && Number(rowsDraft?.n) === 2
+    && Number(rowsDraft?.orphan) === 2 && cntDraft === 0,
+    "指向草稿的提问：流水照记但 article_id 是 NULL，草稿的计数纹丝不动"
+    + "（排序式里有 agent_qa_count × 10，把加成发给一篇没公开的题目是造假）",
+    () => `归属=${JSON.stringify(rowsDraft)} 草稿计数=${cntDraft}`);
+
+  const cntDockBefore = await countOf(idPub);
+  const dock = await ask(ADIRECT, { question: "归因轮·dock 形状", author: "名" }, writerA);
+  qaCharged += 1;
+  const rowsDock = await rowsOf("归因轮·dock 形状");
+  const cntDockAfter = await countOf(idPub);
+  check(dock.status === 200 && Number(rowsDock?.n) === 1 && Number(rowsDock?.orphan) === 1
+    && cntDockAfter === cntDockBefore,
+    "请求里没有 article（全局 dock 的形状）→ 记流水、不归属、计数不动：新键是可选的，不带它不许变成 400",
+    () => `行=${JSON.stringify(rowsDock)} 计数 ${cntDockBefore}→${cntDockAfter}`);
+
+  const BOGUS = [
+    ["库里没有这个 slug", "p8a-根本没有这篇文章-" + runTag],
+    ["article 是数字 → String() 收成 12345", 12345],
+    ["article 是对象 → [object Object]", { a: 1 }],
+  ];
+  for (const [label, value] of BOGUS) {
+    const q = `归因轮·坏身份·${label}`;
+    const r = await ask(ADIRECT, { question: q, article: value }, writerA);
+    qaCharged += 1;
+    const rows = await rowsOf(q);
+    check(r.status === 200 && r.frames.at(-1)?.type === "cite"
+      && Number(rows?.n) === 1 && Number(rows?.orphan) === 1,
+      `${label} → 认领不到就当没这篇文章：回答照旧给完，不是一条 500，也不是一句「文章不存在」`,
+      () => `status=${r.status} 行=${JSON.stringify(rows)} 末帧=${JSON.stringify(r.frames.at(-1) ?? null)}`);
+  }
+
+  // 这一条是 slice(160) 那半步**唯一**能被观测到的方式：裁得恰好等于列宽时，
+  // 裁完之后正好命中那篇 160 字 slug 的夹具。不裁 → 认不到；多裁一位 → 也认不到。
+  const overflow = LONG_SLUG + "-溢出".repeat(30);
+  const rOver = await ask(ADIRECT, { question: "归因轮·超长 slug", article: overflow }, writerA);
+  qaCharged += 1;
+  const rowsOver = await rowsOf("归因轮·超长 slug");
+  const cntLong = await countOf(idLong);
+  check(rOver.status === 200 && Number(rowsOver?.art) === idLong && cntLong === 1,
+    "article 超出列宽时按 articles.slug 的 160 字裁后再认领：裁完恰好等于那篇长 slug 夹具 → 边界就是 slice(160)",
+    () => `传入长度=${overflow.length} 认领到=${rowsOver?.art ?? 0} 期望=${idLong} 计数=${cntLong}`);
+
+  const cRace = await countOf(idPub);
+  const six = await Promise.all(Array.from({ length: 6 }, (_, i) =>
+    ask(ADIRECT, { question: `归因轮·并发 ${i}`, article: pubSlug }, writerA)));
+  qaCharged += 6;
+  const rRace = await countOf(idPub);
+  const rowsRace = await qaOf(idPub);
+  check(six.every((r) => r.status === 200) && rRace === cRace + 6 && rRace === rowsRace,
+    "六路并发归因同一篇文章：计数 +6、一路不丢，且仍等于流水行数（+1 是库内的 agent_qa_count+1，不是读出来加一再写回去）",
+    () => `${cRace} → ${rRace}，行数=${rowsRace}`);
+
+  await conn.query("UPDATE users SET points_balance = 3 WHERE id = ?", [uid]);
+  const cPoor = await countOf(idPub);
+  const poorAttr = await ask(ADIRECT, { question: "归因轮·余额不足", article: pubSlug }, writerA);
+  const rowsPoor = await rowsOf("归因轮·余额不足");
+  await conn.query("UPDATE users SET points_balance = ? WHERE id = ?", [balance, uid]);
+  const cPoorAfter = await countOf(idPub);
+  check(poorAttr.status === 402 && Number(rowsPoor?.n) === 0 && cPoorAfter === cPoor,
+    "被 402 拦住的提问：一行流水都不落，计数也不动（失败的路径不许留下「回答了但没记账」的痕迹）",
+    () => `status=${poorAttr.status} 行=${rowsPoor?.n} 计数 ${cPoor}→${cPoorAfter}`);
+
+  const cDemo = await countOf(idPub);
+  const demoAttr = await ask(BDIRECT, { question: "归因轮·demo 档", article: pubSlug }, writerB);
+  const rowsDemo = await rowsOf("归因轮·demo 档");
+  const cDemoAfter = await countOf(idPub);
+  check(demoAttr.status === 200 && streamed(demoAttr).length > 20
+    && Number(rowsDemo?.n) === 0 && cDemoAfter === cDemo,
+    "演示通道（内置知识库）本来就不记问答流水，归因跟着一起是零——这是旧实现的行为，改动没有把它悄悄变成「记」",
+    () => `status=${demoAttr.status} 行数=${rowsDemo?.n} 计数 ${cDemo}→${cDemoAfter}`);
+
+  // 归因这条链断在页面侧时，库里的判据全绿但线上那个数字照样冻着：所以这里钉一句源码。
+  const chat = fs.readFileSync(path.join(root, "components", "AgentChat.tsx"), "utf8");
+  check(chat.includes("^\\/article\\/") && chat.includes("slug ? { article: slug } : {}"),
+    "components/AgentChat.tsx 真的从 URL 取 slug 并在文章页带上 article：这一句没了，上面所有判据都还在而计数已经死了",
+    () => `取 slug=${chat.includes("^\\/article\\/")} 带键=${chat.includes("slug ? { article: slug } : {}")}`);
+
+  /* ---------- 11 账实核对 ---------- */
+  console.log("\n## 11 每一笔扣墨恰好对应一次成功产出，反之亦然");
   const ledgerNow = await only(`SELECT COUNT(*) AS n, IFNULL(SUM(delta),0) AS s
     FROM point_ledger WHERE user_id = ? AND id > ? AND reason LIKE 'AI写作·%'`, [uid, mark]);
   check(Number(ledgerNow?.n) === charged,
