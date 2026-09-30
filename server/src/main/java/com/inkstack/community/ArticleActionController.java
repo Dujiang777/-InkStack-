@@ -44,7 +44,7 @@ public class ArticleActionController {
     this.trustProxy = "1".equals(trustProxy);
   }
 
-  /** 点赞是 toggle：同一人连点两次 = 点赞再取消，计数用 GREATEST 兜住不会成负。 */
+  /** 点赞是 toggle：同一人连点两次 = 点赞再取消；扣数那条 SQL 先 CAST 成 SIGNED，否则无符号列下溢是 500 不是 0。 */
   @PostMapping("/api/articles/{slug}/like")
   public ResponseEntity<Map<String, Object>> like(
       @Current SessionUser me, @PathVariable String slug) {

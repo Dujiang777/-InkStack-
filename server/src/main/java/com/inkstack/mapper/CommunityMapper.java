@@ -12,9 +12,13 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 /**
- * 社区互动的写侧 SQL（P5a）。每条都与 lib/data.ts 里对应那条逐字对齐——
- * 包括"看起来多余"的部分：评论计数的 UPDATE 不带 status 条件、点赞的 GREATEST(0,…) 防负、
- * 收藏用 INSERT IGNORE 判态失败再 DELETE。改一个字就是两栈行为不同。
+ * 社区互动的写侧 SQL（P5a）。每条都照着 lib/data.ts 里对应那条搬，但 P8b 起有两处<b>故意不同</b>，
+ * 各自记在这里：
+ *   · 评论计数的 UPDATE 现在带 {@code status='published'}——从前它只按 slug，与那条
+ *     {@code INSERT..SELECT} 的适用条件不一致，于是"草稿涨了评论数、库里却没有评论行"没人拦；
+ *   · 取消点赞的扣数先 {@code CAST(… AS SIGNED)}——无符号列里的 {@code GREATEST(0, x - 1)}
+ *     兜不住下溢，只会把整条请求抛成 500。
+ * P7f-2 之后这里没有对岸可对，守这两条的是闸门 21 的逐列复算，而不是"与 Node 逐字一样"。
  */
 @Mapper
 public interface CommunityMapper {
@@ -29,7 +33,12 @@ public interface CommunityMapper {
   @Options(useGeneratedKeys = true, keyProperty = "id")
   int addComment(CommunityRows.CommentInsert row);
 
-  @Update("UPDATE articles SET comment_count = comment_count + 1 WHERE slug = #{slug}")
+  /**
+   * 评论计数 +1。{@code status = 'published'} 是照着上面那条 {@code INSERT..SELECT} 抄的：
+   * 两笔写的适用条件必须<b>逐字相同</b>，否则"草稿文章涨了计数、库里却没有评论行"这种
+   * 对不上的差额就没有任何东西能拦住它。
+   */
+  @Update("UPDATE articles SET comment_count = comment_count + 1 WHERE slug = #{slug} AND status = 'published'")
   int bumpCommentCount(@Param("slug") String slug);
 
   /** 服务端时间，格式与 Node 的 DATE_FORMAT 一致（前端拿它替换占位行的 createdAt）。 */
@@ -89,7 +98,14 @@ public interface CommunityMapper {
   int insertLike(
       @Param("userId") long userId, @Param("articleId") long articleId);
 
-  @Update("UPDATE articles SET like_count = GREATEST(0, like_count - 1) WHERE id = #{id}")
+  /**
+   * 取消点赞时扣计数。和 {@link AdminMapper#reclaimCommentCount} 同一条坑：
+   * {@code like_count} 是 INT UNSIGNED，{@code GREATEST(0, like_count - 1)} 里的减法先按无符号算，
+   * 下溢直接抛 {@code BIGINT UNSIGNED value is out of range} 而不是兜成 0。
+   * 正常流程里 stored 不会小于行数，可种子稿与历史夹具就是那种"stored 比行少"的形状——
+   * 所以这里也先 CAST 成 SIGNED 再减。
+   */
+  @Update("UPDATE articles SET like_count = GREATEST(0, CAST(like_count AS SIGNED) - 1) WHERE id = #{id}")
   int decLikeCount(@Param("id") long id);
 
   @Update("UPDATE articles SET like_count = like_count + 1 WHERE id = #{id}")

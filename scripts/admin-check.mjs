@@ -422,6 +422,11 @@ async function suit() {
 
   /* ---------- 8 用户管理 ---------- */
   console.log("\n## 8 用户管理：封禁不许碰同行，扣墨要与余额同源");
+  // 这一节的算术只有从**已知水位**起算才配平：发放 60 → 扣回全部 → 两栈一加一减，净额要是 0
+  // 就必须从 0 起。而探针的余额随时在被动（每日 30 滴、社区奖励、上一轮清场的方式），
+  // 所以水位由闸门自己钉成 0——前提由判据自己造，而不是假设环境（收尾仍按开头那份快照复原）。
+  await conn.query("UPDATE users SET points_balance = 0 WHERE id = ?", [probeId]);
+  const LEVEL = 0;
   const ban = await call(JAVA, "POST", "/api/admin/users", { userId: probeId, action: "ban" }, admin);
   check(ban.status === 200 && (await num("SELECT banned FROM users WHERE id = ?", [probeId])) === 1,
     "Java 封禁读者生效", ban.json);
@@ -443,7 +448,7 @@ async function suit() {
     "SELECT delta, reason FROM point_ledger WHERE user_id = ? AND id > ? AND reason LIKE '运营发放%' ORDER BY id DESC LIMIT 1",
     [probeId, mark.ledger]);
   check(grant.status === 200
-    && (await num("SELECT points_balance FROM users WHERE id = ?", [probeId])) === balProbe + 60
+    && (await num("SELECT points_balance FROM users WHERE id = ?", [probeId])) === LEVEL + 60
     && Number(grantLed?.delta) === 60 && grantLed?.reason === "运营发放 60 点墨",
     "发放 60：余额与流水同时动", JSON.stringify(grantLed));
   const revokeBig = await call(NODE, "POST", "/api/admin/users", { userId: probeId, action: "revoke", amount: 10_000 }, admin);
@@ -452,7 +457,7 @@ async function suit() {
     [probeId, mark.ledger]);
   const nowBal = await num("SELECT points_balance FROM users WHERE id = ?", [probeId]);
   check(revokeBig.status === 200 && nowBal === 0
-    && Number(bigLed?.delta) === -(balProbe + 60) && String(bigLed?.reason).includes("余额不足按实际扣减"),
+    && Number(bigLed?.delta) === -(LEVEL + 60) && String(bigLed?.reason).includes("余额不足按实际扣减"),
     "扣回超过余额：按真实扣减额记流水，绝不出现\"账记 -10000、余额只掉 60\"", JSON.stringify(bigLed));
   await sameError("余额已为 0 再扣 → 400 说清楚", "/api/admin/users",
     { userId: probeId, action: "revoke", amount: 5 }, admin, 400);
@@ -473,15 +478,15 @@ async function suit() {
 
   /* ---------- 9 账实 ---------- */
   console.log("\n## 9 账实核对");
-  // 探针的运营加减被刻意配平（+60 −60 −(bal+60) …），所以净额应为 0 且余额回到水位；
-  // 这同时证明两栈在同一个 users 行上串行，没有互相看不见的问题。
+  // 探针的运营加减被刻意配平（+60 −(0+60) +200 −200，水位在 §8 开头由闸门自己钉成 0），
+  // 所以净额应为 0 且余额回到那个水位；这同时证明两栈在同一个 users 行上串行，没有互相看不见的问题。
   const probeLed = await num(
     "SELECT IFNULL(SUM(delta),0) FROM point_ledger WHERE user_id = ? AND id > ? AND reason LIKE '运营%'",
     [probeId, mark.ledger]);
   const probeBal = await num("SELECT points_balance FROM users WHERE id = ?", [probeId]);
-  check(probeLed === 0 && probeBal === balProbe,
+  check(probeLed === 0 && probeBal === LEVEL,
     "探针：运营加减净额为 0 且余额回到水位（Δ余额 = ΔΣ流水 的最强形式）",
-    `净流水 ${probeLed} / 余额 ${probeBal} vs 水位 ${balProbe}`);
+    `净流水 ${probeLed} / 余额 ${probeBal} vs 水位 ${LEVEL}`);
   const actions = await num("SELECT COUNT(*) FROM admin_actions WHERE id > ?", [mark.action]);
   check(actions >= 16, `审计日志累计 ${actions} 条（每次成功动作一条）`);
   return ctxLocal;

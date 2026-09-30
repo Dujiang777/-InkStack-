@@ -84,11 +84,18 @@ public class CommunityService {
     row.setParentId(parentId);
     row.setContent(content);
     row.setSlug(slug);
-    if (db.addComment(row) == 0) {
-      return new Added(false, "文章不存在或未公开，无法评论", null, null, nickname);
-    }
-    db.bumpCommentCount(slug);
-    return new Added(true, null, row.getId(), serverTime(), nickname);
+    // 评论行与 comment_count 是一笔事务：从前这里先 addComment、再裸调一次 bumpCommentCount，
+    // 中间任何一步炸掉就留下"有评论没计数"或反过来——而 comment_count 既上热榜排序也进运营台，
+    // 闸门 21 拿 comment_count == COUNT(comments) 复算它。形状与 P8a 的 AgentQaRecorder 一致。
+    Added outcome = tx.execute(status -> {
+      if (db.addComment(row) == 0) {
+        status.setRollbackOnly();
+        return new Added(false, "文章不存在或未公开，无法评论", null, null, nickname);
+      }
+      db.bumpCommentCount(slug);
+      return new Added(true, null, row.getId(), serverTime(), nickname);
+    });
+    return outcome == null ? new Added(false, "评论失败（数据库异常）", null, null, nickname) : outcome;
   }
 
   /** 登录者以账号昵称为准；游客取上报昵称，裁 20 码元后为空则"访客"。 */

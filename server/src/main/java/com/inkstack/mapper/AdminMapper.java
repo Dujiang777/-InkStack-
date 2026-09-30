@@ -48,7 +48,14 @@ public interface AdminMapper {
   @Delete("DELETE FROM comments WHERE id = #{id} OR parent_id = #{id}")
   int deleteCommentTree(@Param("id") long id);
 
-  @Update("UPDATE articles SET comment_count = GREATEST(0, comment_count - #{removed}) WHERE id = #{id}")
+  /**
+   * 扣回评论数。必须先 {@code CAST(… AS SIGNED)} 再减：这些计数列是 **INT UNSIGNED**，
+   * 而 MySQL 是在无符号算术里先算出 `comment_count - 1`——下溢当场抛
+   * {@code BIGINT UNSIGNED value is out of range}，`GREATEST` 连被求值的机会都没有。
+   * 表现不是"兜成 0"，是整条删除 500 并回滚。闸门 21 §6⑧ 就是照着这个失败模式写的：
+   * 库里的种子稿（stored 比行数小）是这条路今天的真实入口。
+   */
+  @Update("UPDATE articles SET comment_count = GREATEST(0, CAST(comment_count AS SIGNED) - #{removed}) WHERE id = #{id}")
   int reclaimCommentCount(
       @Param("id") long id, @Param("removed") int removed);
 

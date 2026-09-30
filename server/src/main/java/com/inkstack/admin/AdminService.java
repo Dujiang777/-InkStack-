@@ -100,7 +100,7 @@ public class AdminService {
     return db.setPrice(up, dp, until, slug) > 0 ? Result.passed() : Result.fail("文章不存在");
   }
 
-  /** 删一条评论连带它的一级回复，并把文章评论数按实际删除数扣回（GREATEST 兜住不减成负）。 */
+  /** 删一条评论连带它的一级回复，并把文章评论数按实际删除数扣回（扣的那条 SQL 先 CAST 成 SIGNED，见 AdminMapper）。 */
   public Removed deleteComment(long commentId) {
     Removed outcome = tx.execute(status -> {
       AdminRows.CommentOwner owner = db.lockComment(commentId);
@@ -134,7 +134,15 @@ public class AdminService {
           if ("article".equals(rep.getTargetType())) {
             db.removeArticleById(NodeShapes.num(rep.getTargetId()));
           } else {
-            db.deleteCommentById(NodeShapes.num(rep.getTargetId()));
+            // article_id 必须在删之前问：行删掉之后就查不出它属于哪篇文章了（lockComment 顺带把行锁住）。
+            // 举报这条路只删被举报的那一行（Node 同式，它的一级回复留在库里继续被计数），
+            // 所以扣数用**实际删掉的行数**而不是"一条加它的楼"——守恒式两边同时只减这些行。
+            long target = NodeShapes.num(rep.getTargetId());
+            AdminRows.CommentOwner owner = db.lockComment(target);
+            int removed = db.deleteCommentById(target);
+            if (owner != null && removed > 0) {
+              db.reclaimCommentCount(NodeShapes.num(owner.getArticleId()), removed);
+            }
           }
           db.resolveReport(NodeShapes.slice(orDefault(note, "已删除被举报内容"), 255), reportId);
         }

@@ -41,6 +41,19 @@ public interface StudyMapper {
       """)
   int recordRead(@Param("uid") long uid, @Param("slug") String slug);
 
+  /**
+   * 阅读计数 +1。与 {@link #recordRead} 必须在同一个事务里，理由见
+   * {@link com.inkstack.study.ArticleReadRecorder}——这一列从前<b>谁都没写</b>，
+   * 只有种子给过值，而热榜排序、阅读徽章与付费墙漏斗的分母都在读它。
+   *
+   * <p>{@code status = 'published'} 是跟着 {@link #recordRead} 那条 {@code SELECT} 的口径抄的：
+   * 两笔写的适用条件必须逐字相同，否则会出现"计数涨了、足迹没有"这种对不上的差额。
+   */
+  @Update("""
+      UPDATE articles SET read_count = read_count + 1 WHERE slug = #{slug} AND status = 'published'
+      """)
+  int bumpReadCount(@Param("slug") String slug);
+
   /* ===== 外链审核 ===== */
 
   /** 域名唯一键已存在时只刷新 url（Node 同式），note 与 status 保持不动。 */

@@ -2,7 +2,6 @@ package com.inkstack.study;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.inkstack.common.NodeShapes;
-import com.inkstack.mapper.StudyMapper;
 import com.inkstack.session.SessionUser;
 import com.inkstack.web.Bodies;
 import com.inkstack.web.Current;
@@ -18,14 +17,18 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>游客一律 {@code {ok:true, skipped:true}} 而不是 401：这条是"顺手记一笔"的埋点，
  * 文章页对游客也要发，回 401 只会在控制台里制造噪音。
  * 落库失败同样静默——足迹不是关键路径，宁可少一条记录也不能把阅读打断。
+ *
+ * <p>⚠ 游客被 skip 掉这件事同时定义了 {@code articles.read_count} 的口径：<b>只有登录读者的
+ * 打开才计数</b>。两笔写收进 {@link ArticleReadRecorder}（同一个事务），所以"游客的阅读不涨计数"
+ * 是口径而不是漏写——真要改成 PV，得先给游客一条能上报的路，再回来改闸门 21 的复算式。
  */
 @RestController
 public class HistoryController {
 
-  private final StudyMapper db;
+  private final ArticleReadRecorder reads;
 
-  public HistoryController(StudyMapper db) {
-    this.db = db;
+  public HistoryController(ArticleReadRecorder reads) {
+    this.reads = reads;
   }
 
   @PostMapping("/api/history")
@@ -42,9 +45,9 @@ public class HistoryController {
       return ResponseEntity.badRequest().body(Map.of("error", "参数无效"));
     }
     try {
-      db.recordRead(me.id(), value);
+      reads.record(me.id(), value);
     } catch (RuntimeException ignored) {
-      // 与 Node 同样静默
+      // 与 Node 同样静默：吞的是整笔（足迹 + 计数），不是半笔
     }
     return ResponseEntity.ok(Map.of("ok", true));
   }
