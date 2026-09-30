@@ -508,6 +508,40 @@ for (const id of IDENTITIES) {
   }
 }
 
+/* ---------- 9. 生产形态：这些页不许被构建期预渲染（P10 撞出来的） ---------- */
+{
+  // 这一族判据的存在理由：闸门全都跑在 `next dev` 上，而 dev **不做预渲染**。
+  // P10 第一次跑 `npm run build` 就炸了——根布局里的 Masthead 每次渲染都要现取一次会话
+  // （no-store），于是"哪个页都能在构建期定成静态"这句话是假的，Next 直接在第一个
+  // 静态路由上退出构建（先是 /study，补完那个又轮到 Next 自己合成的 /_not-found）。
+  // 线上表现不是报错而是根本发布不出去，而这一格所有既有闸门都是绿的。
+  const pages = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name === "page.tsx") pages.push(p);
+    }
+  };
+  walk(path.join(root, "app"));
+  const fetching = pages.filter((f) => {
+    const s = fs.readFileSync(f, "utf8");
+    return s.includes("@/lib/data") || s.includes("@/lib/java-source");
+  });
+  check(fetching.length > 0,
+    "宾语先钉住：确实有页面在渲染期问 Java 取数",
+    () => `${pages.length} 个 page.tsx，其中 ${fetching.length} 个 import 了 @/lib/data 或 @/lib/java-source`);
+  const layout = fs.readFileSync(path.join(root, "app", "layout.tsx"), "utf8");
+  check(/export const dynamic\s*=\s*"force-dynamic"/.test(layout),
+    "根布局声明了 force-dynamic：这个应用里没有可以在构建期预渲染的页"
+    + "（缺这一行 `npm run build` 会退出，dev 模式测不出来——本轮就是第一次跑生产构建才发现）",
+    layout.includes("force-dynamic") ? "app/layout.tsx 里有这一句" : "app/layout.tsx 里没有这一句");
+  const statics = pages.filter((f) => /export const dynamic\s*=\s*"force-static"/.test(fs.readFileSync(f, "utf8")));
+  check(statics.length === 0, "没有任何页反过来把自己钉成 force-static（那会把上面的约束又解掉）",
+    () => (statics.length ? statics.map((f) => path.relative(root, f)).join(" ") : "0 个"));
+}
+
 await conn.end();
 console.log(`\n合计 ${pass + fail} 项，失败 ${fail} 项${skip ? `，另有 ${skip} 项因没有宾语记 SKIP` : ""}`);
 process.exit(fail ? 1 : 0);

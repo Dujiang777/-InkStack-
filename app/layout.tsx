@@ -6,6 +6,11 @@ import Shortcuts from "@/components/Shortcuts";
 import BackTop from "@/components/BackTop";
 import "./globals.css";
 
+// 根布局带着 Masthead，而 Masthead 每次渲染都要现取一次会话（no-store）——所以这个应用里
+// 没有可以在构建期预渲染的页。`next dev` 不预渲染，缺这一行只有 `npm run build` 会炸，
+// 且炸在第一个静态路由上（先是 /study，补完又是 Next 自己合成的 /_not-found）。
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "墨栈 InkStack · AI 原生博客平台",
   description: "博主有 AI 分身、读者能和文章对话、平台自己会运营的下一代博客平台。",
