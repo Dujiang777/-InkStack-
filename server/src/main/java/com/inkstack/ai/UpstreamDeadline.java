@@ -1,6 +1,6 @@
 package com.inkstack.ai;
 
-import java.io.InputStream;
+import java.io.Closeable;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -25,8 +25,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>语义是**整次交换的绝对截止**，不是"两次数据之间的空闲上限"——对齐 Node 的
  * {@code AbortSignal.timeout(60_000)}，那个信号同样是绝对的。要改成 idle 语义得先改判据。
+ *
+ * <p>要关的东西收成一个 {@link Closeable} 而不是写死一条流，因为引擎通道交给它的是
+ * "<b>关掉此刻所有在飞的上游流</b>"（一次交换有好几条，见
+ * {@link com.inkstack.agent.EngineDeadline}）：看门狗、先标记再关的顺序、{@code stalled} 标记
+ * 这些麻烦事只此一份，透传、SSE、引擎三处挂截止的地方共用同一个数字。
  */
-final class UpstreamDeadline implements AutoCloseable {
+public final class UpstreamDeadline implements AutoCloseable {
 
   /**
    * 全服务共用一个小的守护线程池就够：到点动作只有一次 {@code close()}，不碰业务数据。
@@ -52,10 +57,11 @@ final class UpstreamDeadline implements AutoCloseable {
   }
 
   /**
-   * 给这条上游流挂一个截止。{@code timeoutMs <= 0} = 不设限（这是留给运维的取舍口子：
-   * 关掉它退化的就是本文件开头那个"永久占住一个 worker"的行为，所以调用方把 0 拦在外面了）。
+   * 给这次上游交换挂一个截止，到点就 {@code close()} 交给它的那个东西。
+   * {@code timeoutMs <= 0} = 不设限（这是留给运维的取舍口子：关掉它退化的就是本文件开头
+   * 那个"永久占住一个 worker"的行为，所以调用方把 0 拦在外面了）。
    */
-  static UpstreamDeadline arm(InputStream upstream, long timeoutMs) {
+  public static UpstreamDeadline arm(Closeable upstream, long timeoutMs) {
     if (timeoutMs <= 0) {
       return new UpstreamDeadline(null, timeoutMs, new AtomicBoolean());
     }
@@ -72,12 +78,12 @@ final class UpstreamDeadline implements AutoCloseable {
   }
 
   /** 是不是被截止关掉的。读侧据此把"卡住"与"上游半路断了"分开说。 */
-  boolean stalled() {
+  public boolean stalled() {
     return fired.get();
   }
 
   /** 文案里那句"N 秒没有回音"由这里出，免得两处各写一个数字还写岔。 */
-  String seconds() {
+  public String seconds() {
     return String.valueOf(Math.max(1, Math.round(timeoutMs / 1000.0)));
   }
 

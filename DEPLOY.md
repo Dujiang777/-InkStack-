@@ -117,6 +117,8 @@ SERVER_PORT=3101 java -jar target/inkstack-server-0.1.0.jar
   ```
 
   `X-Backend: inkstack-java` 这一行是"请求真的落在 Java 上"的硬证据（本仓库的闸门也认它）。
+  访问日志里那个耗时数字的单位是**微秒**（`%D`，pattern 已标成 `us`）——按毫秒读会把一次
+  64 秒的请求看成 17.8 小时，而"这台服务被一次请求占住多久"正是排障时要算的那个数。
 - **3101 不要暴露到公网**：安全组/防火墙只放行 80/443，Java 只让 Next 在 127.0.0.1 上访问。
   它自己会写访问日志到 `server/logs/access_log.*`，排"这条请求到底落没落在 Java 上"时看它。
 - 上传目录必须和 Next 伺服的是**同一个**目录（派生脚本写成 `<仓库>/public/uploads`）。

@@ -12,6 +12,8 @@
 //      cite 是从「依据：《…》」抽出来的、切块宽度沿用 Python 的 max(1, len // 40)。
 //   ③ 钱还是只动一次，而且停在同一个时刻：探针拦住 → 上游 0 请求；上游 500 → 落演示档、零扣墨。
 //   ④ /api/ai/write 走引擎：提示词与 3000 字裁剪照原样、坏态落模板不扣墨。
+//   ⑤ 卡住的上游（P11）：一次引擎交换有一个**绝对**截止。这一条测的是上面四项都看不见的事——
+//      一次问答是**好几趟**模型往返（每轮工具调用一趟），"每趟各有一个读超时"不等于整串有界。
 //
 //   node scripts/agent-engine-check.mjs          跑完清场
 //   node scripts/agent-engine-check.mjs --keep   保留现场
@@ -25,9 +27,12 @@
 //            --inkstack.agent.deepseek-key= \
 //            --inkstack.agent.model.base-url=http://127.0.0.1:4702/v1 \
 //            --inkstack.agent.model.api-key=gate-fake-key \
-//            --inkstack.agent.model.name=deepseek-chat"
+//            --inkstack.agent.model.name=deepseek-chat \
+//            --inkstack.agent.stream-timeout-ms=2000"
 //      service-url 与 deepseek-key 必须留空：那样"引擎失败之后落到哪一档"才是确定的演示档，
 //      而不是去敲某台真服务或真大模型。model.api-key 是假的，base-url 指向本闸门自己的夹具。
+//      stream-timeout-ms 也要给短档：§6 那三档 stall 判的是"这一次请求自己在短时间内收干净"，
+//      停在默认 60 秒上判据就只是在等客户端掐线（判据红时会把这一句写在细节里）。
 //   ② DATABASE_URL 指向克隆库 inkstack_j：会真建文章、真扣墨、真写流水，跑完全部清掉。
 import fs from "node:fs";
 import http from "node:http";
@@ -80,7 +85,7 @@ const num = async (sql, params = []) => {
   return v === null || v === undefined ? 0 : Number(v);
 };
 
-async function call(method, url, body, cookie) {
+async function call(method, url, body, cookie, signal) {
   const h = {};
   if (cookie) h.cookie = cookie;
   let payload;
@@ -88,7 +93,7 @@ async function call(method, url, body, cookie) {
     h["content-type"] = "application/json";
     payload = typeof body === "string" ? body : JSON.stringify(body);
   }
-  const res = await fetch(JAVA + url, { method, headers: h, body: payload });
+  const res = await fetch(JAVA + url, { method, headers: h, body: payload, signal });
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* 非 JSON */ }
@@ -107,11 +112,11 @@ async function login(email, password) {
 }
 
 /** 流式读完一条 NDJSON：返回帧序列与"分了几块到达"。 */
-async function askStream(body, cookie) {
+async function askStream(body, cookie, signal) {
   const h = { "content-type": "application/json" };
   if (cookie) h.cookie = cookie;
   const res = await fetch(JAVA + "/api/agent/ask", {
-    method: "POST", headers: h, body: JSON.stringify(body),
+    method: "POST", headers: h, body: JSON.stringify(body), signal,
   });
   const contentType = res.headers.get("content-type") ?? "";
   if (!res.body || contentType.includes("application/json")) {
@@ -139,11 +144,36 @@ async function askStream(body, cookie) {
 }
 const streamed = (r) => r.frames.filter((f) => f.type === "delta").map((f) => f.text).join("");
 
+/**
+ * 带**客户端天花板**的计时（照闸门 14 那个姿势）。stall 档判的是"服务端到点自己收干净"，
+ * 而服务端根本不收时，一个不加天花板的判据不会红——它会把整道闸门一起挂在那儿。
+ * 判据必须能失败，不能只是不动，所以到点由客户端掐线，并把 hitCeiling 交回判据去说"是哪一边没收"。
+ */
+const CEILING_MS = 25_000;
+async function timed(run, ceiling = CEILING_MS) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ceiling);
+  const t0 = Date.now();
+  try {
+    const r = await run(ac.signal);
+    return { ...r, ms: Date.now() - t0, hitCeiling: false };
+  } catch (neverEnded) {
+    return {
+      status: 0, json: null, frames: [], text: "", contentType: "",
+      ms: Date.now() - t0, hitCeiling: true,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+/** 演示档那几句话：落进它们才算"引擎没产出、转了另一条通道"，而不是把截断当成品发出去。 */
+const DEMO_TEXT = "没有足够依据";
+
 /* ==================== OpenAI 兼容夹具 ==================== */
 
 const modelHits = [];
-let askMode = "react";   // react | final | error | blank
-let writeMode = "ok";    // ok | error
+let askMode = "react";   // react | final | error | blank | loop | drip
+let writeMode = "ok";    // ok | error | drip
 let reactRound = 0;
 const FINAL_TEXT = "因为规范 §2.2.4 要求回调排在平台代码之外。\n依据：《手写 Promise》第 2 节「then 的微任务语义」";
 
@@ -154,6 +184,41 @@ function completion(message, finish) {
     choices: [{ index: 0, message, finish_reason: finish ?? "stop" }],
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
   });
+}
+
+/** 一轮"我要调工具"的应答。loop 档把它当成**永远**的应答，ReAct 那一圈就收不口了。 */
+function toolCallTurn() {
+  return completion({
+    role: "assistant", content: null,
+    tool_calls: [{
+      id: "call_fx_1", type: "function",
+      function: { name: "searchBlogArticles", arguments: JSON.stringify({ question: TOOL_QUERY }) },
+    }],
+  }, "tool_calls");
+}
+
+/**
+ * 响应头先到、正文慢慢吐。这一档是专门用来打穿"每次读都有一个超时"那种假截止的：
+ * 每块的间隔小于超时值，那个计时器就永远被重置，服务端可以在同一次往返里被拖着不走。
+ */
+function dripBody(res, text, pieces = 40, everyMs = 1_200) {
+  res.writeHead(200, { "content-type": "application/json" });
+  const step = Math.max(1, Math.ceil(text.length / pieces));
+  let i = 0;
+  const timer = setInterval(() => {
+    // 截止会在两秒后就把它那条流关掉，之后每一块都是往死连接上写：
+    // 先看 writable 再 try 一层，否则这些"没人收的块"会反手把闸门进程弄崩
+    if (!res.writable) { clearInterval(timer); return; }
+    if (i >= text.length) { clearInterval(timer); res.end(); return; }
+    try {
+      res.write(text.slice(i, i + step));
+    } catch (clientGone) {
+      clearInterval(timer);
+      return;
+    }
+    i += step;
+  }, everyMs);
+  res.on("close", () => clearInterval(timer));
 }
 
 const server = http.createServer((req, res) => {
@@ -168,7 +233,12 @@ const server = http.createServer((req, res) => {
   req.on("end", async () => {
     let parsed = null;
     try { parsed = JSON.parse(raw); } catch { parsed = { unparsable: raw.slice(0, 60) }; }
-    modelHits.push(parsed);
+    // loop 档一秒能敲几十次模型，而每次的 payload 都比上次大（工具结果一路往 history 里堆，
+    // 实测到 2MB/次）。全存下来这道闸门自己先吞掉几百兆，所以只留前 8 轮的全量、其余只记账数。
+    // auth 一起记下：P11 把引擎底下的 HTTP 客户端整层换掉了，凭据头还在不在得由实测说。
+    modelHits.push(modelHits.length < 8
+      ? Object.assign({ auth: req.headers.authorization ?? "" }, parsed)
+      : { countedOnly: true });
     const isWrite = String(parsed?.messages?.[0]?.content ?? "").includes("写作助手");
     if (isWrite) {
       if (writeMode === "error") {
@@ -176,8 +246,13 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ error: "夹具模拟写作通道 500" }));
         return;
       }
+      const wrote = completion({ role: "assistant", content: "夹具生成的润色结果" });
+      if (writeMode === "drip") {
+        dripBody(res, wrote);
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(completion({ role: "assistant", content: "夹具生成的润色结果" }));
+      res.end(wrote);
       return;
     }
     if (askMode === "error") {
@@ -190,17 +265,20 @@ const server = http.createServer((req, res) => {
       res.end(completion({ role: "assistant", content: "   \n\t " }));
       return;
     }
+    if (askMode === "loop") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(toolCallTurn());
+      return;
+    }
+    if (askMode === "drip") {
+      dripBody(res, completion({ role: "assistant", content: FINAL_TEXT }));
+      return;
+    }
     const wantTool = askMode === "react" && reactRound === 0;
     if (wantTool) {
       reactRound++;
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(completion({
-        role: "assistant", content: null,
-        tool_calls: [{
-          id: "call_fx_1", type: "function",
-          function: { name: "searchBlogArticles", arguments: JSON.stringify({ question: TOOL_QUERY }) },
-        }],
-      }, "tool_calls"));
+      res.end(toolCallTurn());
       return;
     }
     res.writeHead(200, { "content-type": "application/json" });
@@ -333,6 +411,12 @@ async function suit() {
     && String(modelHits[0].messages?.[0]?.content).includes("searchBlogArticles"),
     "模型先拿到分身 system prompt 与工具清单，第二轮才带着工具结果继续——ReAct 那一圈没有变成一次直连",
     () => `命中 ${modelHits.length} 次，工具消息 ${toolMessages.length} 条`);
+  check(modelHits.length >= 2 && modelHits.every((h) => String(h.auth).startsWith("Bearer ")
+      && String(h.auth).includes("gate-fake-key")),
+    "换成 JDK 那个请求工厂之后，凭据头照样发到上游（这一期把引擎底下的 HTTP 客户端整层换掉了，"
+    + "而 JDK HttpClient 自带一份受限头名单——这件事只能实测，不能凭记忆说\"应该不影响\"）",
+    () => `第一轮头=${JSON.stringify(modelHits[0]?.auth)} 缺头的轮次=`
+      + `${modelHits.filter((h) => !String(h.auth).startsWith("Bearer ")).length}`);
   // Python 版那条**缺防护**的 SQL 原样跑一遍（同一句查询词）：它查出来的就是"照旧实现会被喂进语料的东西"。
   // 少了这一步，下面的"引擎没发给模型"在任何时候都成立——检索集里本来就没有它，测的是空气。
   const weakRows = await many(
@@ -452,16 +536,84 @@ async function suit() {
     () => JSON.stringify(w2.json).slice(0, 120));
   writeMode = "ok";
 
-  /* ---------- 6 收尾账实 ---------- */
-  console.log("\n## 6 账实：问答 5 点、写作按档位，每一次扣墨都对得上");
+  /* ---------- 6 卡住的上游（P11）：一次交换有一个绝对截止，不是每次往返各有一个 ---------- */
+  console.log("\n## 6 转不完的工具循环与拖不完的正文：同一截止都得自己收口");
+  // 这一节测的是前面所有项都看不见的一件事：引擎那条通道的超时从前挂在 SimpleClientHttpRequestFactory
+  // 上，那是**每次读**的超时，而一次问答有**好几次**读（每轮工具调用一趟往返）。
+  // 前提里那一台必须用 --inkstack.agent.stream-timeout-ms=2000 起，红在这里通常就是没起短档。
+  askMode = "loop";
+  modelHits.length = 0;
+  const ledBeforeLoop = await ledgerRows();
+  const balBeforeLoop = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
+  const loopR = await timed((s) => askStream({ question: "引擎只回工具调用这一轮" }, me, s));
+  check(!loopR.hitCeiling && loopR.status === 200 && loopR.ms < 12_000,
+    "模型每轮都只回 tool_calls 时，这一次请求**自己在短档内收干净**——以前它是无界的："
+    + "internalCall 执行完工具就递归调用自己，Spring AI 1.1.5 里没有任何迭代上限"
+    + "（本机实测一次提问在服务端跑了 200.1 秒、2192 轮还没停）。"
+    + "红在这里通常是那一台没按前提用 --inkstack.agent.stream-timeout-ms=2000 起，还停在默认 60 秒档",
+    () => `用时=${loopR.ms}ms/掐线=${loopR.hitCeiling} 模型被敲=${modelHits.length} 次`);
+  check(modelHits.length >= 2,
+    "这一档**确实打在工具循环上**（截止之前至少转了两轮）——计时判据必须配一个宾语判据："
+    + "万一截止根本没挂上而夹具一轮就收口，上一条照样绿而它测的不是那件事（闸门 14 的透传档栽过一次）",
+    () => `模型被敲 ${modelHits.length} 次`);
+  const balAfterLoop = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
+  check(balAfterLoop === balBeforeLoop && (await ledgerRows()) === ledBeforeLoop
+    && streamed(loopR).includes(DEMO_TEXT) && loopR.frames.at(-1)?.type === "cite",
+    "被截止掐断的引擎算没产出：转演示档、零扣墨，与 502/空白是同一个出口——"
+    + "读者拿到的是完整的一份演示回答，不是半截引擎回答",
+    () => `余额Δ=${balAfterLoop - balBeforeLoop} 拼回=${JSON.stringify(streamed(loopR).slice(0, 18))}`);
+
+  askMode = "drip";
+  modelHits.length = 0;
+  const ledBeforeDrip = await ledgerRows();
+  const balBeforeDrip = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
+  const dripR = await timed((s) => askStream({ question: "正文体一路拖的这一轮" }, me, s));
+  const dripCalls = modelHits.length;
+  const balAfterDrip = await num("SELECT points_balance FROM users WHERE id = ?", [uid]);
+  check(!dripR.hitCeiling && dripR.status === 200 && dripR.ms < 12_000 && dripCalls === 1,
+    "响应头先到、正文每 1.2 秒吐一块：同样在短档内收干净，而且整个这一档只敲了一次模型。"
+    + "它打的是**单次往返**那一半——每次读各有一个超时不等于有界"
+    + "（同一档下旧实现实测 150 秒还在正常完成，按 59 秒的节奏滴就是永远）",
+    () => `用时=${dripR.ms}ms/掐线=${dripR.hitCeiling} 模型被敲=${dripCalls} 次`);
+  const ledAfterDrip = await ledgerRows();
+  check(ledAfterDrip === ledBeforeDrip && balAfterDrip === balBeforeDrip
+    && streamed(dripR).includes(DEMO_TEXT),
+    "拖死在正文上的这一次也是零扣墨、落演示档（与上一档同一个出口，两半各测一次）",
+    () => `余额Δ=${balAfterDrip - balBeforeDrip} 流水Δ=${ledAfterDrip - ledBeforeDrip}`);
+
+  askMode = "react";
+  reactRound = 0;
+  const recover = await timed((s) => askStream({ question: "为什么 then 要进微任务？", author: "陈屿" }, me, s));
+  check(recover.status === 200 && recover.frames.at(-1)?.type === "cite" && recover.ms < 8_000
+    && streamed(recover) === FINAL_TEXT,
+    "掐掉过两条卡住的上游之后，同一台服务下一轮照常出完整回答（这一条测的是那个登记在 ThreadLocal 上的"
+    + "截止被摘干净了：Tomcat 的工作线程是池里复用的，留着的就是一个会提前掐死下一个读者上游的僵尸截止）",
+    () => `状态=${recover.status} 用时=${recover.ms}ms 拼回=${JSON.stringify(streamed(recover).slice(0, 24))}`);
+
+  writeMode = "drip";
+  modelHits.length = 0;
+  const ledBeforeWriteDrip = await ledgerRows();
+  const dripW = await timed((s) => call("POST", "/api/ai/write", { mode: "polish", draft: "拖正文轮" }, me, s));
+  const writeCalls = modelHits.length;
+  check(!dripW.hitCeiling && dripW.status === 200 && dripW.ms < 12_000 && writeCalls === 1
+    && dripW.json?.fallback === true && dripW.json?.pointsNote === "模板兜底 · 本次不扣墨水"
+    && (await ledgerRows()) === ledBeforeWriteDrip,
+    "写作通道同式：那一次生成交换也被同一个旋钮管着（它现在只有一趟往返，挂截止是为了"
+    + "让这个旋钮对引擎的两次调用都算数，而不是只问答那一次）",
+    () => `用时=${dripW.ms}ms/掐线=${dripW.hitCeiling} 模型被敲=${writeCalls} 次 note=${JSON.stringify(dripW.json?.pointsNote)}`);
+  writeMode = "ok";
+
+  /* ---------- 7 收尾账实 ---------- */
+  console.log("\n## 7 账实：问答 5 点、写作按档位，每一次扣墨都对得上");
   const sums = await only(`SELECT
       IFNULL(SUM(CASE WHEN reason = '分身问答' THEN -delta ELSE 0 END),0) AS qa,
       COUNT(CASE WHEN reason = '分身问答' THEN 1 END) AS qaRows,
       IFNULL(SUM(CASE WHEN reason LIKE 'AI写作·%' THEN -delta ELSE 0 END),0) AS wr,
       COUNT(CASE WHEN reason LIKE 'AI写作·%' THEN 1 END) AS wrRows
     FROM point_ledger WHERE user_id = ? AND id > ?`, [uid, mark]);
-  check(Number(sums?.qaRows) === 1 && Number(sums?.qa) === QA_COST
+  check(Number(sums?.qaRows) === 2 && Number(sums?.qa) === QA_COST * 2
     && Number(sums?.wrRows) === 1 && Number(sums?.wr) === 10,
-    "全场扣费：问答只有一轮成功（穷轮/坏态/游客/空问都不算）× 5 点 + 写作一轮 10 点，别的都不记账",
+    "全场扣费：问答两轮成功（§1 那轮 + §6 的复原轮）× 5 点 + 写作一轮 10 点，别的都不记账"
+    + "（穷轮/502/空白/游客/空问，以及 §6 那三次被截断的，全都不该在这里出现）",
     () => JSON.stringify(sums));
 }
